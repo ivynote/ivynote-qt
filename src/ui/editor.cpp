@@ -374,8 +374,8 @@ MarkdownEditor::TableGeometry MarkdownEditor::tableGeometry(const QTextBlock &st
     g.cols = int(std::max<qsizetype>(1, head.size()));
     g.align = md::tableAlignments(rows[1]);
     while (g.align.size() < g.cols) g.align << int(Qt::AlignLeft);
-    const QFontMetricsF bold(Theme::uiFont(m_px - 1, QFont::DemiBold));
-    const QFontMetricsF plain(Theme::uiFont(m_px - 1));
+    const QFontMetricsF bold(Theme::uiFont(m_px - 2, QFont::Medium));
+    const QFontMetricsF plain(Theme::uiFont(m_px - 2));
     const qreal pad = 12;
     QList<qreal> w(g.cols, 40);
     for (int i = 0; i < rows.size(); ++i) {
@@ -412,24 +412,17 @@ void MarkdownEditor::paintTableRow(QPainter &p, const QTextBlock &block, const Q
     const qreal top = std::round(r.top());
     const qreal bottom = std::round(r.bottom());
     const qreal right = left + g.x.last();
-    const QColor grid = Theme::dark() ? k.line.lighter(125) : k.line.darker(104);
+    // As on the web: rules between rows, a quiet header, no grid.
+    const QColor rule = Theme::dark() ? k.line.lighter(125) : k.line;
     if (info->tableRow == 1) {
-        // The delimiter: a thin band that closes the header.
-        p.fillRect(QRectF(left, top, right - left, bottom - top), k.sunken);
-        p.setPen(QPen(grid, 1));
-        p.drawLine(QPointF(left, bottom), QPointF(right, bottom));
-        for (qreal x : g.x) p.drawLine(QPointF(left + x, top), QPointF(left + x, bottom));
         p.restore();
         return;
     }
-    if (info->tableRow == 0) p.fillRect(QRectF(left, top, right - left, bottom - top), k.sunken);
-    p.setPen(QPen(grid, 1));
-    if (info->tableRow == 0) p.drawLine(QPointF(left, top), QPointF(right, top));
+    p.setPen(QPen(rule, 1));
     p.drawLine(QPointF(left, bottom), QPointF(right, bottom));
-    for (qreal x : g.x) p.drawLine(QPointF(left + x, top), QPointF(left + x, bottom));
     const QStringList cells = md::tableCells(block.text());
-    p.setFont(Theme::uiFont(m_px - 1, info->tableRow == 0 ? QFont::DemiBold : QFont::Normal));
-    p.setPen(info->tableRow == 0 ? k.ink : k.ink2);
+    p.setFont(Theme::uiFont(m_px - 2, info->tableRow == 0 ? QFont::Medium : QFont::Normal));
+    p.setPen(info->tableRow == 0 ? k.muted : k.ink);
     const QFontMetricsF fm(p.font());
     for (int c = 0; c < g.cols && c < cells.size(); ++c) {
         const QRectF cell(left + g.x[c] + 12, top, g.x[c + 1] - g.x[c] - 24, bottom - top);

@@ -11,6 +11,9 @@ struct RenderOptions {
     std::function<QString(const QString &id)> resourceKind;    // image/video/audio/file or ""
     std::function<QString(const QString &id)> resourceName;
     bool interactiveTasks = false;
+    // Markup for MarkdownView: task lists as checkbox rows, padded code
+    // blocks, the quote bar. Plain HTML (for the clipboard) leaves it off.
+    bool forView = false;
 };
 
 QString renderMarkdown(const QString &markdown, const RenderOptions &opts = {});
@@ -20,3 +23,4 @@ QString renderMarkdown(const QString &markdown, const RenderOptions &opts = {});
 //   ivy://note/<id>, ivy://res/<id>
 //   ivy-task:<n>
 bool isSafeExternalUrl(const QString &url);
+

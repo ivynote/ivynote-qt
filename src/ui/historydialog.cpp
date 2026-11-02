@@ -1,5 +1,7 @@
 #include "ui/historydialog.h"
 
+#include "ui/markdownview.h"
+
 #include "core/format.h"
 #include "core/i18n.h"
 #include "core/markdown.h"
@@ -50,8 +52,8 @@ HistoryDialog::HistoryDialog(Session *session, const QString &noteId, QWidget *p
     m_mode->addTab(T("源码"));
     m_mode->setDrawBase(false);
     rcol->addWidget(m_mode, 0, Qt::AlignLeft);
-    m_view = new QTextBrowser(right);
-    m_view->setOpenLinks(false);
+    m_view = new MarkdownView(right);
+    if (session) m_view->image = [s = QPointer<Session>(session)](const QString &id) { return s ? s->image(id, false) : QImage(); };
     rcol->addWidget(m_view, 1);
     split->addWidget(m_list);
     split->addWidget(right);
@@ -130,10 +132,11 @@ void HistoryDialog::render() {
         m_view->setFont(Theme::mono(13));
         m_view->setPlainText(m_body);
     } else {
+        m_view->setBaseSize(15);
         m_view->setFont(Theme::uiFont(15));
         RenderOptions opts;
         if (m_session) opts.resourceKind = [s = m_session](const QString &id) { return s ? s->engine()->attachmentKind(id) : QString(); };
-        m_view->setHtml(QStringLiteral("<h1>%1</h1>").arg(m_title.toHtmlEscaped()) + renderMarkdown(m_body, opts));
+        m_view->setMarkdown(m_body, opts, m_title.isEmpty() ? T("无标题") : m_title);
     }
 }
 

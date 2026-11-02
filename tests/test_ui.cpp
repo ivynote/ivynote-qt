@@ -173,6 +173,24 @@ private slots:
         QVERIFY(html.contains(QLatin1String("<p>Intro</p>")));
     }
 
+    void viewTaskLists() {
+        RenderOptions o;
+        o.forView = true;
+        o.interactiveTasks = true;
+        const QString html = renderMarkdown(QStringLiteral("- [ ] a\n- [x] b\n  - [ ] c\n- plain\n\n---\n\n```\nx\n```"), o);
+        // Rows instead of list items: no bullet next to the box.
+        QVERIFY(!html.contains(QLatin1String("<li")));
+        QVERIFY(html.contains(QLatin1String("ivy-check:0")));
+        QVERIFY(html.contains(QLatin1String("ivy-check:1")));
+        QVERIFY(html.contains(QLatin1String("ivy-task:2")));
+        QVERIFY(html.contains(QLatin1String("class=\"td\""))); // done item muted and struck
+        QVERIFY(html.contains(QLatin1String("&middot;")));
+        QVERIFY(html.contains(QLatin1String("<pre><code>x</code></pre>")));
+        // Plain HTML for the clipboard keeps ordinary lists.
+        QVERIFY(renderMarkdown(QStringLiteral("- [x] b")).contains(QLatin1String("<li")));
+        QVERIFY(renderMarkdown(QStringLiteral("- [x] b")).contains(QStringLiteral("☑")));
+    }
+
     void liveTableActivatesWhole() {
         MarkdownEditor e;
         e.resize(800, 600);

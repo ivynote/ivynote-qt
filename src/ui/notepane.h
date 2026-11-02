@@ -16,7 +16,7 @@ class QLabel;
 class QLineEdit;
 class QListWidget;
 class QSplitter;
-class QTextBrowser;
+class MarkdownView;
 class QToolButton;
 class QHBoxLayout;
 class QStackedWidget;
@@ -96,7 +96,7 @@ private:
     FlowRow *m_tagsRow;
     QSplitter *m_split;
     MarkdownEditor *m_editor;
-    QTextBrowser *m_preview;
+    MarkdownView *m_preview;
     QListWidget *m_outline;
     QToolButton *m_backlinksButton;
     QListWidget *m_backlinks;

@@ -9,6 +9,7 @@
 #include "ui/editor.h"
 #include "ui/highlighter.h"
 #include "ui/icons.h"
+#include "ui/markdownview.h"
 #include "ui/render.h"
 #include "ui/theme.h"
 #include "ui/toast.h"
@@ -62,55 +63,6 @@ private:
     QHBoxLayout *m_layout;
 };
 
-namespace {
-
-// Rendered preview that loads ivy://res images from the vault.
-class Preview : public QTextBrowser {
-public:
-    explicit Preview(QWidget *parent) : QTextBrowser(parent) {
-        setOpenLinks(false);
-        setOpenExternalLinks(false);
-        setFrameShape(QFrame::NoFrame);
-        document()->setDocumentMargin(24);
-    }
-    std::function<QImage(const QString &id)> image;
-
-protected:
-    QVariant loadResource(int type, const QUrl &name) override {
-        if (type == QTextDocument::ImageResource && name.scheme() == QLatin1String("ivy") && name.host() == QLatin1String("res")) {
-            const QString id = name.path().mid(1);
-            QImage img = image ? image(id) : QImage();
-            if (img.isNull()) {
-                img = QImage(320, 120, QImage::Format_ARGB32_Premultiplied);
-                img.fill(Theme::t().sunken);
-            }
-            const int maxW = std::max(200, viewport()->width() - 60);
-            if (img.width() > maxW) img = img.scaledToWidth(maxW, Qt::SmoothTransformation);
-            return img;
-        }
-        // Nothing else is fetched: no remote images, no file access.
-        return {};
-    }
-};
-
-QString previewCss() {
-    const Tokens &k = Theme::t();
-    return QStringLiteral(
-               "body{color:%1;} h1,h2,h3,h4{font-family:'%2';color:%1;font-weight:600;}"
-               "h1{font-size:1.6em;} h2{font-size:1.3em;} h3{font-size:1.1em;}"
-               "a{color:%3;text-decoration:none;} a.missing{color:%4;}"
-               "code{font-family:'%5';background-color:%6;} pre{font-family:'%5';background-color:%6;padding:10px;}"
-               "blockquote{color:%7;font-family:'%2';margin-left:12px;padding-left:12px;border-left:2px solid %3;}"
-               "table{border-collapse:collapse;margin-top:6px;margin-bottom:6px;} td,th{padding:5px 12px;border:1px solid %8;}"
-               "th{background-color:%10;font-weight:600;}"
-               ".mark{background-color:%9;} .task{color:%3;font-size:1.1em;} .file{color:%3;}"
-               "hr{color:%8;}")
-        .arg(k.ink.name(), Theme::serif(16).families().value(0, QStringLiteral("serif")), k.ivy.name(), k.muted.name(),
-             Theme::mono(13).families().value(0, QStringLiteral("monospace")), k.codeBg.name(), k.ink2.name(), k.line.name(),
-             Theme::alpha(k.warn, 0.25).name(QColor::HexArgb), k.sunken.name());
-}
-
-} // namespace
 
 NotePane::NotePane(QWidget *parent) : QWidget(parent) {
     auto *col = new QVBoxLayout(this);
@@ -219,7 +171,7 @@ NotePane::NotePane(QWidget *parent) : QWidget(parent) {
     m_split->setChildrenCollapsible(false);
     m_editor = new MarkdownEditor(m_split);
     passAppShortcuts(m_editor);
-    m_preview = new Preview(m_split);
+    m_preview = new MarkdownView(m_split);
     m_split->addWidget(m_editor);
     m_split->addWidget(m_preview);
     m_preview->hide();
@@ -341,13 +293,12 @@ NotePane::NotePane(QWidget *parent) : QWidget(parent) {
         tp.setColor(QPalette::Base, k.surface);
         tp.setColor(QPalette::Text, k.ink);
         m_title->setPalette(tp);
-        for (QWidget *w : {static_cast<QWidget *>(m_outline), static_cast<QWidget *>(m_backlinks), static_cast<QWidget *>(m_preview)}) {
+        for (QWidget *w : {static_cast<QWidget *>(m_outline), static_cast<QWidget *>(m_backlinks)}) {
             QPalette lp = w->palette();
             lp.setColor(QPalette::Base, k.surface);
             lp.setColor(QPalette::Text, k.ink2);
             w->setPalette(lp);
         }
-        m_preview->document()->setDefaultStyleSheet(previewCss());
         m_backlinksButton->setIcon(icons::icon(QStringLiteral("backlink"), k.muted));
         refresh();
         refreshPreview();
@@ -395,7 +346,7 @@ void NotePane::setSession(Session *session) {
     };
     m_editor->attachmentKind = [s](const QString &id) { return s ? s->engine()->attachmentKind(id) : QString(); };
     m_editor->wikiExists = [this](const QString &t) { return !resolveTitle(t).isEmpty(); };
-    static_cast<Preview *>(m_preview)->image = [s](const QString &id) { return s ? s->image(id, false) : QImage(); };
+    m_preview->image = [s](const QString &id) { return s ? s->image(id, false) : QImage(); };
     refreshIndex();
     setNote(QString());
 }
@@ -637,10 +588,8 @@ void NotePane::refreshPreview() {
     opts.resourceKind = [this](const QString &id) { return m_engine->attachmentKind(id); };
     opts.resourceName = [this](const QString &id) { return m_engine->attachmentName(id); };
     opts.interactiveTasks = !m_editor->isReadOnly();
-    const int scroll = m_preview->verticalScrollBar()->value();
     m_syncing = true;
-    m_preview->setHtml(renderMarkdown(m_editor->markdown(), opts));
-    m_preview->verticalScrollBar()->setValue(scroll);
+    m_preview->setMarkdown(m_editor->markdown(), opts);
     m_syncing = false;
     m_scrollMap.clear();
     syncScroll(true);
@@ -758,7 +707,7 @@ void NotePane::setEditorMode(EditorMode mode) {
 
 void NotePane::setFontSize(int px) {
     m_editor->setFontSize(px);
-    m_preview->setFont(Theme::uiFont(px));
+    m_preview->setBaseSize(px);
 }
 
 void NotePane::setShelfCollapsed(bool collapsed) {
