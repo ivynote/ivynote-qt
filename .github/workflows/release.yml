@@ -152,6 +152,12 @@ jobs:
           LD_LIBRARY_PATH: ${{ env.DEPS }}/lib
         run: ctest --test-dir build --output-on-failure
 
+      # linuxdeploy-plugin-qt bundles every SQL driver it finds, and the
+      # MySQL/ODBC/PostgreSQL/Mimer ones need client libraries we neither have
+      # nor want. The app only uses SQLite.
+      - name: Keep only the SQLite driver
+        run: find "$QT_ROOT_DIR/plugins/sqldrivers" -name '*.so' ! -name 'libqsqlite.so' -print -delete
+
       - name: Packaging tools
         run: |
           mkdir -p tools
@@ -272,6 +278,8 @@ jobs:
           windeployqt --release --no-translations --no-system-d3d-compiler --no-opengl-sw `
             --no-compiler-runtime $stage\ivynote.exe
           if ($LASTEXITCODE) { exit $LASTEXITCODE }
+          # Only SQLite is used; the other SQL drivers need client DLLs we don't ship.
+          Get-ChildItem "$stage\sqldrivers" -Filter *.dll | Where-Object Name -ne 'qsqlite.dll' | Remove-Item
           Get-ChildItem $stage -Recurse | Select-Object -ExpandProperty FullName
 
       # The staged app must find all its DLLs: it saves a screenshot and quits.

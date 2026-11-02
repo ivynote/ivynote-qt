@@ -47,7 +47,8 @@ int main(int argc, char *argv[]) {
     w.show();
     w.start();
     if (const QString shot = qEnvironmentVariable("IVY_SCREENSHOT"); !shot.isEmpty()) {
-        QTimer::singleShot(qEnvironmentVariableIntValue("IVY_SCREENSHOT_DELAY") ?: 2500, &app, [&w, shot] {
+        const int delay = qEnvironmentVariableIntValue("IVY_SCREENSHOT_DELAY");
+        QTimer::singleShot(delay > 0 ? delay : 2500, &app, [&w, shot] {
             w.grab().save(shot);
             QApplication::quit();
         });
