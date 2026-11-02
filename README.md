@@ -47,6 +47,17 @@ Linux 与 Windows 的原生客户端，基于 Qt 6 Widgets。本地优先：打�
 
 未做（按指南属 P1/P2，可后补）：媒体库页面、AI 问答、关系图、API 令牌与备份配置（设置中引导到网页版）、视频/音频内嵌播放（目前用系统播放器打开）。
 
+## 安装
+
+在 [Releases](https://github.com/ivynote/ivynote-qt/releases) 下载最新版本：
+
+- **Windows 10/11**：`Ivynote-x.y.z-windows-x64-setup.exe`，双击安装（默认装到当前用户，不需要管理员；向导里可选“为所有用户安装”）。升级时直接安装新版本，数据不受影响。不想安装可以用 `…-portable.zip`，解压后运行 `ivynote.exe`。安装包暂未签名，SmartScreen 提示时点“更多信息 → 仍要运行”。
+- **Linux x86_64**：`Ivynote-x.y.z-x86_64.AppImage`，加执行权限后双击或在终端运行：
+  ```bash
+  chmod +x Ivynote-*.AppImage && ./Ivynote-*.AppImage
+  ```
+  单文件、自带 Qt，不依赖发行版的 Qt 版本；需要 glibc ≥ 2.35（Ubuntu 22.04、Debian 12、Fedora 36 及更新），不需要 libfuse2。内置 fcitx5 与 ibus 输入法插件。想加入应用菜单、自动更新，用 [Gear Lever](https://flathub.org/apps/it.mijorus.gearlever) 或 AppImageLauncher 打开即可（AppImage 内嵌了更新信息）。
+
 ## 构建
 
 依赖：Qt ≥ 6.8（Core、Gui、Widgets、Network、Sql、Svg、Concurrent，测试另需 Test）、[QtKeychain](https://github.com/frankosterfeld/qtkeychain)（Qt 6 版）、libsodium、md4c、CMake ≥ 3.21。
@@ -81,6 +92,30 @@ vcpkg install qtbase qtsvg qtkeychain-qt6 libsodium md4c --triplet x64-windows
 cmake -S . -B build -G Ninja -DCMAKE_BUILD_TYPE=Release -DCMAKE_TOOLCHAIN_FILE=$env:VCPKG_ROOT/scripts/buildsystems/vcpkg.cmake
 cmake --build build
 windeployqt build\ivynote.exe
+```
+
+安装包用 [Inno Setup](https://jrsoftware.org/isinfo.php) 生成，脚本在 `packaging/windows/ivynote.iss`，CI 中的完整步骤见 `.github/workflows/release.yml`。
+
+## 发布
+
+推一个 `vX.Y.Z` 标签即可，其余由 `.github/workflows/release.yml` 完成：
+
+```bash
+git tag v0.2.0
+git push origin v0.2.0
+```
+
+1. 版本号取自标签（`v0.2.0` → 应用内显示 `0.2.0`），不需要先改 `CMakeLists.txt`；带后缀的标签（`v0.2.0-beta.1`）发布为预发行版。
+2. 并行构建：Linux（Ubuntu 22.04 + Qt 6.8 LTS，跑全部测试，打 AppImage）、Windows（MSVC + Qt 6.8 LTS，打安装包和便携 zip）。两边都会实际启动打包好的程序截一张图，确认依赖齐全。
+3. 全部成功后才创建 Release：上传安装包、AppImage（及 `.zsync` 增量更新文件）、`SHA256SUMS.txt`；说明 = `packaging/release-notes.md` 的下载说明 + 自上个标签以来合并的 PR 列表（按 `.github/release.yml` 里的标签分组）。任何一步失败都不会产生半成品 Release；修好后删掉标签重推，或直接重跑失败的 workflow。
+
+改动打包相关文件的 PR 会跑同样的构建（不发布），产物在 workflow 的 Artifacts 里，可下载试装。
+
+本地打 AppImage（需要 [linuxdeploy](https://github.com/linuxdeploy/linuxdeploy)、linuxdeploy-plugin-qt、[appimagetool](https://github.com/AppImage/appimagetool) 在 `PATH` 上）：
+
+```bash
+make build
+packaging/linux/build-appimage.sh build 0.2.0 dist
 ```
 
 ## 测试

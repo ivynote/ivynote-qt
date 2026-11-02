@@ -1,0 +1,353 @@
+# Build Linux/Windows packages; on a vX.Y.Z tag also publish a GitHub Release.
+#
+#   git tag v0.2.0 && git push origin v0.2.0
+#
+# The tag is the only input: the app version comes from it, the release notes
+# are generated from the PRs merged since the previous tag, and the release is
+# published only after every package built (and the tests passed).
+# Tags with a suffix (v0.2.0-beta.1) become pre-releases.
+#
+# Pull requests touching packaging and manual runs build the packages as
+# workflow artifacts without releasing anything.
+name: Release
+
+on:
+  push:
+    tags: ["v*.*.*"]
+  pull_request:
+    paths:
+      - ".github/workflows/release.yml"
+      - "packaging/**"
+      - "CMakeLists.txt"
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: release-${{ github.ref }}
+  cancel-in-progress: ${{ github.event_name == 'pull_request' }}
+
+env:
+  QT_VERSION: "6.8.3"
+  QTKEYCHAIN_VERSION: "0.15.0"
+  FCITX5_QT_VERSION: "5.1.9"
+
+jobs:
+  meta:
+    runs-on: ubuntu-latest
+    outputs:
+      version: ${{ steps.v.outputs.version }}
+      numeric: ${{ steps.v.outputs.numeric }}
+      prerelease: ${{ steps.v.outputs.prerelease }}
+      release: ${{ steps.v.outputs.release }}
+    steps:
+      - uses: actions/checkout@v4
+      - id: v
+        run: |
+          if [[ $GITHUB_REF == refs/tags/v* ]]; then
+            version=${GITHUB_REF_NAME#v}
+            if [[ ! $version =~ ^[0-9]+\.[0-9]+\.[0-9]+(-[0-9A-Za-z.]+)?$ ]]; then
+              echo "::error::tag $GITHUB_REF_NAME is not vMAJOR.MINOR.PATCH[-suffix]"; exit 1
+            fi
+            release=true
+          else
+            base=$(sed -nE 's/^project\(ivynote-qt VERSION ([0-9.]+).*/\1/p' CMakeLists.txt)
+            version="$base-dev.${GITHUB_SHA::7}"
+            release=false
+          fi
+          numeric=${version%%-*}
+          [[ $version == *-* ]] && prerelease=true || prerelease=false
+          {
+            echo "version=$version"
+            echo "numeric=$numeric"
+            echo "prerelease=$prerelease"
+            echo "release=$release"
+          } >> "$GITHUB_OUTPUT"
+          echo "version $version (release=$release, prerelease=$prerelease)"
+
+  linux:
+    needs: meta
+    # Oldest supported runner: the AppImage runs on glibc >= this one's (2.35).
+    runs-on: ubuntu-22.04
+    env:
+      VERSION: ${{ needs.meta.outputs.version }}
+      DEPS: ${{ github.workspace }}/deps
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: System packages
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y --no-install-recommends \
+            ninja-build patchelf libsodium-dev libmd4c-dev libmd4c-html0-dev \
+            libsecret-1-dev libgl1-mesa-dev libegl1 libfontconfig1 libdbus-1-3 \
+            libxkbcommon-dev libxkbcommon-x11-0 libxcb1-dev libxcb-cursor0 \
+            libxcb-icccm4 libxcb-image0 libxcb-keysyms1 libxcb-randr0 \
+            libxcb-render-util0 libxcb-shape0 libxcb-xinerama0 libxcb-xkb1 \
+            extra-cmake-modules gettext
+
+      - name: Qt
+        uses: jurplel/install-qt-action@v4
+        with:
+          version: ${{ env.QT_VERSION }}
+          host: linux
+          target: desktop
+          arch: linux_gcc_64
+          cache: true
+
+      - name: Cache built dependencies
+        id: deps-cache
+        uses: actions/cache@v4
+        with:
+          path: deps
+          key: linux-deps-qt${{ env.QT_VERSION }}-keychain${{ env.QTKEYCHAIN_VERSION }}-fcitx${{ env.FCITX5_QT_VERSION }}
+
+      - name: QtKeychain
+        if: steps.deps-cache.outputs.cache-hit != 'true'
+        run: |
+          git clone --depth 1 -b "$QTKEYCHAIN_VERSION" https://github.com/frankosterfeld/qtkeychain.git /tmp/qtkeychain
+          cmake -S /tmp/qtkeychain -B /tmp/qtkeychain/build -G Ninja -DCMAKE_BUILD_TYPE=Release \
+            -DBUILD_WITH_QT6=ON -DBUILD_TRANSLATIONS=OFF -DBUILD_TEST_APPLICATION=OFF \
+            -DCMAKE_PREFIX_PATH="$QT_ROOT_DIR" -DCMAKE_INSTALL_PREFIX="$DEPS" -DCMAKE_INSTALL_LIBDIR=lib
+          cmake --build /tmp/qtkeychain/build
+          cmake --install /tmp/qtkeychain/build
+
+      # Qt does not ship the fcitx5 input-method plugin, and most Chinese
+      # Linux desktops use fcitx5. Built against the bundled Qt so it loads.
+      # Best effort: if it fails the AppImage still has ibus; bump the cache
+      # key above to retry.
+      - name: fcitx5 input-method plugin
+        if: steps.deps-cache.outputs.cache-hit != 'true'
+        continue-on-error: true
+        run: |
+          git clone --depth 1 -b "$FCITX5_QT_VERSION" https://github.com/fcitx/fcitx5-qt.git /tmp/fcitx5-qt
+          cmake -S /tmp/fcitx5-qt -B /tmp/fcitx5-qt/build -G Ninja -DCMAKE_BUILD_TYPE=Release \
+            -DENABLE_QT4=OFF -DENABLE_QT5=OFF -DENABLE_QT6=ON -DBUILD_ONLY_PLUGIN=ON \
+            -DENABLE_QT6_WAYLAND_WORKAROUND=OFF \
+            -DCMAKE_PREFIX_PATH="$QT_ROOT_DIR"
+          cmake --build /tmp/fcitx5-qt/build
+          mkdir -p "$DEPS/plugins/platforminputcontexts"
+          find /tmp/fcitx5-qt/build -name 'libfcitx5platforminputcontextplugin*.so' \
+            -exec cp {} "$DEPS/plugins/platforminputcontexts/" \;
+          ls "$DEPS/plugins/platforminputcontexts"/*.so
+
+      - name: Add fcitx5 plugin to Qt
+        run: |
+          if compgen -G "$DEPS/plugins/platforminputcontexts/*.so" > /dev/null; then
+            cp "$DEPS"/plugins/platforminputcontexts/*.so "$QT_ROOT_DIR/plugins/platforminputcontexts/"
+          else
+            echo "::warning::fcitx5 plugin not built; the AppImage will only have ibus input-method support"
+          fi
+
+      - name: Build
+        run: |
+          cmake -S . -B build -G Ninja -DCMAKE_BUILD_TYPE=Release \
+            -DIVY_VERSION="$VERSION" -DCMAKE_PREFIX_PATH="$DEPS;$QT_ROOT_DIR"
+          cmake --build build
+
+      - name: Test
+        env:
+          QT_QPA_PLATFORM: offscreen
+          LD_LIBRARY_PATH: ${{ env.DEPS }}/lib
+        run: ctest --test-dir build --output-on-failure
+
+      - name: Packaging tools
+        run: |
+          mkdir -p tools
+          base=https://github.com
+          curl -fsSL -o tools/linuxdeploy "$base/linuxdeploy/linuxdeploy/releases/download/continuous/linuxdeploy-x86_64.AppImage"
+          curl -fsSL -o tools/linuxdeploy-plugin-qt "$base/linuxdeploy/linuxdeploy-plugin-qt/releases/download/continuous/linuxdeploy-plugin-qt-x86_64.AppImage"
+          curl -fsSL -o tools/appimagetool "$base/AppImage/appimagetool/releases/download/continuous/appimagetool-x86_64.AppImage"
+          chmod +x tools/*
+
+      - name: AppImage
+        env:
+          TOOLS_DIR: ${{ github.workspace }}/tools
+          QMAKE: ${{ env.QT_ROOT_DIR }}/bin/qmake
+          LD_LIBRARY_PATH: ${{ env.DEPS }}/lib:${{ env.QT_ROOT_DIR }}/lib
+          UPDATE_INFORMATION: gh-releases-zsync|${{ github.repository_owner }}|${{ github.event.repository.name }}|latest|Ivynote-*-x86_64.AppImage.zsync
+        run: packaging/linux/build-appimage.sh build "$VERSION" dist
+
+      # Start the packaged app on a virtual display; it saves a screenshot
+      # of its window and quits, which proves it found all its libraries.
+      - name: Smoke test
+        run: |
+          command -v xvfb-run || sudo apt-get install -y --no-install-recommends xvfb
+          export APPIMAGE_EXTRACT_AND_RUN=1 IVY_SECRETS_IN_FILE=1
+          export XDG_DATA_HOME=$RUNNER_TEMP/data XDG_CONFIG_HOME=$RUNNER_TEMP/config
+          export IVY_SCREENSHOT=$RUNNER_TEMP/smoke/linux.png
+          mkdir -p "$RUNNER_TEMP/smoke"
+          timeout 120 xvfb-run -a dist/Ivynote-*.AppImage
+          test -s "$IVY_SCREENSHOT"
+
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: smoke-linux
+          path: ${{ runner.temp }}/smoke
+          if-no-files-found: ignore
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: linux
+          path: dist/*
+          if-no-files-found: error
+
+  windows:
+    needs: meta
+    runs-on: windows-2022
+    env:
+      VERSION: ${{ needs.meta.outputs.version }}
+      NUMERIC: ${{ needs.meta.outputs.numeric }}
+      DEPS: ${{ github.workspace }}\deps
+      VCPKG_DEFAULT_BINARY_CACHE: ${{ github.workspace }}\vcpkg-cache
+    defaults:
+      run:
+        shell: pwsh
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: ilammy/msvc-dev-cmd@v1
+        with:
+          arch: x64
+
+      - name: Qt
+        uses: jurplel/install-qt-action@v4
+        with:
+          version: ${{ env.QT_VERSION }}
+          host: windows
+          target: desktop
+          arch: win64_msvc2022_64
+          cache: true
+
+      - name: Cache vcpkg binaries
+        uses: actions/cache@v4
+        with:
+          path: vcpkg-cache
+          key: vcpkg-${{ runner.os }}-libsodium-md4c-pkgconf-v1
+
+      - name: libsodium, md4c (vcpkg)
+        run: |
+          New-Item -ItemType Directory -Force $env:VCPKG_DEFAULT_BINARY_CACHE | Out-Null
+          & "$env:VCPKG_INSTALLATION_ROOT\vcpkg.exe" install libsodium md4c pkgconf `
+            --triplet x64-windows-release --x-install-root="$env:DEPS\vcpkg"
+          if ($LASTEXITCODE) { exit $LASTEXITCODE }
+
+      - name: QtKeychain
+        run: |
+          git clone --depth 1 -b $env:QTKEYCHAIN_VERSION https://github.com/frankosterfeld/qtkeychain.git $env:RUNNER_TEMP\qtkeychain
+          cmake -S $env:RUNNER_TEMP\qtkeychain -B $env:RUNNER_TEMP\qtkeychain\build -G Ninja -DCMAKE_BUILD_TYPE=Release `
+            -DBUILD_WITH_QT6=ON -DBUILD_TRANSLATIONS=OFF -DBUILD_TEST_APPLICATION=OFF `
+            -DCMAKE_PREFIX_PATH="$($env:QT_ROOT_DIR -replace '\\', '/')" `
+            -DCMAKE_INSTALL_PREFIX="$($env:DEPS -replace '\\', '/')/keychain"
+          if ($LASTEXITCODE) { exit $LASTEXITCODE }
+          cmake --build $env:RUNNER_TEMP\qtkeychain\build
+          if ($LASTEXITCODE) { exit $LASTEXITCODE }
+          cmake --install $env:RUNNER_TEMP\qtkeychain\build
+
+      - name: Build
+        run: |
+          # Forward slashes: CMake treats backslashes in -D values as escapes.
+          $deps = $env:DEPS -replace '\\', '/'
+          $qt = $env:QT_ROOT_DIR -replace '\\', '/'
+          $vcpkg = "$deps/vcpkg/x64-windows-release"
+          $env:PKG_CONFIG_PATH = "$vcpkg/lib/pkgconfig"
+          cmake -S . -B build -G Ninja -DCMAKE_BUILD_TYPE=Release -DIVY_BUILD_TESTS=OFF `
+            -DIVY_VERSION="$env:VERSION" `
+            -DCMAKE_PREFIX_PATH="$deps/keychain;$qt" `
+            -DPKG_CONFIG_EXECUTABLE="$vcpkg/tools/pkgconf/pkgconf.exe"
+          if ($LASTEXITCODE) { exit $LASTEXITCODE }
+          cmake --build build
+
+      - name: Stage
+        run: |
+          $stage = "build\stage"
+          New-Item -ItemType Directory -Force $stage | Out-Null
+          Copy-Item build\ivynote.exe $stage
+          Copy-Item "$env:DEPS\keychain\bin\*.dll" $stage
+          Copy-Item "$env:DEPS\vcpkg\x64-windows-release\bin\*.dll" $stage
+          # Ship the MSVC runtime next to the exe so no VC++ redistributable is needed.
+          Copy-Item "$env:VCToolsRedistDir\x64\Microsoft.VC143.CRT\*.dll" $stage
+          windeployqt --release --no-translations --no-system-d3d-compiler --no-opengl-sw `
+            --no-compiler-runtime $stage\ivynote.exe
+          if ($LASTEXITCODE) { exit $LASTEXITCODE }
+          Get-ChildItem $stage -Recurse | Select-Object -ExpandProperty FullName
+
+      # The staged app must find all its DLLs: it saves a screenshot and quits.
+      - name: Smoke test
+        run: |
+          $env:IVY_SECRETS_IN_FILE = "1"
+          New-Item -ItemType Directory -Force "$env:RUNNER_TEMP\smoke" | Out-Null
+          $env:IVY_SCREENSHOT = "$env:RUNNER_TEMP\smoke\windows.png"
+          $p = Start-Process build\stage\ivynote.exe -PassThru
+          if (-not $p.WaitForExit(120000)) { Stop-Process $p; Write-Error "ivynote.exe did not quit"; exit 1 }
+          if ($p.ExitCode -ne 0) { Write-Error "ivynote.exe exited with code $($p.ExitCode)"; exit 1 }
+          if (-not (Test-Path $env:IVY_SCREENSHOT)) { Write-Error "no screenshot"; exit 1 }
+
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: smoke-windows
+          path: ${{ runner.temp }}/smoke
+          if-no-files-found: ignore
+
+      - name: Installer and portable zip
+        run: |
+          New-Item -ItemType Directory -Force dist | Out-Null
+          Compress-Archive build\stage\* "dist\Ivynote-$env:VERSION-windows-x64-portable.zip"
+          choco install innosetup -y --no-progress
+          $iscc = Get-ChildItem "${env:ProgramFiles(x86)}\Inno Setup*\ISCC.exe", "$env:ProgramFiles\Inno Setup*\ISCC.exe" `
+            -ErrorAction SilentlyContinue | Select-Object -First 1 -ExpandProperty FullName
+          if (-not $iscc) { Write-Error "Inno Setup not found"; exit 1 }
+          # Simplified Chinese is official in newer Inno Setup; fetch it otherwise.
+          $isl = Join-Path (Split-Path $iscc) "Languages\ChineseSimplified.isl"
+          if (-not (Test-Path $isl)) {
+            $isl = "$env:RUNNER_TEMP\ChineseSimplified.isl"
+            Invoke-WebRequest -Uri "https://raw.githubusercontent.com/jrsoftware/issrc/is-6_5_4/Files/Languages/Unofficial/ChineseSimplified.isl" -OutFile $isl
+          }
+          & $iscc `
+            "/DAppVersion=$env:VERSION" "/DAppVersionNumeric=$env:NUMERIC" `
+            "/DSourceDir=$PWD\build\stage" "/DOutputDir=$PWD\dist" "/DZhIsl=$isl" `
+            packaging\windows\ivynote.iss
+          if ($LASTEXITCODE) { exit $LASTEXITCODE }
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: windows
+          path: dist/*
+          if-no-files-found: error
+
+  release:
+    needs: [meta, linux, windows]
+    if: needs.meta.outputs.release == 'true'
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+    env:
+      VERSION: ${{ needs.meta.outputs.version }}
+      GH_TOKEN: ${{ github.token }}
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/download-artifact@v4
+        with:
+          pattern: "{linux,windows}"
+          path: dist
+          merge-multiple: true
+      - name: Publish
+        run: |
+          cd dist
+          sha256sum * > SHA256SUMS.txt
+          cat SHA256SUMS.txt
+          sed "s/@VERSION@/$VERSION/g" ../packaging/release-notes.md > ../notes.md
+          flags=()
+          [[ "${{ needs.meta.outputs.prerelease }}" == true ]] && flags+=(--prerelease)
+          if gh release view "$GITHUB_REF_NAME" --repo "$GITHUB_REPOSITORY" > /dev/null 2>&1; then
+            # Re-run of the workflow: refresh the files, keep the notes.
+            gh release upload "$GITHUB_REF_NAME" * --repo "$GITHUB_REPOSITORY" --clobber
+          else
+            # --generate-notes appends the PRs merged since the previous tag.
+            gh release create "$GITHUB_REF_NAME" * \
+              --repo "$GITHUB_REPOSITORY" --verify-tag \
+              --title "Ivynote $VERSION" --notes-file ../notes.md --generate-notes "${flags[@]}"
+          fi

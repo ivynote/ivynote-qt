@@ -8,6 +8,18 @@ set(CMAKE_AUTORCC ON)
 
 option(IVY_BUILD_TESTS "Build unit and integration tests" ON)
 option(IVY_BUILD_APP "Build the desktop application" ON)
+# Shown in the app and sent as the User-Agent. Release CI passes
+# -DIVY_VERSION from the git tag (v1.2.3 -> 1.2.3), so a tag is all a release
+# needs; otherwise it follows project(VERSION).
+if(NOT IVY_VERSION)
+    set(IVY_VERSION "${PROJECT_VERSION}")
+endif()
+if(NOT IVY_VERSION MATCHES "^([0-9]+)\\.([0-9]+)\\.([0-9]+)")
+    message(FATAL_ERROR "IVY_VERSION must start with MAJOR.MINOR.PATCH, got '${IVY_VERSION}'")
+endif()
+set(IVY_VERSION_MAJOR ${CMAKE_MATCH_1})
+set(IVY_VERSION_MINOR ${CMAKE_MATCH_2})
+set(IVY_VERSION_PATCH ${CMAKE_MATCH_3})
 
 find_package(Qt6 6.8 REQUIRED COMPONENTS Core Gui Widgets Network Sql Svg Concurrent)
 find_package(Qt6Keychain REQUIRED)
@@ -41,7 +53,7 @@ add_library(ivycore STATIC
     src/ui/render.cpp
 )
 target_include_directories(ivycore PUBLIC src)
-target_compile_definitions(ivycore PUBLIC IVY_VERSION="${PROJECT_VERSION}")
+target_compile_definitions(ivycore PUBLIC IVY_VERSION="${IVY_VERSION}")
 target_link_libraries(ivycore PUBLIC
     Qt6::Core Qt6::Gui Qt6::Widgets Qt6::Network Qt6::Sql Qt6::Concurrent
     qt6keychain PkgConfig::SODIUM PkgConfig::MD4C)
@@ -74,7 +86,8 @@ target_link_libraries(ivynote PRIVATE ivyui)
 set_target_properties(ivynote PROPERTIES OUTPUT_NAME ivynote)
 
 if(WIN32)
-    target_sources(ivynote PRIVATE resources/ivynote.rc)
+    configure_file(resources/ivynote.rc.in ${CMAKE_CURRENT_BINARY_DIR}/ivynote.rc @ONLY)
+    target_sources(ivynote PRIVATE ${CMAKE_CURRENT_BINARY_DIR}/ivynote.rc)
 endif()
 
 include(GNUInstallDirs)
@@ -82,6 +95,7 @@ install(TARGETS ivynote RUNTIME DESTINATION ${CMAKE_INSTALL_BINDIR})
 if(UNIX AND NOT APPLE)
     install(FILES resources/ivynote.desktop DESTINATION ${CMAKE_INSTALL_DATADIR}/applications RENAME app.ivynote.Ivynote.desktop)
     install(FILES resources/icons/app.svg DESTINATION ${CMAKE_INSTALL_DATADIR}/icons/hicolor/scalable/apps RENAME app.ivynote.Ivynote.svg)
+    install(FILES resources/icons/app-512.png DESTINATION ${CMAKE_INSTALL_DATADIR}/icons/hicolor/512x512/apps RENAME app.ivynote.Ivynote.png)
 endif()
 endif()
 
