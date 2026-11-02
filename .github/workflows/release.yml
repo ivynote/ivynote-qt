@@ -272,6 +272,9 @@ jobs:
           New-Item -ItemType Directory -Force $stage | Out-Null
           Copy-Item build\ivynote.exe $stage
           Copy-Item "$env:DEPS\keychain\bin\*.dll" $stage
+          # windeployqt takes qt6keychain.dll for a Qt module (name prefix) and
+          # looks for it in Qt's bin dir, so put a copy there.
+          Copy-Item "$env:DEPS\keychain\bin\*.dll" "$env:QT_ROOT_DIR\bin"
           Copy-Item "$env:DEPS\vcpkg\x64-windows-release\bin\*.dll" $stage
           # Ship the MSVC runtime next to the exe so no VC++ redistributable is needed.
           Copy-Item "$env:VCToolsRedistDir\x64\Microsoft.VC143.CRT\*.dll" $stage
