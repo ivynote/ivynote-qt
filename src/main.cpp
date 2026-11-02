@@ -17,10 +17,10 @@
 int main(int argc, char *argv[]) {
 #ifdef Q_OS_LINUX
     // KDE/GNOME Wayland sessions leave QT_IM_MODULE unset so Qt uses the
-    // Wayland text-input protocol. The AppImage ships only the xcb platform
-    // plugin, and under XWayland Qt then falls back to "compose" and never
-    // reaches fcitx/ibus. Infer the IM from XMODIFIERS; "wayland" stays first
-    // so a native Wayland build still prefers text-input.
+    // Wayland text-input protocol. When the app runs on xcb instead (X11, or
+    // XWayland via QT_QPA_PLATFORM=xcb) Qt then falls back to "compose" and
+    // never reaches fcitx/ibus. Infer the IM from XMODIFIERS; "wayland" stays
+    // first so native Wayland still prefers text-input.
     if (!qEnvironmentVariableIsSet("QT_IM_MODULE") && !qEnvironmentVariableIsSet("QT_IM_MODULES")) {
         const QByteArray xmod = qgetenv("XMODIFIERS");
         const char *im = xmod.contains("fcitx") ? "fcitx" : xmod.contains("ibus") ? "ibus" : nullptr;
