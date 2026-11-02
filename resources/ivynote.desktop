@@ -1,0 +1,14 @@
+[Desktop Entry]
+Type=Application
+Name=Ivynote
+Name[zh_CN]=常青笔记
+GenericName=Markdown Notes
+GenericName[zh_CN]=Markdown 笔记
+Comment=Local-first Markdown notes
+Comment[zh_CN]=本地优先的 Markdown 笔记
+Exec=ivynote
+Icon=app.ivynote.Ivynote
+Terminal=false
+Categories=Office;Utility;TextEditor;
+Keywords=notes;markdown;wiki;sync;
+StartupWMClass=ivynote
