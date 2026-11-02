@@ -30,7 +30,7 @@ bool isSafeExternalUrl(const QString &url) {
 }
 
 QString renderMarkdown(const QString &markdown, const RenderOptions &opts) {
-    const QByteArray src = markdown.toUtf8();
+    const QByteArray src = md::separateTables(markdown).toUtf8();
     QByteArray out;
     const unsigned flags = MD_DIALECT_GITHUB | MD_FLAG_NOHTML | MD_FLAG_WIKILINKS;
     md_html(src.constData(), MD_SIZE(src.size()), collect, &out, flags, 0);
@@ -156,5 +156,7 @@ QString renderMarkdown(const QString &markdown, const RenderOptions &opts) {
         last = m.capturedEnd();
     }
     result += html.mid(last);
+    // QTextBrowser draws cell borders only with collapsed spacing.
+    result.replace(QLatin1String("<table>"), QLatin1String("<table cellspacing=\"0\" cellpadding=\"0\">"));
     return result;
 }

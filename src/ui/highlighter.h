@@ -19,9 +19,10 @@ struct LinkSpan {
 
 class BlockInfo : public QTextBlockUserData {
 public:
-    enum Kind { Text, Fence, Code, Heading, Quote, Rule, Image };
+    enum Kind { Text, Fence, Code, Heading, Quote, Rule, Image, Table };
     Kind kind = Text;
     int level = 0;
+    int tableRow = -1; // 0 header, 1 delimiter, 2… body
     bool active = false;
     QList<QPair<int, bool>> tasks; // position of '[' and whether done
     QList<int> bullets;            // position of the list marker
@@ -54,6 +55,7 @@ protected:
 
 private:
     void hide(int start, int len);
+    bool tableBlock(const QString &text, BlockInfo *info, bool live, bool active, const QFont &mono);
     void inlineSpans(const QString &text, int from, BlockInfo *info, bool live, const QTextCharFormat &base);
     QSize displaySize(const QString &id) const;
 

@@ -7,6 +7,7 @@
 #include "sync/engine.h"
 #include "ui/dialogs.h"
 #include "ui/editor.h"
+#include "ui/highlighter.h"
 #include "ui/icons.h"
 #include "ui/render.h"
 #include "ui/theme.h"
@@ -14,6 +15,7 @@
 #include "ui/widgets.h"
 #include "vault/session.h"
 
+#include <QAbstractTextDocumentLayout>
 #include <QBuffer>
 #include <QDateTime>
 #include <QDesktopServices>
@@ -31,7 +33,10 @@
 #include <QRegularExpression>
 #include <QScrollBar>
 #include <QSplitter>
+#include <QTextBlock>
 #include <QTextBrowser>
+#include <QTextFrame>
+#include <QTextTable>
 #include <QToolButton>
 #include <QUrl>
 #include <QVBoxLayout>
@@ -96,12 +101,13 @@ QString previewCss() {
                "a{color:%3;text-decoration:none;} a.missing{color:%4;}"
                "code{font-family:'%5';background-color:%6;} pre{font-family:'%5';background-color:%6;padding:10px;}"
                "blockquote{color:%7;font-family:'%2';margin-left:12px;padding-left:12px;border-left:2px solid %3;}"
-               "table{border-collapse:collapse;} td,th{padding:4px 10px;border:1px solid %8;}"
+               "table{border-collapse:collapse;margin-top:6px;margin-bottom:6px;} td,th{padding:5px 12px;border:1px solid %8;}"
+               "th{background-color:%10;font-weight:600;}"
                ".mark{background-color:%9;} .task{color:%3;font-size:1.1em;} .file{color:%3;}"
                "hr{color:%8;}")
         .arg(k.ink.name(), Theme::serif(16).families().value(0, QStringLiteral("serif")), k.ivy.name(), k.muted.name(),
              Theme::mono(13).families().value(0, QStringLiteral("monospace")), k.codeBg.name(), k.ink2.name(), k.line.name(),
-             Theme::alpha(k.warn, 0.25).name(QColor::HexArgb));
+             Theme::alpha(k.warn, 0.25).name(QColor::HexArgb), k.sunken.name());
 }
 
 } // namespace
@@ -173,12 +179,17 @@ NotePane::NotePane(QWidget *parent) : QWidget(parent) {
     col->addWidget(m_banner);
 
     // Title and meta, on the same column as the text.
-    auto *head = new QWidget(this);
+    m_headHost = new QWidget(this);
+    auto *head = m_head = new QWidget(m_headHost);
     auto *headCol = new QVBoxLayout(head);
     headCol->setContentsMargins(0, 18, 0, 6);
     headCol->setSpacing(6);
     m_title = new QLineEdit(head);
     m_title->setFrame(false);
+    // Native styles pad line edits differently (Breeze adds several pixels);
+    // without padding the title starts exactly where the text does.
+    m_title->setStyleSheet(QStringLiteral("QLineEdit{border:0;padding:0;margin:0;background:transparent;}"));
+    m_title->setTextMargins(0, 0, 0, 0);
     m_title->setFont(Theme::serif(30));
     m_title->setPlaceholderText(T("无标题"));
     m_title->setMaxLength(300);
@@ -194,24 +205,18 @@ NotePane::NotePane(QWidget *parent) : QWidget(parent) {
     m_tagsRow = new FlowRow(metaRow);
     metaLayout->addWidget(m_tagsRow, 1);
     headCol->addWidget(metaRow);
-    auto *headHost = new QWidget(this);
-    auto *headCenter = new QHBoxLayout(headHost);
-    headCenter->setContentsMargins(24, 0, 24, 0);
-    headCenter->addStretch(1);
-    head->setMaximumWidth(680);
-    head->setMinimumWidth(200);
-    headCenter->addWidget(head, 100);
-    headCenter->addStretch(1);
-    col->addWidget(headHost);
+    auto *headRow = new QHBoxLayout(m_headHost);
+    headRow->setContentsMargins(24, 0, 24, 0);
+    headRow->addWidget(head);
+    col->addWidget(m_headHost);
 
     // Editor, preview and outline.
-    auto *body = new QWidget(this);
+    auto *body = m_body = new QWidget(this);
     auto *bodyRow = new QHBoxLayout(body);
     bodyRow->setContentsMargins(0, 0, 0, 0);
     bodyRow->setSpacing(0);
-    m_split = new QSplitter(Qt::Horizontal, body);
+    m_split = new Divider(Qt::Horizontal, body);
     m_split->setChildrenCollapsible(false);
-    m_split->setHandleWidth(1);
     m_editor = new MarkdownEditor(m_split);
     passAppShortcuts(m_editor);
     m_preview = new Preview(m_split);
@@ -244,7 +249,14 @@ NotePane::NotePane(QWidget *parent) : QWidget(parent) {
     blRow->addStretch(1);
     col->addLayout(blRow);
     col->addWidget(m_backlinks);
-    connect(m_backlinksButton, &QToolButton::clicked, this, [this] { m_backlinks->setVisible(!m_backlinks->isVisible()); });
+    connect(m_backlinksButton, &QToolButton::clicked, this, [this] {
+        if (m_backlinks->isVisible()) {
+            slide(m_backlinks, Qt::Vertical, m_backlinks->height(), 0, 160, [this] { m_backlinks->hide(); m_backlinks->setMaximumHeight(160); });
+        } else {
+            m_backlinks->show();
+            slide(m_backlinks, Qt::Vertical, 0, 160, 200, [this] { m_backlinks->setMaximumHeight(160); });
+        }
+    });
     connect(m_backlinks, &QListWidget::itemActivated, this, [this](QListWidgetItem *it) { emit openNote(it->data(Qt::UserRole).toString()); });
     connect(m_backlinks, &QListWidget::itemClicked, this, [this](QListWidgetItem *it) { emit openNote(it->data(Qt::UserRole).toString()); });
     connect(m_outline, &QListWidget::itemClicked, this, [this](QListWidgetItem *it) {
@@ -268,7 +280,18 @@ NotePane::NotePane(QWidget *parent) : QWidget(parent) {
     connect(&m_titleTimer, &QTimer::timeout, this, &NotePane::flush);
     connect(&m_previewTimer, &QTimer::timeout, this, &NotePane::refreshPreview);
     connect(&m_indexTimer, &QTimer::timeout, this, &NotePane::refreshIndex);
-    connect(&m_savedTimer, &QTimer::timeout, m_savedLabel, &QWidget::hide);
+    connect(&m_savedTimer, &QTimer::timeout, this, [this] { sink(m_savedLabel, 400); });
+    connect(m_editor, &MarkdownEditor::columnChanged, this, &NotePane::alignHead);
+    // Split view: each side follows the other.
+    connect(m_editor->verticalScrollBar(), &QScrollBar::valueChanged, this, [this] { syncScroll(true); });
+    connect(m_preview->verticalScrollBar(), &QScrollBar::valueChanged, this, [this] { syncScroll(false); });
+    connect(m_editor->document()->documentLayout(), &QAbstractTextDocumentLayout::documentSizeChanged, this, [this] { m_scrollMap.clear(); });
+    connect(m_preview->document(), &QTextDocument::documentLayoutChanged, this, [this] {
+        m_scrollMap.clear();
+        connect(m_preview->document()->documentLayout(), &QAbstractTextDocumentLayout::documentSizeChanged, this, [this] { m_scrollMap.clear(); },
+                Qt::UniqueConnection);
+    });
+    connect(m_preview->document()->documentLayout(), &QAbstractTextDocumentLayout::documentSizeChanged, this, [this] { m_scrollMap.clear(); });
     connect(m_editor, &MarkdownEditor::edited, this, [this] {
         m_bodyDirty = true;
         m_bodyTimer.start();
@@ -394,7 +417,11 @@ void NotePane::setNote(const QString &id) {
     refreshIndex();
     refreshOutline();
     if (m_mode == EditorMode::Split) refreshPreview();
-    if (has) rise(m_editor, 260);
+    if (has) {
+        // Note to note: a quick cross-fade, not a cut.
+        rise(m_headHost, 180);
+        rise(m_body, 180);
+    }
 }
 
 void NotePane::flush() {
@@ -412,7 +439,10 @@ void NotePane::flush() {
     if (m_titleDirty) p.title = m_title->text().simplified().left(300);
     m_bodyDirty = m_titleDirty = false;
     m_engine->updateNote(m_id, p);
-    m_savedLabel->show();
+    if (!m_savedLabel->isVisible()) {
+        m_savedLabel->show();
+        rise(m_savedLabel, 200);
+    }
     m_savedTimer.start();
     if (p.body) refreshOutline();
 }
@@ -494,7 +524,7 @@ void NotePane::refresh() {
         chip->setFont(Theme::uiFont(12.5));
         const QColor hash = Theme::tagColor(it->name, it->color);
         chip->setText(QStringLiteral("#") + it->name);
-        chip->setStyleSheet(QStringLiteral("QToolButton{border:none;border-radius:11px;padding:2px 8px;color:%1;background:transparent;}"
+        chip->setStyleSheet(QStringLiteral("QToolButton{border:none;border-radius:4px;padding:2px 6px;color:%1;background:transparent;}"
                                            "QToolButton:hover{background:%2;}")
                                 .arg(k.ink2.name(), k.sunken.name()));
         chip->setToolTip(T("点击移除"));
@@ -517,7 +547,7 @@ void NotePane::refresh() {
         add->setCursor(Qt::PointingHandCursor);
         add->setFont(Theme::uiFont(12.5));
         add->setText(QStringLiteral("+ ") + T("标签"));
-        add->setStyleSheet(QStringLiteral("QToolButton{border:none;border-radius:11px;padding:2px 8px;color:%1;}QToolButton:hover{color:%2;background:%3;}")
+        add->setStyleSheet(QStringLiteral("QToolButton{border:none;border-radius:4px;padding:2px 6px;color:%1;}QToolButton:hover{color:%2;background:%3;}")
                                .arg(k.faint.name(), k.ink2.name(), k.sunken.name()));
         connect(add, &QToolButton::clicked, this, &NotePane::pickTags);
         m_tagsRow->add(add);
@@ -608,20 +638,121 @@ void NotePane::refreshPreview() {
     opts.resourceName = [this](const QString &id) { return m_engine->attachmentName(id); };
     opts.interactiveTasks = !m_editor->isReadOnly();
     const int scroll = m_preview->verticalScrollBar()->value();
+    m_syncing = true;
     m_preview->setHtml(renderMarkdown(m_editor->markdown(), opts));
     m_preview->verticalScrollBar()->setValue(scroll);
+    m_syncing = false;
+    m_scrollMap.clear();
+    syncScroll(true);
+}
+
+void NotePane::alignHead() {
+    // The head spans the editor's text column, wherever the editor sits
+    // (narrower in the split view, beside the outline).
+    const QRect col = m_editor->textColumn();
+    const QPoint at = m_editor->mapTo(this, col.topLeft());
+    const int left = std::max(0, at.x());
+    const int right = std::max(0, width() - left - col.width());
+    if (auto *l = m_headHost->layout(); l->contentsMargins().left() != left || l->contentsMargins().right() != right)
+        l->setContentsMargins(left, 0, right, 0);
+}
+
+void NotePane::buildScrollMap() {
+    // Landmarks both sides share — headings, images, tables, in order — tie
+    // the two scroll positions together; between them, interpolate.
+    m_scrollMap.clear();
+    QTextDocument *src = m_editor->document();
+    QTextDocument *dst = m_preview->document();
+    QAbstractTextDocumentLayout *sl = src->documentLayout();
+    QAbstractTextDocumentLayout *dl = dst->documentLayout();
+    QList<qreal> srcHeads, srcTables, dstHeads, dstTables;
+    QList<QPair<QString, qreal>> srcImages, dstImages;
+    static const QRegularExpression image(QStringLiteral(R"(!\[[^\]\n]*\]\(ivy://res/([A-Za-z0-9_-]{8,64})\))"));
+    for (QTextBlock b = src->begin(); b.isValid(); b = b.next()) {
+        const auto *info = static_cast<BlockInfo *>(b.userData());
+        if (info && (info->kind == BlockInfo::Code || info->kind == BlockInfo::Fence)) continue;
+        const qreal y = sl->blockBoundingRect(b).top();
+        if (info && info->kind == BlockInfo::Heading) srcHeads << y;
+        else if (info && info->kind == BlockInfo::Table && info->tableRow == 0) srcTables << y;
+        if (b.text().contains(QLatin1String("ivy://res/")))
+            for (auto it = image.globalMatch(b.text()); it.hasNext();) srcImages.append({it.next().captured(1), y});
+    }
+    QSet<const QTextFrame *> seen;
+    for (QTextBlock b = dst->begin(); b.isValid(); b = b.next()) {
+        const qreal y = dl->blockBoundingRect(b).top();
+        if (b.blockFormat().headingLevel() > 0) dstHeads << y;
+        if (QTextFrame *f = QTextCursor(b).currentFrame(); f && f != dst->rootFrame() && qobject_cast<QTextTable *>(f) && !seen.contains(f)) {
+            seen.insert(f);
+            dstTables << dl->frameBoundingRect(f).top();
+        }
+        for (auto it = b.begin(); !it.atEnd(); ++it) {
+            const QTextCharFormat cf = it.fragment().charFormat();
+            if (!cf.isImageFormat()) continue;
+            const QString name = cf.toImageFormat().name();
+            if (name.startsWith(QLatin1String("ivy://res/"))) dstImages.append({name.mid(10), y});
+        }
+    }
+    QList<QPair<qreal, qreal>> points;
+    for (qsizetype i = 0; i < std::min(srcHeads.size(), dstHeads.size()); ++i) points.append({srcHeads[i], dstHeads[i]});
+    for (qsizetype i = 0; i < std::min(srcTables.size(), dstTables.size()); ++i) points.append({srcTables[i], dstTables[i]});
+    QHash<QString, int> used;
+    for (const auto &[id, y] : std::as_const(srcImages)) {
+        int n = used.value(id);
+        for (const auto &[did, dy] : std::as_const(dstImages))
+            if (did == id && n-- == 0) {
+                points.append({y, dy});
+                break;
+            }
+        used[id]++;
+    }
+    std::sort(points.begin(), points.end());
+    const qreal srcMax = m_editor->verticalScrollBar()->maximum();
+    const qreal dstMax = m_preview->verticalScrollBar()->maximum();
+    m_scrollMap.append({0, 0});
+    for (const auto &pt : std::as_const(points)) {
+        // Keep it strictly increasing on both sides; drop landmarks out of order.
+        if (pt.first <= m_scrollMap.last().first || pt.second <= m_scrollMap.last().second) continue;
+        if (pt.first >= srcMax || pt.second >= dstMax) continue;
+        m_scrollMap.append(pt);
+    }
+    m_scrollMap.append({std::max<qreal>(srcMax, m_scrollMap.last().first + 1), std::max<qreal>(dstMax, m_scrollMap.last().second + 1)});
+}
+
+void NotePane::syncScroll(bool fromEditor) {
+    if (m_syncing || m_mode != EditorMode::Split || !m_preview->isVisible()) return;
+    if (m_scrollMap.isEmpty()) buildScrollMap();
+    QScrollBar *from = fromEditor ? m_editor->verticalScrollBar() : m_preview->verticalScrollBar();
+    QScrollBar *to = fromEditor ? m_preview->verticalScrollBar() : m_editor->verticalScrollBar();
+    const qreal v = from->value();
+    qreal out = to->maximum();
+    for (qsizetype i = 1; i < m_scrollMap.size(); ++i) {
+        const qreal a = fromEditor ? m_scrollMap[i - 1].first : m_scrollMap[i - 1].second;
+        const qreal b = fromEditor ? m_scrollMap[i].first : m_scrollMap[i].second;
+        if (v > b && i + 1 < m_scrollMap.size()) continue;
+        const qreal a2 = fromEditor ? m_scrollMap[i - 1].second : m_scrollMap[i - 1].first;
+        const qreal b2 = fromEditor ? m_scrollMap[i].second : m_scrollMap[i].first;
+        const qreal t = b > a ? std::clamp((v - a) / (b - a), 0.0, 1.0) : 0.0;
+        out = a2 + t * (b2 - a2);
+        break;
+    }
+    m_syncing = true;
+    to->setValue(int(std::round(out)));
+    m_syncing = false;
 }
 
 void NotePane::setEditorMode(EditorMode mode) {
     flush();
     m_mode = mode;
     m_editor->setMode(mode == EditorMode::Live ? MarkdownHighlighter::Live : MarkdownHighlighter::Source);
+    const bool wasSplit = m_preview->isVisible();
     m_preview->setVisible(mode == EditorMode::Split);
     m_editor->setColumnWidth(mode == EditorMode::Split ? 560 : 680);
     if (mode == EditorMode::Split) {
         m_split->setSizes({1, 1});
         refreshPreview();
+        if (!wasSplit) rise(m_preview, 220);
     }
+    if (!m_id.isEmpty()) rise(m_editor, 160);
     emit editorModeChanged(mode);
 }
 
@@ -638,8 +769,19 @@ void NotePane::setShelfCollapsed(bool collapsed) {
 void NotePane::toggleOutline() {
     m_outlineOpen = !m_outlineOpen;
     m_outlineButton->setChecked(m_outlineOpen);
-    m_outline->setVisible(m_outlineOpen);
     refreshOutline();
+    // The outline slides in from the right edge.
+    if (m_outlineOpen) {
+        m_outline->setMaximumWidth(0);
+        m_outline->show();
+        slide(m_outline, Qt::Horizontal, 0, 224, 200, [this] { m_outline->setFixedWidth(224); });
+    } else {
+        m_outline->setMinimumWidth(0);
+        slide(m_outline, Qt::Horizontal, m_outline->width(), 0, 160, [this] {
+            m_outline->hide();
+            m_outline->setFixedWidth(224);
+        });
+    }
 }
 
 void NotePane::focusEditor() { m_editor->setFocus(); }

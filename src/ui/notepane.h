@@ -67,6 +67,9 @@ private:
     void attach(const QByteArray &data, const QString &name, const QString &mime);
     void showMoreMenu();
     QString resolveTitle(const QString &title) const;
+    void alignHead();              // title and meta on the editor's text column
+    void syncScroll(bool fromEditor); // split view: the other side follows
+    void buildScrollMap();
 
     QPointer<Session> m_session;
     SyncEngine *m_engine = nullptr;
@@ -85,6 +88,9 @@ private:
     QLabel *m_savedLabel;
     IconButton *m_shareButton, *m_outlineButton, *m_moreButton;
     QWidget *m_banner;
+    QWidget *m_headHost;
+    QWidget *m_head;
+    QWidget *m_body;
     QLineEdit *m_title;
     QLabel *m_meta;
     FlowRow *m_tagsRow;
@@ -96,4 +102,6 @@ private:
     QListWidget *m_backlinks;
     QTimer m_bodyTimer, m_titleTimer, m_previewTimer, m_indexTimer, m_savedTimer;
     int m_uploading = 0;
+    bool m_syncing = false;
+    QList<QPair<qreal, qreal>> m_scrollMap; // editor y -> preview y, both increasing
 };

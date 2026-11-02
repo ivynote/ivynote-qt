@@ -3,10 +3,13 @@
 
 #include <QFrame>
 #include <QLabel>
+#include <QSplitter>
 #include <QToolButton>
 #include <QVariantAnimation>
 
-// A flat, round icon button (32x32) that follows the theme.
+#include <functional>
+
+// A flat icon button (32x32) that follows the theme; its hover fades in.
 class IconButton : public QToolButton {
     Q_OBJECT
 public:
@@ -20,10 +23,10 @@ protected:
 
 private:
     QString m_icon;
-    bool m_hover = false;
+    QVariantAnimation m_hover; // 0..1
 };
 
-// Pill-shaped primary/secondary button in Ivynote's style.
+// A compact button in Ivynote's style, cornered like the native ones.
 class PillButton : public QToolButton {
     Q_OBJECT
 public:
@@ -38,7 +41,7 @@ protected:
 
 private:
     Kind m_kind;
-    bool m_hover = false;
+    QVariantAnimation m_hover;
 };
 
 // The ivy leaf, drawn stroke by stroke on first show (guide 10.7).
@@ -58,7 +61,7 @@ private:
     bool m_played = false;
 };
 
-// The paper the note sits on: rounded surface with a soft shadow.
+// The surface the note sits on: flat, edge to edge.
 class Paper : public QFrame {
     Q_OBJECT
 public:
@@ -68,8 +71,24 @@ protected:
     void paintEvent(QPaintEvent *) override;
 };
 
-// Fades a widget in and lifts it a few pixels (the "rise" motion).
+// A splitter whose handle is a one-pixel hairline in the theme's line color
+// (with a wider grab area), the same on every platform style.
+class Divider : public QSplitter {
+    Q_OBJECT
+public:
+    explicit Divider(Qt::Orientation o, QWidget *parent = nullptr);
+
+protected:
+    QSplitterHandle *createHandle() override;
+};
+
+// Fades a widget in (the "rise" motion).
 void rise(QWidget *w, int ms = 320);
+// Fades a widget out, then calls done (hides it by default).
+void sink(QWidget *w, int ms = 160, std::function<void()> done = {});
+// Grows or shrinks a widget's maximum width or height to a target, for panels
+// that slide open and closed. done runs at the end (also without motion).
+void slide(QWidget *w, Qt::Orientation o, int from, int to, int ms = 200, std::function<void()> done = {});
 
 QLabel *mutedLabel(const QString &text, QWidget *parent = nullptr, qreal px = 12);
 

@@ -17,6 +17,7 @@
 #include <QListWidget>
 #include <QPainter>
 #include <QPainterPath>
+#include <QPropertyAnimation>
 #include <QScreen>
 #include <QStyledItemDelegate>
 #include <QTextDocument>
@@ -41,7 +42,7 @@ public:
         if (opt.state & QStyle::State_Selected) {
             p->setPen(Qt::NoPen);
             p->setBrush(Theme::alpha(k.ink, 0.07));
-            p->drawRoundedRect(r, 12, 12);
+            p->drawRoundedRect(r, Theme::radius, Theme::radius);
         }
         const QString icon = index.data(Qt::DecorationRole).toString();
         p->drawPixmap(QRect(r.left() + 10, r.top() + 10, 16, 16), icons::pixmap(icon, k.muted, 16, p->device()->devicePixelRatioF()));
@@ -87,10 +88,11 @@ public:
 
 CommandPalette::CommandPalette(SyncEngine *engine, QList<PaletteCommand> commands, QWidget *parent)
     : QDialog(parent, Qt::FramelessWindowHint | Qt::Popup), m_engine(engine), m_commands(std::move(commands)) {
-    setAttribute(Qt::WA_TranslucentBackground);
+    // Opaque and square like a native popup menu: translucent popups turn
+    // black on desktops without a compositor.
     setAttribute(Qt::WA_DeleteOnClose);
     auto *col = new QVBoxLayout(this);
-    col->setContentsMargins(14, 14, 14, 14);
+    col->setContentsMargins(8, 8, 8, 8);
     col->setSpacing(8);
     m_input = new QLineEdit(this);
     m_input->setFrame(false);
@@ -121,15 +123,10 @@ CommandPalette::CommandPalette(SyncEngine *engine, QList<PaletteCommand> command
 void CommandPalette::paintEvent(QPaintEvent *) {
     QPainter p(this);
     p.setRenderHint(QPainter::Antialiasing);
-    const QRectF r = QRectF(rect()).adjusted(8, 6, -8, -12);
-    for (int i = 6; i >= 1; --i) {
-        p.setPen(Qt::NoPen);
-        p.setBrush(QColor(0, 0, 0, Theme::dark() ? 18 : 6));
-        p.drawRoundedRect(r.adjusted(-i, -i + 3, i, i + 4), 24 + i, 24 + i);
-    }
-    p.setBrush(Theme::t().surface);
-    p.setPen(QPen(Theme::dark() ? QColor(255, 255, 255, 18) : QColor(16, 24, 32, 18), 1));
-    p.drawRoundedRect(r, 24, 24);
+    p.fillRect(rect(), Theme::t().surface);
+    p.setPen(QPen(Theme::dark() ? Theme::t().line.lighter(140) : Theme::t().line.darker(125), 1));
+    p.setBrush(Qt::NoBrush);
+    p.drawRect(QRectF(rect()).adjusted(0.5, 0.5, -0.5, -0.5));
 }
 
 void CommandPalette::open(const QString &initial) {
@@ -140,6 +137,16 @@ void CommandPalette::open(const QString &initial) {
     move(host->mapToGlobal(QPoint((host->width() - w) / 2, int(host->height() * 0.12))));
     m_input->setText(initial);
     update(initial);
+    if (!Theme::reducedMotion()) {
+        // A quick fade where the window system can do it; a plain show elsewhere.
+        setWindowOpacity(0.0);
+        auto *a = new QPropertyAnimation(this, "windowOpacity", this);
+        a->setDuration(120);
+        a->setStartValue(0.0);
+        a->setEndValue(1.0);
+        a->setEasingCurve(Theme::easeOut());
+        a->start(QAbstractAnimation::DeleteWhenStopped);
+    }
     show();
     m_input->setFocus();
 }

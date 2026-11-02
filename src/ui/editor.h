@@ -4,11 +4,13 @@
 
 #include "ui/highlighter.h"
 
+#include <QHash>
 #include <QImage>
 #include <QTextEdit>
 #include <functional>
 
 class QCompleter;
+class QPainter;
 class QStringListModel;
 
 class MarkdownEditor : public QTextEdit {
@@ -25,6 +27,8 @@ public:
     MarkdownHighlighter::Mode mode() const { return m_hl->mode(); }
     void setFontSize(int px);
     void setColumnWidth(int maxWidth);
+    // The text column inside the editor, in its own coordinates.
+    QRect textColumn() const;
     void setWikiTitles(const QStringList &titles);
     void refreshAttachment(const QString &id);
     void insertBlockText(const QString &markdown); // on its own line at the cursor
@@ -45,6 +49,7 @@ signals:
     void filesDropped(const QStringList &paths);
     void imagePasted(const QImage &image);
     void cursorLineChanged(int line);
+    void columnChanged();
 
 protected:
     void paintEvent(QPaintEvent *e) override;
@@ -70,6 +75,13 @@ private:
     const LinkSpan *linkAt(const QPoint &pos, QTextBlock *blockOut) const;
     int taskAt(const QPoint &pos, QTextBlock *blockOut) const;
     QRectF charRect(const QTextBlock &block, int pos) const;
+    struct TableGeometry {
+        int cols = 0;
+        QList<qreal> x;   // column edges from the table's left, cols + 1 of them
+        QList<int> align; // per column
+    };
+    TableGeometry tableGeometry(const QTextBlock &start) const;
+    void paintTableRow(QPainter &p, const QTextBlock &block, const QRectF &r, QHash<int, TableGeometry> &cache) const;
 
     MarkdownHighlighter *m_hl;
     QCompleter *m_completer;

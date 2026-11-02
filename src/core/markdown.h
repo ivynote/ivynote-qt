@@ -54,4 +54,16 @@ LinkIndex buildLinkIndex(const QList<const Note *> &notes);
 // Line-level fence tracking, used by the editor highlighter and toggles.
 bool isFenceLine(const QString &line);
 
+// GFM tables: a header row, a delimiter row (|---|:-:|), then body rows.
+bool isTableRow(const QString &line);       // has a cell separator
+bool isTableDelimiter(const QString &line); // |---|:-:|---:|
+QStringList tableCells(const QString &line); // trimmed cell texts, escaped \| kept as |
+// Per column: Qt::AlignLeft, Qt::AlignHCenter or Qt::AlignRight.
+QList<int> tableAlignments(const QString &delimiter);
+// Inline Markdown reduced to its visible text (for table cells and the like).
+QString plainInline(const QString &text);
+// A table that directly follows a paragraph line gets a blank line before it,
+// as GitHub renders it (md4c alone keeps it in the paragraph).
+QString separateTables(const QString &body);
+
 } // namespace md

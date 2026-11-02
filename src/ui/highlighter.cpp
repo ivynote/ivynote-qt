@@ -5,7 +5,9 @@
 
 #include <QFontMetricsF>
 #include <QRegularExpression>
+#include <QTextBlock>
 #include <QTextDocument>
+#include <cmath>
 
 namespace {
 
@@ -110,6 +112,7 @@ void MarkdownHighlighter::highlightBlock(const QString &text) {
         return;
     }
     setCurrentBlockState(0);
+    if (tableBlock(text, info, live, active, mono)) return;
 
     QTextCharFormat base;
     int from = 0;
@@ -244,6 +247,70 @@ void MarkdownHighlighter::highlightBlock(const QString &text) {
     }
 
     inlineSpans(text, from, info, live, base);
+}
+
+bool MarkdownHighlighter::tableBlock(const QString &text, BlockInfo *info, bool live, bool active, const QFont &mono) {
+    const Tokens &k = Theme::t();
+    const QTextBlock cur = currentBlock();
+    const QTextBlock before = cur.previous();
+    const auto *prevInfo = before.isValid() ? static_cast<BlockInfo *>(before.userData()) : nullptr;
+    const bool prevInTable = previousBlockState() == 2 && prevInfo && prevInfo->kind == BlockInfo::Table;
+    // The header is known only by the delimiter under it, so a change to the
+    // delimiter line re-reads the line above.
+    auto recheckAbove = [this, n = cur.blockNumber() - 1] {
+        QMetaObject::invokeMethod(this, [this, n] {
+            const QTextBlock b = document()->findBlockByNumber(n);
+            if (b.isValid()) rehighlightBlock(b);
+        }, Qt::QueuedConnection);
+    };
+    const bool delimiter = md::isTableDelimiter(text);
+    const bool prevIsHeader = prevInTable && prevInfo->tableRow == 0;
+    if (prevIsHeader && !delimiter) {
+        recheckAbove();
+        return false;
+    }
+    if (delimiter && !prevIsHeader && before.isValid() && md::isTableRow(before.text()) && !md::isTableDelimiter(before.text()) && !prevInTable) recheckAbove();
+    const bool row = prevInTable && md::isTableRow(text);
+    const QTextBlock after = cur.next();
+    const bool header = !row && md::isTableRow(text) && !delimiter && after.isValid() && md::isTableDelimiter(after.text());
+    if (!row && !header) return false;
+
+    setCurrentBlockState(2);
+    info->kind = BlockInfo::Table;
+    info->tableRow = header ? 0 : prevInfo->tableRow + 1;
+    if (live && !active) {
+        // The source vanishes and the editor paints the grid over it. One
+        // invisible character sets the row height (as images do); the
+        // delimiter row shrinks to a hairline under the header.
+        hide(0, int(text.size()));
+        if (info->tableRow != 1 && !text.isEmpty()) {
+            const qreal ratio = QFontMetricsF(Theme::uiFont(100)).height() / 100.0;
+            const int px = std::max(8, int(std::round(m_px * 2.1 / (ratio * 1.75))));
+            QTextCharFormat tall;
+            tall.setForeground(Qt::transparent);
+            tall.setProperty(QTextFormat::FontPixelSize, px);
+            tall.setFontLetterSpacingType(QFont::PercentageSpacing);
+            tall.setFontLetterSpacing(1);
+            setFormat(0, 1, tall);
+        }
+        return true;
+    }
+    // Source: monospace so the columns line up, pipes and dashes quiet.
+    QTextCharFormat base = fontFormat(live ? mono : Theme::mono(std::max(13, m_px - 2)));
+    base.setForeground(k.ink2);
+    if (info->tableRow == 0) base.setFontWeight(QFont::DemiBold);
+    setFormat(0, int(text.size()), base);
+    QTextCharFormat faint = base;
+    faint.setForeground(k.faint);
+    faint.setFontWeight(QFont::Normal);
+    if (delimiter) {
+        setFormat(0, int(text.size()), faint);
+        return true;
+    }
+    inlineSpans(text, 0, info, live, base);
+    for (int i = 0; i < text.size(); ++i)
+        if (text[i] == u'|' && (i == 0 || text[i - 1] != u'\\')) setFormat(i, 1, faint);
+    return true;
 }
 
 void MarkdownHighlighter::inlineSpans(const QString &text, int from, BlockInfo *info, bool live, const QTextCharFormat &base) {

@@ -70,11 +70,11 @@ protected:
         const QRectF r = QRectF(rect()).adjusted(1, 1, -1, -1);
         p.setPen(Qt::NoPen);
         p.setBrush(underMouse() ? k.hover : k.sunken);
-        p.drawRoundedRect(r, 16, 16);
+        p.drawRoundedRect(r, Theme::radius, Theme::radius);
         if (hasFocus()) {
             p.setPen(QPen(Theme::alpha(k.ivy, 0.45), 2));
             p.setBrush(Qt::NoBrush);
-            p.drawRoundedRect(r.adjusted(1, 1, -1, -1), 15, 15);
+            p.drawRoundedRect(r.adjusted(1, 1, -1, -1), Theme::radius - 1, Theme::radius - 1);
         }
         p.drawPixmap(QRect(20, int(r.center().y()) - 12, 24, 24), icons::pixmap(m_icon, k.ivy, 24, devicePixelRatioF()));
         p.setPen(k.ink);

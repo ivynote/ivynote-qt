@@ -7,8 +7,44 @@
 #include <QKeyEvent>
 #include <QPainter>
 #include <QPainterPath>
+#include <QPointer>
 #include <QPropertyAnimation>
 #include <QStyleOption>
+
+namespace {
+
+// Hover is a short fade rather than a jump.
+void setupHover(QVariantAnimation &a, QWidget *w) {
+    a.setStartValue(0.0);
+    a.setEndValue(1.0);
+    a.setDuration(140);
+    a.setEasingCurve(QEasingCurve::OutCubic);
+    QObject::connect(&a, &QVariantAnimation::valueChanged, w, qOverload<>(&QWidget::update));
+}
+
+qreal hoverValue(const QVariantAnimation &a);
+
+void hoverTo(QVariantAnimation &a, bool on) {
+    if (Theme::reducedMotion()) {
+        a.stop();
+        a.setDirection(on ? QAbstractAnimation::Forward : QAbstractAnimation::Backward);
+        a.setCurrentTime(on ? a.duration() : 0);
+        return;
+    }
+    // Pick up from wherever the fade is now.
+    const int at = a.state() == QAbstractAnimation::Running ? a.currentTime() : (hoverValue(a) > 0.5 ? a.duration() : 0);
+    a.stop();
+    a.setDirection(on ? QAbstractAnimation::Forward : QAbstractAnimation::Backward);
+    a.start();
+    a.setCurrentTime(at);
+}
+
+qreal hoverValue(const QVariantAnimation &a) {
+    if (a.state() == QAbstractAnimation::Running) return a.currentValue().toReal();
+    return a.direction() == QAbstractAnimation::Forward && a.currentTime() > 0 ? 1.0 : 0.0;
+}
+
+} // namespace
 
 // --- IconButton ---
 
@@ -18,6 +54,7 @@ IconButton::IconButton(const QString &icon, const QString &tip, QWidget *parent)
     setFixedSize(32, 32);
     setCursor(Qt::PointingHandCursor);
     setFocusPolicy(Qt::TabFocus);
+    setupHover(m_hover, this);
     connect(Theme::instance(), &Theme::changed, this, qOverload<>(&QWidget::update));
 }
 
@@ -27,14 +64,12 @@ void IconButton::setIconName(const QString &icon) {
 }
 
 void IconButton::enterEvent(QEnterEvent *e) {
-    m_hover = true;
-    update();
+    hoverTo(m_hover, true);
     QToolButton::enterEvent(e);
 }
 
 void IconButton::leaveEvent(QEvent *e) {
-    m_hover = false;
-    update();
+    hoverTo(m_hover, false);
     QToolButton::leaveEvent(e);
 }
 
@@ -43,17 +78,19 @@ void IconButton::paintEvent(QPaintEvent *) {
     p.setRenderHint(QPainter::Antialiasing);
     const Tokens &k = Theme::t();
     const bool on = isDown() || isChecked();
-    if (m_hover || on || hasFocus()) {
-        QColor bg = Theme::dark() ? QColor(255, 255, 255, on ? 26 : 18) : QColor(0, 0, 0, on ? 20 : 13);
+    const qreal h = std::max(hoverValue(m_hover), hasFocus() ? 1.0 : 0.0);
+    if (h > 0 || on) {
+        const int a = on ? (Theme::dark() ? 30 : 22) : int((Theme::dark() ? 20 : 14) * h);
         p.setPen(Qt::NoPen);
-        p.setBrush(bg);
-        // Pressed: shrink to 0.9 (guide 10.5).
-        const qreal s = isDown() ? 0.9 : 1.0;
-        QRectF r = QRectF(rect()).adjusted(1, 1, -1, -1);
-        r = QRectF(r.center() - QPointF(r.width() * s / 2, r.height() * s / 2), r.size() * s);
-        p.drawEllipse(r);
+        p.setBrush(Theme::dark() ? QColor(255, 255, 255, a) : QColor(0, 0, 0, a));
+        p.drawRoundedRect(QRectF(rect()).adjusted(2, 2, -2, -2), Theme::radius, Theme::radius);
     }
-    const QColor c = !isEnabled() ? k.faint : (m_hover || on) ? k.ink : k.muted;
+    QColor c = !isEnabled() ? k.faint : on ? k.ink : k.muted;
+    if (isEnabled() && !on && h > 0) {
+        // Blend muted toward ink with the hover.
+        c = QColor::fromRgbF(c.redF() + (k.ink.redF() - c.redF()) * h, c.greenF() + (k.ink.greenF() - c.greenF()) * h,
+                             c.blueF() + (k.ink.blueF() - c.blueF()) * h);
+    }
     const int is = 18;
     p.drawPixmap((width() - is) / 2, (height() - is) / 2, icons::pixmap(m_icon, isChecked() ? k.ivy : c, is, devicePixelRatioF()));
 }
@@ -64,23 +101,22 @@ PillButton::PillButton(const QString &text, Kind kind, QWidget *parent) : QToolB
     setText(text);
     setCursor(Qt::PointingHandCursor);
     setFont(Theme::uiFont(13, QFont::Medium));
+    setupHover(m_hover, this);
     connect(Theme::instance(), &Theme::changed, this, qOverload<>(&QWidget::update));
 }
 
 QSize PillButton::sizeHint() const {
     const QFontMetrics fm(font());
-    return {fm.horizontalAdvance(text()) + 32, 36};
+    return {fm.horizontalAdvance(text()) + 28, 30};
 }
 
 void PillButton::enterEvent(QEnterEvent *e) {
-    m_hover = true;
-    update();
+    hoverTo(m_hover, true);
     QToolButton::enterEvent(e);
 }
 
 void PillButton::leaveEvent(QEvent *e) {
-    m_hover = false;
-    update();
+    hoverTo(m_hover, false);
     QToolButton::leaveEvent(e);
 }
 
@@ -88,29 +124,32 @@ void PillButton::paintEvent(QPaintEvent *) {
     QPainter p(this);
     p.setRenderHint(QPainter::Antialiasing);
     const Tokens &k = Theme::t();
+    const qreal h = hoverValue(m_hover);
+    auto mix = [](const QColor &a, const QColor &b, qreal t) {
+        return QColor::fromRgbF(a.redF() + (b.redF() - a.redF()) * t, a.greenF() + (b.greenF() - a.greenF()) * t,
+                                a.blueF() + (b.blueF() - a.blueF()) * t, a.alphaF() + (b.alphaF() - a.alphaF()) * t);
+    };
     QColor bg, fg;
+    QColor border = Qt::transparent;
     switch (m_kind) {
-    case Primary: bg = m_hover ? k.ivyHover : k.ivy; fg = k.onIvy; break;
-    case Secondary: bg = k.sunken; fg = k.ink; break;
-    case Ghost: bg = m_hover ? k.sunken : QColor(Qt::transparent); fg = k.ink2; break;
-    case Danger: bg = k.danger; fg = k.canvas; break;
+    case Primary: bg = mix(k.ivy, k.ivyHover, h); fg = k.onIvy; break;
+    case Secondary: bg = mix(k.surface, k.hover, h); fg = k.ink; border = k.line.darker(Theme::dark() ? 70 : 108); break;
+    case Ghost: bg = mix(Theme::alpha(k.sunken, 0), k.sunken, h); fg = k.ink2; break;
+    case Danger: bg = mix(k.danger, k.danger.lighter(Theme::dark() ? 92 : 112), h); fg = k.canvas; break;
     }
     if (!isEnabled()) {
         bg = Theme::alpha(bg, bg.alphaF() * 0.45);
         fg = Theme::alpha(fg, 0.7);
-    } else if (m_hover && m_kind != Ghost && m_kind != Primary) {
-        bg = m_kind == Secondary ? k.hover : bg.lighter(Theme::dark() ? 92 : 125);
     }
-    const qreal s = isDown() ? 0.97 : 1.0;
-    QRectF r = QRectF(rect()).adjusted(0.5, 0.5, -0.5, -0.5);
-    r = QRectF(r.center() - QPointF(r.width() * s / 2, r.height() * s / 2), r.size() * s);
-    p.setPen(Qt::NoPen);
+    if (isDown()) bg = bg.darker(Theme::dark() ? 90 : 106);
+    const QRectF r = QRectF(rect()).adjusted(0.5, 0.5, -0.5, -0.5);
+    p.setPen(border.alpha() ? QPen(border, 1) : Qt::NoPen);
     p.setBrush(bg);
-    p.drawRoundedRect(r, r.height() / 2, r.height() / 2);
+    p.drawRoundedRect(r, Theme::radius, Theme::radius);
     if (hasFocus()) {
-        p.setPen(QPen(Theme::alpha(k.ivy, 0.45), 2));
+        p.setPen(QPen(Theme::alpha(k.ivy, 0.55), 1.5));
         p.setBrush(Qt::NoBrush);
-        p.drawRoundedRect(r.adjusted(-1, -1, 1, 1), r.height() / 2 + 1, r.height() / 2 + 1);
+        p.drawRoundedRect(r.adjusted(1, 1, -1, -1), Theme::radius - 1, Theme::radius - 1);
     }
     p.setPen(fg);
     p.setFont(font());
@@ -178,29 +217,47 @@ void LeafWidget::paintEvent(QPaintEvent *) {
 // --- Paper ---
 
 Paper::Paper(QWidget *parent) : QFrame(parent) {
-    setAttribute(Qt::WA_TranslucentBackground, false);
     connect(Theme::instance(), &Theme::changed, this, qOverload<>(&QWidget::update));
 }
 
 void Paper::paintEvent(QPaintEvent *) {
     QPainter p(this);
-    p.setRenderHint(QPainter::Antialiasing);
-    const Tokens &k = Theme::t();
-    p.fillRect(rect(), k.canvas);
-    const QRectF r = QRectF(rect()).adjusted(6, 4, -6, -8);
-    // A soft shadow from a few translucent layers (shadow-paper).
-    const QColor shade = Theme::dark() ? QColor(0, 0, 0) : QColor(16, 24, 32);
-    for (int i = 6; i >= 1; --i) {
-        QColor c = shade;
-        c.setAlphaF(float((Theme::dark() ? 0.07 : 0.012) * (7 - i)));
-        p.setPen(Qt::NoPen);
-        p.setBrush(c);
-        p.drawRoundedRect(r.adjusted(-i * 0.5 + 1, i * 0.6, i * 0.5 - 1, i * 1.2), 20 + i, 20 + i);
-    }
-    p.setPen(QPen(Theme::dark() ? QColor(255, 255, 255, 13) : QColor(16, 24, 32, 13), 0.8));
-    p.setBrush(k.surface);
-    p.drawRoundedRect(r, 20, 20);
+    p.fillRect(rect(), Theme::t().surface);
 }
+
+// --- Divider ---
+
+namespace {
+
+class Hairline : public QSplitterHandle {
+public:
+    using QSplitterHandle::QSplitterHandle;
+
+protected:
+    void paintEvent(QPaintEvent *) override {
+        QPainter p(this);
+        // The grab area is a few pixels wide; only the middle line shows.
+        const Tokens &k = Theme::t();
+        if (orientation() == Qt::Horizontal) {
+            p.fillRect(rect(), k.canvas);
+            p.fillRect(QRect(width() / 2, 0, 1, height()), k.line);
+        } else {
+            p.fillRect(rect(), k.surface);
+            p.fillRect(QRect(0, height() / 2, width(), 1), k.line);
+        }
+    }
+};
+
+} // namespace
+
+Divider::Divider(Qt::Orientation o, QWidget *parent) : QSplitter(o, parent) {
+    setHandleWidth(1);
+    connect(Theme::instance(), &Theme::changed, this, [this] {
+        for (int i = 0; i < count(); ++i) handle(i)->update();
+    });
+}
+
+QSplitterHandle *Divider::createHandle() { return new Hairline(orientation(), this); }
 
 // --- helpers ---
 
@@ -213,7 +270,52 @@ void rise(QWidget *w, int ms) {
     a->setStartValue(0.0);
     a->setEndValue(1.0);
     a->setEasingCurve(Theme::easeOut());
-    QObject::connect(a, &QPropertyAnimation::finished, w, [w] { w->setGraphicsEffect(nullptr); });
+    QPointer<QGraphicsOpacityEffect> guard(fx);
+    QObject::connect(a, &QPropertyAnimation::finished, w, [w, guard] {
+        if (guard && w->graphicsEffect() == guard) w->setGraphicsEffect(nullptr);
+    });
+    a->start(QAbstractAnimation::DeleteWhenStopped);
+}
+
+void sink(QWidget *w, int ms, std::function<void()> done) {
+    if (!w) return;
+    if (!done) done = [w] { w->hide(); };
+    if (Theme::reducedMotion() || !w->isVisible()) return done();
+    auto *fx = new QGraphicsOpacityEffect(w);
+    w->setGraphicsEffect(fx);
+    auto *a = new QPropertyAnimation(fx, "opacity", w);
+    a->setDuration(ms);
+    a->setStartValue(1.0);
+    a->setEndValue(0.0);
+    a->setEasingCurve(QEasingCurve::InCubic);
+    QPointer<QGraphicsOpacityEffect> guard(fx);
+    QObject::connect(a, &QPropertyAnimation::finished, w, [w, guard, done] {
+        done();
+        if (guard && w->graphicsEffect() == guard) w->setGraphicsEffect(nullptr);
+    });
+    a->start(QAbstractAnimation::DeleteWhenStopped);
+}
+
+void slide(QWidget *w, Qt::Orientation o, int from, int to, int ms, std::function<void()> done) {
+    if (!w) return;
+    const QByteArray prop = o == Qt::Horizontal ? "maximumWidth" : "maximumHeight";
+    // A running slide on the same widget gives way to the new one.
+    for (auto *old : w->findChildren<QPropertyAnimation *>(QString(), Qt::FindDirectChildrenOnly))
+        if (old->propertyName() == prop && old->targetObject() == w) old->stop();
+    if (Theme::reducedMotion()) {
+        w->setProperty(prop, QWIDGETSIZE_MAX);
+        if (done) done();
+        return;
+    }
+    auto *a = new QPropertyAnimation(w, prop, w);
+    a->setDuration(ms);
+    a->setStartValue(from);
+    a->setEndValue(to);
+    a->setEasingCurve(Theme::easeOut());
+    QObject::connect(a, &QPropertyAnimation::finished, w, [w, prop, done] {
+        w->setProperty(prop, QWIDGETSIZE_MAX);
+        if (done) done();
+    });
     a->start(QAbstractAnimation::DeleteWhenStopped);
 }
 

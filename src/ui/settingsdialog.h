@@ -36,6 +36,7 @@ class SettingsDialog : public QDialog {
 public:
     SettingsDialog(Session *session, QWidget *parent = nullptr);
     void showVaultTab();
+    void showAboutTab();
 
 signals:
     void importMarkdown();
@@ -53,4 +54,6 @@ private:
 
     QPointer<Session> m_session;
     QTabWidget *m_tabs;
+    QWidget *m_vault = nullptr;
+    QWidget *m_about = nullptr;
 };

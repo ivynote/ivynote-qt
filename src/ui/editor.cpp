@@ -1,6 +1,7 @@
 #include "ui/editor.h"
 
 #include "core/i18n.h"
+#include "core/markdown.h"
 #include "ui/theme.h"
 
 #include <QAbstractItemView>
@@ -170,6 +171,13 @@ void MarkdownEditor::updateMargins() {
     setViewportMargins(side, 0, side, 0);
     m_hl->setColumnWidth(std::min(m_maxColumn, w - 2 * side));
     m_hl->setViewportHeight(height());
+    emit columnChanged();
+}
+
+QRect MarkdownEditor::textColumn() const {
+    const int side = viewportMargins().left();
+    // documentMargin matches the 2 px a frameless line edit keeps before its text.
+    return {side, 0, std::max(0, width() - 2 * side), height()};
 }
 
 void MarkdownEditor::resizeEvent(QResizeEvent *e) {
@@ -199,9 +207,18 @@ void MarkdownEditor::updateActive() {
         return;
     }
     const QTextCursor c = textCursor();
-    const int a = document()->findBlock(c.selectionStart()).blockNumber();
-    const int b = document()->findBlock(c.selectionEnd()).blockNumber();
-    m_hl->setActive(a, b);
+    QTextBlock first = document()->findBlock(c.selectionStart());
+    QTextBlock last = document()->findBlock(c.selectionEnd());
+    // A table shows its source as a whole, so its columns stay lined up.
+    auto inTable = [](const QTextBlock &b) {
+        const auto *info = b.isValid() ? static_cast<BlockInfo *>(b.userData()) : nullptr;
+        return info && info->kind == BlockInfo::Table;
+    };
+    if (inTable(first))
+        while (inTable(first.previous()) && static_cast<BlockInfo *>(first.userData())->tableRow > 0) first = first.previous();
+    if (inTable(last))
+        while (inTable(last.next()) && static_cast<BlockInfo *>(last.next().userData())->tableRow > 0) last = last.next();
+    m_hl->setActive(first.blockNumber(), last.blockNumber());
 }
 
 void MarkdownEditor::scrollToLine(int line) {
@@ -248,7 +265,7 @@ void MarkdownEditor::paintEvent(QPaintEvent *e) {
             if (run.isNull()) return;
             p.setPen(Qt::NoPen);
             p.setBrush(k.codeBg.darker(Theme::dark() ? 70 : 102));
-            p.drawRoundedRect(run.adjusted(-6, -2, 6, 2), live ? 12 : 8, live ? 12 : 8);
+            p.drawRoundedRect(run.adjusted(-6, -2, 6, 2), Theme::radius, Theme::radius);
             run = QRectF();
         };
         for (QTextBlock b = first; b.isValid(); b = b.next()) {
@@ -273,12 +290,21 @@ void MarkdownEditor::paintEvent(QPaintEvent *e) {
     p.setRenderHint(QPainter::Antialiasing);
     p.setRenderHint(QPainter::SmoothPixmapTransform);
     const qreal dpr = devicePixelRatioF();
+    QHash<int, TableGeometry> tables;
     for (QTextBlock b = first; b.isValid(); b = b.next()) {
         const QRectF br = layout->blockBoundingRect(b);
         if (br.top() > visible.bottom()) break;
         const auto *info = static_cast<BlockInfo *>(b.userData());
         if (!info) continue;
         const QRectF r = br.translated(off);
+        if (info->kind == BlockInfo::Table && !info->active) {
+            // Rows run to the next line's top: the line height's leading is
+            // not part of the block's rectangle.
+            QRectF row = r;
+            if (b.next().isValid()) row.setBottom(layout->blockBoundingRect(b.next()).top() + off.y());
+            paintTableRow(p, b, row, tables);
+            continue;
+        }
         if (info->kind == BlockInfo::Quote && !info->active) {
             p.setPen(Qt::NoPen);
             p.setBrush(Theme::alpha(k.ivy, 0.35));
@@ -301,7 +327,7 @@ void MarkdownEditor::paintEvent(QPaintEvent *e) {
             const QRectF box(cr.left() + 1, cr.center().y() - s / 2 + 1, s, s);
             p.setPen(done ? Qt::NoPen : QPen(k.faint, 1.4));
             p.setBrush(done ? k.ivy : Qt::transparent);
-            p.drawRoundedRect(box, 4, 4);
+            p.drawRoundedRect(box, 3, 3);
             if (done) {
                 QPainterPath tick;
                 tick.moveTo(box.left() + s * 0.26, box.top() + s * 0.52);
@@ -316,7 +342,7 @@ void MarkdownEditor::paintEvent(QPaintEvent *e) {
             const QRectF area(r.left(), r.top() + 6, info->imageSize.width(), info->imageSize.height());
             const QImage img = image ? image(info->imageId) : QImage();
             QPainterPath clip;
-            clip.addRoundedRect(area, 16, 16);
+            clip.addRoundedRect(area, Theme::radius, Theme::radius);
             if (!img.isNull()) {
                 p.save();
                 p.setClipPath(clip);
@@ -333,6 +359,84 @@ void MarkdownEditor::paintEvent(QPaintEvent *e) {
             Q_UNUSED(dpr);
         }
     }
+}
+
+MarkdownEditor::TableGeometry MarkdownEditor::tableGeometry(const QTextBlock &start) const {
+    TableGeometry g;
+    QStringList rows;
+    for (QTextBlock b = start; b.isValid(); b = b.next()) {
+        const auto *info = static_cast<BlockInfo *>(b.userData());
+        if (!info || info->kind != BlockInfo::Table || (b != start && info->tableRow == 0)) break;
+        rows << b.text();
+    }
+    if (rows.size() < 2) return g;
+    const QStringList head = md::tableCells(rows[0]);
+    g.cols = int(std::max<qsizetype>(1, head.size()));
+    g.align = md::tableAlignments(rows[1]);
+    while (g.align.size() < g.cols) g.align << int(Qt::AlignLeft);
+    const QFontMetricsF bold(Theme::uiFont(m_px - 1, QFont::DemiBold));
+    const QFontMetricsF plain(Theme::uiFont(m_px - 1));
+    const qreal pad = 12;
+    QList<qreal> w(g.cols, 40);
+    for (int i = 0; i < rows.size(); ++i) {
+        if (i == 1) continue;
+        const QStringList cells = md::tableCells(rows[i]);
+        for (int c = 0; c < g.cols && c < cells.size(); ++c)
+            w[c] = std::max(w[c], (i == 0 ? bold : plain).horizontalAdvance(md::plainInline(cells[c])) + 2 * pad + 1);
+    }
+    // Wide tables give up width in proportion, down to a readable minimum.
+    const qreal avail = viewport()->width() - 2 * document()->documentMargin() - 1;
+    qreal sum = 0;
+    for (qreal x : w) sum += x;
+    if (sum > avail)
+        for (qreal &x : w) x = std::max<qreal>(56, x * avail / sum);
+    g.x << 0;
+    for (qreal x : w) g.x << g.x.last() + std::round(x);
+    return g;
+}
+
+void MarkdownEditor::paintTableRow(QPainter &p, const QTextBlock &block, const QRectF &r, QHash<int, TableGeometry> &cache) const {
+    const Tokens &k = Theme::t();
+    const auto *info = static_cast<BlockInfo *>(block.userData());
+    QTextBlock start = block;
+    while (static_cast<BlockInfo *>(start.userData())->tableRow > 0 && start.previous().isValid() && start.previous().userData() &&
+           static_cast<BlockInfo *>(start.previous().userData())->kind == BlockInfo::Table)
+        start = start.previous();
+    auto it = cache.find(start.blockNumber());
+    if (it == cache.end()) it = cache.insert(start.blockNumber(), tableGeometry(start));
+    const TableGeometry &g = *it;
+    if (g.cols == 0 || g.x.size() < 2) return;
+    p.save();
+    p.setRenderHint(QPainter::Antialiasing, false);
+    const qreal left = std::round(r.left());
+    const qreal top = std::round(r.top());
+    const qreal bottom = std::round(r.bottom());
+    const qreal right = left + g.x.last();
+    const QColor grid = Theme::dark() ? k.line.lighter(125) : k.line.darker(104);
+    if (info->tableRow == 1) {
+        // The delimiter: a thin band that closes the header.
+        p.fillRect(QRectF(left, top, right - left, bottom - top), k.sunken);
+        p.setPen(QPen(grid, 1));
+        p.drawLine(QPointF(left, bottom), QPointF(right, bottom));
+        for (qreal x : g.x) p.drawLine(QPointF(left + x, top), QPointF(left + x, bottom));
+        p.restore();
+        return;
+    }
+    if (info->tableRow == 0) p.fillRect(QRectF(left, top, right - left, bottom - top), k.sunken);
+    p.setPen(QPen(grid, 1));
+    if (info->tableRow == 0) p.drawLine(QPointF(left, top), QPointF(right, top));
+    p.drawLine(QPointF(left, bottom), QPointF(right, bottom));
+    for (qreal x : g.x) p.drawLine(QPointF(left + x, top), QPointF(left + x, bottom));
+    const QStringList cells = md::tableCells(block.text());
+    p.setFont(Theme::uiFont(m_px - 1, info->tableRow == 0 ? QFont::DemiBold : QFont::Normal));
+    p.setPen(info->tableRow == 0 ? k.ink : k.ink2);
+    const QFontMetricsF fm(p.font());
+    for (int c = 0; c < g.cols && c < cells.size(); ++c) {
+        const QRectF cell(left + g.x[c] + 12, top, g.x[c + 1] - g.x[c] - 24, bottom - top);
+        const QString text = fm.elidedText(md::plainInline(cells[c]), Qt::ElideRight, cell.width());
+        p.drawText(cell, Qt::AlignVCenter | g.align.value(c, Qt::AlignLeft), text);
+    }
+    p.restore();
 }
 
 const LinkSpan *MarkdownEditor::linkAt(const QPoint &pos, QTextBlock *blockOut) const {

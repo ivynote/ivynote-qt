@@ -36,6 +36,10 @@ public:
     static void setReducedMotion(bool on);
     static QEasingCurve easeOut();   // 1 - (1-t)^4
     static QEasingCurve spring();    // slight overshoot
+    // One corner radius for everything drawn by hand. Native controls on
+    // Breeze, Fusion and Windows sit between square and ~4 px; larger, softer
+    // corners next to them look out of place.
+    static constexpr qreal radius = 4;
 
 signals:
     void changed();

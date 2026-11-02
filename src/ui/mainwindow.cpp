@@ -101,13 +101,12 @@ MainWindow::MainWindow() {
     resize(1180, 760);
     setMinimumSize(640, 420);
 
-    m_split = new QSplitter(Qt::Horizontal, this);
-    m_split->setHandleWidth(1);
+    m_split = new Divider(Qt::Horizontal, this);
     m_split->setChildrenCollapsible(false);
     m_shelf = new Shelf(m_split);
     auto *paper = new Paper(m_split);
     auto *paperCol = new QVBoxLayout(paper);
-    paperCol->setContentsMargins(8, 6, 8, 10);
+    paperCol->setContentsMargins(0, 0, 0, 0);
     m_stack = new QStackedWidget(paper);
     m_pane = new NotePane(m_stack);
     m_empty = emptyState(m_stack);
@@ -123,7 +122,7 @@ MainWindow::MainWindow() {
 
     connect(m_shelf, &Shelf::openNote, this, &MainWindow::openNote);
     connect(m_shelf, &Shelf::newNote, this, &MainWindow::newNote);
-    connect(m_shelf, &Shelf::moveNote, this, &MainWindow::moveNote);
+    connect(m_shelf, &Shelf::moveNotes, this, &MainWindow::moveNotes);
     connect(m_shelf, &Shelf::searchRequested, this, [this] { showSearch(); });
     connect(m_shelf, &Shelf::collapseRequested, this, &MainWindow::toggleShelf);
     connect(m_shelf, &Shelf::vaultMenuRequested, this, &MainWindow::showVaultMenu);
@@ -272,6 +271,7 @@ bool MainWindow::openVault(const QString &id) {
 void MainWindow::closeVault() {
     if (!m_session) return;
     m_pane->flush();
+    dropEmptyDraft(QString());
     m_shelf->setSession(nullptr);
     m_pane->setSession(nullptr);
     Session *s = m_session;
@@ -434,10 +434,7 @@ void MainWindow::buildMenus() {
     m_remoteActions << syncNow;
 
     QMenu *help = bar->addMenu(T("帮助(&H)"));
-    help->addAction(T("关于常青笔记"), this, [this] {
-        SettingsDialog dlg(nullptr, this);
-        dlg.exec();
-    });
+    help->addAction(T("关于常青笔记"), this, [this] { showSettings(AboutPage); });
 }
 
 void MainWindow::rebuildVaultMenu() {
@@ -474,7 +471,7 @@ void MainWindow::showVaultMenu(const QPoint &global) {
     menu.addAction(icons::themed("plus"), T("新建本地笔记库…"), this, [this] { addVault(false); });
     menu.addAction(icons::themed("cloud"), T("连接 Ivynote 服务器…"), this, [this] { addVault(true); });
     menu.addSeparator();
-    menu.addAction(icons::themed("settings"), T("笔记库设置…"), this, [this] { showSettings(true); });
+    menu.addAction(icons::themed("settings"), T("笔记库设置…"), this, [this] { showSettings(VaultPage); });
     menu.exec(global);
 }
 
@@ -507,10 +504,26 @@ void MainWindow::openNote(const QString &id) {
     if (!m_session) return;
     const bool has = !id.isEmpty() && m_session->engine()->note(id);
     if (m_pane->noteId() != id || !has) m_pane->setNote(has ? id : QString());
-    m_stack->setCurrentWidget(has ? static_cast<QWidget *>(m_pane) : m_empty);
+    QWidget *page = has ? static_cast<QWidget *>(m_pane) : m_empty;
+    if (m_stack->currentWidget() != page) {
+        m_stack->setCurrentWidget(page);
+        rise(page, 200);
+    }
+    // Leaving a new note that was never written in: it was never wanted.
+    dropEmptyDraft(has ? id : QString());
     m_shelf->setCurrentNote(has ? id : QString());
     for (QAction *a : std::as_const(m_noteActions)) a->setEnabled(has);
     if (has) QSettings().setValue(noteKey(m_session), id);
+}
+
+void MainWindow::dropEmptyDraft(const QString &next) {
+    if (m_draftId.isEmpty() || m_draftId == next || !m_session) return;
+    const QString id = m_draftId;
+    m_draftId.clear();
+    if (m_pane->noteId() == id) m_pane->flush();
+    const Note *n = m_session->engine()->note(id);
+    if (n && !n->trashed() && n->title.trimmed().isEmpty() && n->body.trimmed().isEmpty() && n->tags.isEmpty())
+        m_session->engine()->deleteNote(id);
 }
 
 void MainWindow::newNote(const QString &folderId) {
@@ -524,19 +537,29 @@ void MainWindow::newNote(const QString &folderId) {
     }
     const Note n = m_session->engine()->createNote(init);
     openNote(n.id);
+    m_draftId = n.id;
     m_pane->focusTitle();
 }
 
-void MainWindow::moveNote(const QString &id) {
-    if (!m_session) return;
-    const Note *n = m_session->engine()->note(id);
-    if (!n) return;
+void MainWindow::moveNote(const QString &id) { moveNotes({id}); }
+
+void MainWindow::moveNotes(const QStringList &ids) {
+    if (!m_session || ids.isEmpty()) return;
+    const Note *first = m_session->engine()->note(ids.first());
+    if (!first) return;
     QString target;
-    if (!dialogs::pickFolder(m_session->engine(), this, T("移动到"), n->folderId, &target)) return;
-    NotePatch p;
-    p.folderId = target;
-    m_session->engine()->updateNote(id, p);
-    m_shelf->setCurrentNote(id);
+    const QString title = ids.size() == 1 ? T("移动到")
+                                          : (i18n::isZh() ? QStringLiteral("把 %1 篇笔记移动到") : QStringLiteral("Move %1 notes to")).arg(ids.size());
+    if (!dialogs::pickFolder(m_session->engine(), this, title, first->folderId, &target)) return;
+    m_pane->flush();
+    for (const QString &id : ids) {
+        const Note *n = m_session->engine()->note(id);
+        if (!n || n->trashed() || n->folderId == target) continue;
+        NotePatch p;
+        p.folderId = target;
+        m_session->engine()->updateNote(id, p);
+    }
+    if (!m_pane->noteId().isEmpty()) m_shelf->setCurrentNote(m_pane->noteId());
 }
 
 void MainWindow::duplicateNote(const QString &id) {
@@ -599,9 +622,10 @@ void MainWindow::showSearch(const QString &initial) {
     palette->open(initial);
 }
 
-void MainWindow::showSettings(bool vaultTab) {
+void MainWindow::showSettings(SettingsPage page) {
     SettingsDialog dlg(m_session, this);
-    if (vaultTab) dlg.showVaultTab();
+    if (page == VaultPage) dlg.showVaultTab();
+    else if (page == AboutPage) dlg.showAboutTab();
     connect(&dlg, &SettingsDialog::importMarkdown, this, &MainWindow::importMarkdown, Qt::QueuedConnection);
     connect(&dlg, &SettingsDialog::importVault, this, &MainWindow::importVault, Qt::QueuedConnection);
     connect(&dlg, &SettingsDialog::exportMarkdown, this, &MainWindow::exportMarkdown, Qt::QueuedConnection);
