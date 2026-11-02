@@ -96,6 +96,7 @@ if(UNIX AND NOT APPLE)
     install(FILES resources/ivynote.desktop DESTINATION ${CMAKE_INSTALL_DATADIR}/applications RENAME app.ivynote.Ivynote.desktop)
     install(FILES resources/icons/app.svg DESTINATION ${CMAKE_INSTALL_DATADIR}/icons/hicolor/scalable/apps RENAME app.ivynote.Ivynote.svg)
     install(FILES resources/icons/app-512.png DESTINATION ${CMAKE_INSTALL_DATADIR}/icons/hicolor/512x512/apps RENAME app.ivynote.Ivynote.png)
+    install(FILES resources/app.ivynote.Ivynote.appdata.xml DESTINATION ${CMAKE_INSTALL_DATADIR}/metainfo)
 endif()
 endif()
 
