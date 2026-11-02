@@ -17,6 +17,9 @@ TOOLS_DIR=${TOOLS_DIR:-}
 [[ -n $TOOLS_DIR ]] && export PATH="$TOOLS_DIR:$PATH"
 # CI runners have no FUSE; the tools are AppImages themselves.
 export APPIMAGE_EXTRACT_AND_RUN=1
+# appimagetool validates the AppStream metadata with appstreamcli, which
+# otherwise fetches every URL in it (and fails while the repo is private).
+export AS_VALIDATE_NONET=1
 
 APPDIR="$BUILD_DIR/AppDir"
 APP_ID=app.ivynote.Ivynote
@@ -32,6 +35,12 @@ linuxdeploy --appdir "$APPDIR" \
     --executable "$APPDIR/usr/bin/ivynote" \
     --desktop-file "$APPDIR/usr/share/applications/$APP_ID.desktop" \
     --plugin qt
+
+# linuxdeploy puts the SVG icon at the AppDir top level and points .DirIcon
+# at it, but .DirIcon must be a PNG. Use the PNG for both.
+rm -f "${APPDIR:?}/.DirIcon" "${APPDIR:?}/${APP_ID:?}.svg"
+cp "$APPDIR/usr/share/icons/hicolor/512x512/apps/$APP_ID.png" "$APPDIR/$APP_ID.png"
+ln -s "$APP_ID.png" "$APPDIR/.DirIcon"
 
 # Input-method plugins: ibus ships with Qt, fcitx5 is built into Qt's plugin
 # dir by CI. linuxdeploy-plugin-qt normally copies them all; make sure fcitx5

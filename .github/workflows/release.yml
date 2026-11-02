@@ -35,14 +35,14 @@ env:
 
 jobs:
   meta:
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-24.04
     outputs:
       version: ${{ steps.v.outputs.version }}
       numeric: ${{ steps.v.outputs.numeric }}
       prerelease: ${{ steps.v.outputs.prerelease }}
       release: ${{ steps.v.outputs.release }}
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v6
       - id: v
         run: |
           if [[ $GITHUB_REF == refs/tags/v* ]]; then
@@ -74,7 +74,7 @@ jobs:
       VERSION: ${{ needs.meta.outputs.version }}
       DEPS: ${{ github.workspace }}/deps
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v6
 
       - name: System packages
         run: |
@@ -85,7 +85,7 @@ jobs:
             libxkbcommon-dev libxkbcommon-x11-0 libxcb1-dev libxcb-cursor0 \
             libxcb-icccm4 libxcb-image0 libxcb-keysyms1 libxcb-randr0 \
             libxcb-render-util0 libxcb-shape0 libxcb-xinerama0 libxcb-xkb1 \
-            extra-cmake-modules gettext
+            extra-cmake-modules gettext appstream
 
       - name: Qt
         uses: jurplel/install-qt-action@v4
@@ -98,7 +98,7 @@ jobs:
 
       - name: Cache built dependencies
         id: deps-cache
-        uses: actions/cache@v4
+        uses: actions/cache@v5
         with:
           path: deps
           key: linux-deps-qt${{ env.QT_VERSION }}-keychain${{ env.QTKEYCHAIN_VERSION }}-fcitx${{ env.FCITX5_QT_VERSION }}
@@ -187,14 +187,14 @@ jobs:
           timeout 120 xvfb-run -a dist/Ivynote-*.AppImage
           test -s "$IVY_SCREENSHOT"
 
-      - uses: actions/upload-artifact@v4
+      - uses: actions/upload-artifact@v6
         if: always()
         with:
           name: smoke-linux
           path: ${{ runner.temp }}/smoke
           if-no-files-found: ignore
 
-      - uses: actions/upload-artifact@v4
+      - uses: actions/upload-artifact@v6
         with:
           name: linux
           path: dist/*
@@ -212,11 +212,22 @@ jobs:
       run:
         shell: pwsh
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v6
 
-      - uses: ilammy/msvc-dev-cmd@v1
-        with:
-          arch: x64
+      # MSVC x64 environment for the later steps (what vcvars64.bat sets up).
+      - name: MSVC environment
+        run: |
+          $vswhere = "${env:ProgramFiles(x86)}\Microsoft Visual Studio\Installer\vswhere.exe"
+          $vs = & $vswhere -latest -products * -requires Microsoft.VisualStudio.Component.VC.Tools.x86.x64 -property installationPath
+          if (-not $vs) { Write-Error "Visual Studio with C++ tools not found"; exit 1 }
+          $before = @{}
+          Get-ChildItem env: | ForEach-Object { $before[$_.Name] = $_.Value }
+          cmd /c "`"$vs\VC\Auxiliary\Build\vcvars64.bat`" >nul && set" | ForEach-Object {
+            if ($_ -match '^([^=]+)=(.*)$' -and $before[$matches[1]] -ne $matches[2]) {
+              "$($matches[1])=$($matches[2])" | Out-File -Append -Encoding utf8 $env:GITHUB_ENV
+            }
+          }
+          if ($LASTEXITCODE) { exit $LASTEXITCODE }
 
       - name: Qt
         uses: jurplel/install-qt-action@v4
@@ -228,7 +239,7 @@ jobs:
           cache: true
 
       - name: Cache vcpkg binaries
-        uses: actions/cache@v4
+        uses: actions/cache@v5
         with:
           path: vcpkg-cache
           key: vcpkg-${{ runner.os }}-libsodium-md4c-pkgconf-v1
@@ -296,7 +307,7 @@ jobs:
           if ($p.ExitCode -ne 0) { Write-Error "ivynote.exe exited with code $($p.ExitCode)"; exit 1 }
           if (-not (Test-Path $env:IVY_SCREENSHOT)) { Write-Error "no screenshot"; exit 1 }
 
-      - uses: actions/upload-artifact@v4
+      - uses: actions/upload-artifact@v6
         if: always()
         with:
           name: smoke-windows
@@ -323,7 +334,7 @@ jobs:
             packaging\windows\ivynote.iss
           if ($LASTEXITCODE) { exit $LASTEXITCODE }
 
-      - uses: actions/upload-artifact@v4
+      - uses: actions/upload-artifact@v6
         with:
           name: windows
           path: dist/*
@@ -332,15 +343,15 @@ jobs:
   release:
     needs: [meta, linux, windows]
     if: needs.meta.outputs.release == 'true'
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-24.04
     permissions:
       contents: write
     env:
       VERSION: ${{ needs.meta.outputs.version }}
       GH_TOKEN: ${{ github.token }}
     steps:
-      - uses: actions/checkout@v4
-      - uses: actions/download-artifact@v4
+      - uses: actions/checkout@v6
+      - uses: actions/download-artifact@v7
         with:
           pattern: "{linux,windows}"
           path: dist
