@@ -15,6 +15,18 @@
 #include <sodium.h>
 
 int main(int argc, char *argv[]) {
+#ifdef Q_OS_LINUX
+    // KDE/GNOME Wayland sessions leave QT_IM_MODULE unset so Qt uses the
+    // Wayland text-input protocol. The AppImage ships only the xcb platform
+    // plugin, and under XWayland Qt then falls back to "compose" and never
+    // reaches fcitx/ibus. Infer the IM from XMODIFIERS; "wayland" stays first
+    // so a native Wayland build still prefers text-input.
+    if (!qEnvironmentVariableIsSet("QT_IM_MODULE") && !qEnvironmentVariableIsSet("QT_IM_MODULES")) {
+        const QByteArray xmod = qgetenv("XMODIFIERS");
+        const char *im = xmod.contains("fcitx") ? "fcitx" : xmod.contains("ibus") ? "ibus" : nullptr;
+        if (im) qputenv("QT_IM_MODULES", QByteArray("wayland;") + im);
+    }
+#endif
     QApplication::setOrganizationName(QStringLiteral("Ivynote"));
     QApplication::setOrganizationDomain(QStringLiteral("ivynote.app"));
     QApplication::setApplicationName(QStringLiteral("Ivynote"));
