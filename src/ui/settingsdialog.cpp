@@ -78,9 +78,9 @@ SettingsDialog::SettingsDialog(Session *session, QWidget *parent) : QDialog(pare
     auto *col = new QVBoxLayout(this);
     m_tabs = new QTabWidget(this);
     m_tabs->addTab(generalTab(), T("通用"));
-    if (session) m_tabs->addTab(vaultTab(), T("笔记库"));
+    if (session) m_tabs->addTab(m_vault = vaultTab(), T("笔记库"));
     if (session && session->isRemote()) m_tabs->addTab(accountTab(), T("账户"));
-    m_tabs->addTab(aboutTab(), T("关于"));
+    m_tabs->addTab(m_about = aboutTab(), T("关于"));
     col->addWidget(m_tabs);
     auto *buttons = new QDialogButtonBox(QDialogButtonBox::Close, this);
     buttons->button(QDialogButtonBox::Close)->setText(T("关闭"));
@@ -89,8 +89,10 @@ SettingsDialog::SettingsDialog(Session *session, QWidget *parent) : QDialog(pare
 }
 
 void SettingsDialog::showVaultTab() {
-    if (m_tabs->count() > 1) m_tabs->setCurrentIndex(1);
+    if (m_vault) m_tabs->setCurrentWidget(m_vault);
 }
+
+void SettingsDialog::showAboutTab() { m_tabs->setCurrentWidget(m_about); }
 
 QWidget *SettingsDialog::generalTab() {
     auto *w = new QWidget;

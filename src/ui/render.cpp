@@ -24,17 +24,128 @@ QString unescape(QString s) {
 
 } // namespace
 
+namespace {
+
+// QTextBrowser has no flex, padding on blocks or left borders, so the
+// pieces that need them become small tables.
+
+const QRegularExpression &listTag() {
+    static const QRegularExpression re(QStringLiteral(R"RE(<(/?)(ul|ol|li)((?: [^>]*)?)>)RE"));
+    return re;
+}
+
+QString parseList(const QString &h, qsizetype &i, const QString &name, const QString &open);
+
+// Copies HTML up to the closing tag `stop` (consumed), rewriting lists.
+QString parseFlow(const QString &h, qsizetype &i, const QString &stop) {
+    QString out;
+    while (i < h.size()) {
+        const auto m = listTag().match(h, i);
+        if (!m.hasMatch()) break;
+        out += h.mid(i, m.capturedStart() - i);
+        i = m.capturedEnd();
+        const bool close = !m.captured(1).isEmpty();
+        const QString name = m.captured(2);
+        if (close && name == stop) return out;
+        if (close || name == QLatin1String("li")) {
+            out += m.captured(0);
+            continue;
+        }
+        out += parseList(h, i, name, m.captured(0));
+    }
+    out += h.mid(i);
+    i = h.size();
+    return out;
+}
+
+QString parseList(const QString &h, qsizetype &i, const QString &name, const QString &open) {
+    struct Item {
+        bool task = false;
+        QString body;
+    };
+    QList<Item> items;
+    while (i < h.size()) {
+        const auto m = listTag().match(h, i);
+        if (!m.hasMatch()) {
+            i = h.size();
+            break;
+        }
+        i = m.capturedEnd();
+        const bool close = !m.captured(1).isEmpty();
+        if (close && m.captured(2) == name) break;
+        if (!close && m.captured(2) == QLatin1String("li")) {
+            Item it;
+            it.task = m.captured(3).contains(QLatin1String("task-list-item"));
+            it.body = parseFlow(h, i, QStringLiteral("li"));
+            items << it;
+        }
+    }
+    // Every list becomes rows: the marker (checkbox, faint bullet or number)
+    // in a narrow column, the text hanging beside it.
+    static const QRegularExpression box(QStringLiteral(R"RE(^\s*((?:<a href="ivy-task:\d+" class="task">|<span class="task">)<img src="ivy-check:([01])"[^>]*>(?:</a>|</span>)))RE"));
+    static const QRegularExpression start(QStringLiteral(R"RE(start="(\d+)")RE"));
+    int number = 1;
+    if (const auto sm = start.match(open); sm.hasMatch()) number = sm.captured(1).toInt();
+    QString out = QStringLiteral("<table class=\"t\" width=\"100%\" cellspacing=\"0\" cellpadding=\"0\">");
+    for (const Item &it : std::as_const(items)) {
+        QString mark, body = it.body;
+        bool done = false;
+        if (const auto bm = box.match(body); it.task && bm.hasMatch()) {
+            mark = bm.captured(1);
+            done = bm.captured(2) == QLatin1String("1");
+            body = body.mid(bm.capturedEnd());
+        } else {
+            mark = name == QLatin1String("ol") ? QStringLiteral("%1.").arg(number) : QStringLiteral("•");
+        }
+        number++;
+        const bool box = mark.startsWith(u'<');
+        out += QStringLiteral("<tr><td class=\"%1\" width=\"%2\" valign=\"top\">%3</td><td class=\"%4\" valign=\"top\">%5</td></tr>")
+                   .arg(box ? QStringLiteral("tb") : QStringLiteral("tm"), name == QLatin1String("ol") && !box ? QStringLiteral("28") : QStringLiteral("24"), mark,
+                        done ? QStringLiteral("td") : QStringLiteral("ti"), body.trimmed());
+    }
+    return out + QStringLiteral("</table>\n");
+}
+
+QString layoutForView(QString html) {
+    qsizetype i = 0;
+    html = parseFlow(html, i, QString());
+    // Code blocks on a padded panel, without the blank line md4c ends them with.
+    html.replace(QLatin1String("\n</code></pre>"), QLatin1String("</code></pre>"));
+    static const QRegularExpression pre(QStringLiteral(R"RE(<pre>(.*?)</pre>)RE"), QRegularExpression::DotMatchesEverythingOption);
+    html.replace(pre, QStringLiteral("<table class=\"c\" width=\"100%\" cellspacing=\"0\" cellpadding=\"0\"><tr><td class=\"c\"><pre>\\1</pre></td></tr></table>\n"));
+    // Quotes with the ivy bar on the left, innermost first.
+    static const QRegularExpression quote(QStringLiteral(R"RE(<blockquote>((?:(?!<blockquote>).)*?)</blockquote>)RE"),
+                                          QRegularExpression::DotMatchesEverythingOption);
+    while (html.contains(QLatin1String("<blockquote>"))) {
+        const QString before = html;
+        html.replace(quote, QStringLiteral("<table class=\"q\" width=\"100%\" cellspacing=\"0\" cellpadding=\"0\"><tr><td class=\"qb\" width=\"2\"></td>"
+                                           "<td class=\"qt\">\\1</td></tr></table>\n"));
+        if (html == before) break;
+    }
+    // A thin full-width line, as the live editor draws it.
+    html.replace(QLatin1String("<hr>"), QLatin1String("<table class=\"hr\" width=\"100%\" cellspacing=\"0\" cellpadding=\"0\"><tr><td class=\"hr\"></td></tr></table>"));
+    return html;
+}
+
+} // namespace
+
 bool isSafeExternalUrl(const QString &url) {
     const QString scheme = QUrl(url).scheme().toLower();
     return scheme == QLatin1String("http") || scheme == QLatin1String("https") || scheme == QLatin1String("mailto");
 }
 
 QString renderMarkdown(const QString &markdown, const RenderOptions &opts) {
-    const QByteArray src = markdown.toUtf8();
+    const QByteArray src = md::separateTables(markdown).toUtf8();
     QByteArray out;
     const unsigned flags = MD_DIALECT_GITHUB | MD_FLAG_NOHTML | MD_FLAG_WIKILINKS;
     md_html(src.constData(), MD_SIZE(src.size()), collect, &out, flags, 0);
     QString html = QString::fromUtf8(out);
+    if (opts.forView) {
+        // Mark the cells of Markdown tables before other tables are made.
+        static const QRegularExpression cell(QStringLiteral(R"RE(<(td|th)((?: [^>]*)?)>)RE"));
+        html.replace(cell, QStringLiteral("<\\1 class=\"g\"\\2>"));
+        html.replace(QLatin1String("<table>"), QLatin1String("<table class=\"g\" width=\"100%\" cellspacing=\"0\" cellpadding=\"0\">"));
+    }
 
     // Wiki links: <x-wikilink data-target="T">label</x-wikilink>
     static const QRegularExpression wiki(QStringLiteral(R"RE(<x-wikilink data-target="([^"]*)">(.*?)</x-wikilink>)RE"),
@@ -110,7 +221,7 @@ QString renderMarkdown(const QString &markdown, const RenderOptions &opts) {
     html.replace(resLink, QStringLiteral("<a href=\"ivy://res/\\1\" class=\"file\">📎 "));
 
     // Task boxes become clickable glyphs (QTextBrowser has no form inputs).
-    static const QRegularExpression task(QStringLiteral(R"RE(<input type="checkbox" class="task-list-item-checkbox"( checked="checked")?[^>]*>)RE"));
+    static const QRegularExpression task(QStringLiteral(R"RE(<input type="checkbox" class="task-list-item-checkbox"[^>]*?( checked(?:="checked")?)?>)RE"));
     result.clear();
     last = 0;
     int n = 0;
@@ -118,7 +229,9 @@ QString renderMarkdown(const QString &markdown, const RenderOptions &opts) {
         const auto m = it.next();
         result += html.mid(last, m.capturedStart() - last);
         const bool done = !m.captured(1).isEmpty();
-        const QString box = done ? QStringLiteral("☑") : QStringLiteral("☐");
+        // The view draws the box as an image, like the editor does.
+        const QString box = opts.forView ? QStringLiteral("<img src=\"ivy-check:%1\" width=\"18\" height=\"20\">").arg(done ? 1 : 0)
+                                         : (done ? QStringLiteral("☑") : QStringLiteral("☐"));
         if (opts.interactiveTasks) result += QStringLiteral("<a href=\"ivy-task:%1\" class=\"task\">%2</a>").arg(n).arg(box);
         else result += QStringLiteral("<span class=\"task\">%1</span>").arg(box);
         n++;
@@ -156,5 +269,7 @@ QString renderMarkdown(const QString &markdown, const RenderOptions &opts) {
         last = m.capturedEnd();
     }
     result += html.mid(last);
-    return result;
+    if (!opts.forView) return result;
+    return layoutForView(result);
 }
+

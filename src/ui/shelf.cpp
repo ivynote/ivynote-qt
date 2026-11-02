@@ -36,6 +36,41 @@ constexpr int kGap = 10;
 
 QString settingsKey(Session *s, const char *k) { return QStringLiteral("vault/%1/%2").arg(s->info().id, QLatin1String(k)); }
 
+// The vault name with a small chevron, as one quiet button.
+class VaultButton : public QToolButton {
+public:
+    explicit VaultButton(QWidget *parent) : QToolButton(parent) {
+        setCursor(Qt::PointingHandCursor);
+        setAttribute(Qt::WA_Hover);
+        setFont(Theme::uiFont(14.5, QFont::DemiBold));
+        setSizePolicy(QSizePolicy::Ignored, QSizePolicy::Fixed);
+        setFixedHeight(32);
+    }
+
+protected:
+    void paintEvent(QPaintEvent *) override {
+        QPainter p(this);
+        p.setRenderHint(QPainter::Antialiasing);
+        const Tokens &k = Theme::t();
+        const QFontMetrics fm(font());
+        const int chevron = 14;
+        const int textW = std::min(fm.horizontalAdvance(text()), width() - 16 - chevron - 4);
+        const QRectF bg(0, 0, std::min(width(), textW + 16 + chevron + 4), height());
+        if (underMouse() || isDown() || hasFocus()) {
+            p.setPen(Qt::NoPen);
+            p.setBrush(Theme::alpha(k.ink, isDown() ? 0.09 : 0.055));
+            p.drawRoundedRect(bg.adjusted(0.5, 2.5, -0.5, -2.5), Theme::radius, Theme::radius);
+        }
+        p.setFont(font());
+        p.setPen(k.ink);
+        p.drawText(QRect(8, 0, textW, height()), Qt::AlignVCenter | Qt::AlignLeft, fm.elidedText(text(), Qt::ElideRight, textW));
+        p.drawPixmap(QRect(8 + textW + 4, (height() - chevron) / 2 + 1, chevron, chevron),
+                     icons::pixmap(QStringLiteral("chevron-down"), underMouse() ? k.ink2 : k.muted, chevron, devicePixelRatioF()));
+    }
+};
+
+QStringList splitIds(const QString &ids) { return ids.split(u'\n', Qt::SkipEmptyParts); }
+
 } // namespace
 
 // --- model ---
@@ -113,6 +148,12 @@ QRect ShelfDelegate::headingButton(const QRect &row, int i) {
     return {row.right() - 8 - (3 - i) * (s + 2), row.bottom() - kRowH + (kRowH - s) / 2 + 1, s, s};
 }
 
+bool ShelfDelegate::isSelected(const ShelfRow &r) const {
+    if (r.kind != TreeRow::NoteRow) return false;
+    if (!multi.isEmpty()) return multi.contains(r.id);
+    return !selectedNote.isEmpty() && r.id == selectedNote;
+}
+
 void ShelfDelegate::paint(QPainter *p, const QStyleOptionViewItem &opt, const QModelIndex &index) const {
     const auto *m = static_cast<const ShelfModel *>(index.model());
     const ShelfRow &r = m->row(index.row());
@@ -120,30 +161,36 @@ void ShelfDelegate::paint(QPainter *p, const QStyleOptionViewItem &opt, const QM
     const qreal dpr = p->device()->devicePixelRatioF();
     p->save();
     p->setRenderHint(QPainter::Antialiasing);
+    if (motion < 1.0 && fresh.contains(r.key)) {
+        // New rows drop in from just above.
+        p->setOpacity(motion);
+        p->translate(0, -(1.0 - motion) * 6);
+    }
     QRect rect = opt.rect;
     rect.setTop(rect.bottom() - kRowH + 1);
     const QRect pill = rect.adjusted(6, 1, -6, -1);
+    const qreal rad = Theme::radius;
     const bool hover = index.row() == hoverRow;
-    const bool selected = r.kind == TreeRow::NoteRow && r.id == selectedNote && !selectedNote.isEmpty();
+    const bool selected = isSelected(r);
     const bool isDrop = !dropKey.isEmpty() && r.key == dropKey;
 
     if (isDrop) {
-        p->setPen(QPen(Theme::alpha(k.ivy, 0.4), 1));
+        p->setPen(QPen(Theme::alpha(k.ivy, 0.5), 1));
         p->setBrush(k.ivySoft);
-        p->drawRoundedRect(QRectF(pill).adjusted(0.5, 0.5, -0.5, -0.5), 8, 8);
+        p->drawRoundedRect(QRectF(pill).adjusted(0.5, 0.5, -0.5, -0.5), rad, rad);
     } else if (selected) {
         p->setPen(Qt::NoPen);
-        p->setBrush(Theme::alpha(k.ink, 0.09));
-        p->drawRoundedRect(pill, 8, 8);
+        p->setBrush(multi.isEmpty() ? Theme::alpha(k.ink, 0.085) : Theme::alpha(k.ivy, Theme::dark() ? 0.28 : 0.16));
+        p->drawRoundedRect(pill, rad, rad);
     } else if (hover && r.kind != TreeRow::Heading) {
         p->setPen(Qt::NoPen);
         p->setBrush(Theme::alpha(k.ink, 0.045));
-        p->drawRoundedRect(pill, 8, 8);
+        p->drawRoundedRect(pill, rad, rad);
     }
     if (opt.state & QStyle::State_HasFocus && opt.state & QStyle::State_Selected && !selected) {
-        p->setPen(QPen(Theme::alpha(k.ivy, 0.45), 1.5));
+        p->setPen(QPen(Theme::alpha(k.ivy, 0.5), 1));
         p->setBrush(Qt::NoBrush);
-        p->drawRoundedRect(QRectF(pill).adjusted(1, 1, -1, -1), 8, 8);
+        p->drawRoundedRect(QRectF(pill).adjusted(0.5, 0.5, -0.5, -0.5), rad, rad);
     }
 
     if (r.kind == TreeRow::Heading) {
@@ -174,7 +221,8 @@ void ShelfDelegate::paint(QPainter *p, const QStyleOptionViewItem &opt, const QM
     if (r.expandable) {
         p->save();
         p->translate(x + 8, cy + 0.5);
-        if (r.open) p->rotate(90);
+        if (motion < 1.0 && r.key == turnKey) p->rotate(90 * (turnOpen ? motion : 1.0 - motion));
+        else if (r.open) p->rotate(90);
         p->drawPixmap(QRectF(-7, -7, 14, 14), icons::pixmap(QStringLiteral("disclosure"), hover ? k.ink2 : k.faint, 14, dpr), QRectF());
         p->restore();
     }
@@ -237,7 +285,7 @@ ShelfView::ShelfView(QWidget *parent) : QListView(parent), m_delegate(new ShelfD
     setItemDelegate(m_delegate);
     setFrameShape(QFrame::NoFrame);
     setMouseTracking(true);
-    setSelectionMode(QAbstractItemView::SingleSelection);
+    setSelectionMode(QAbstractItemView::SingleSelection); // multi selection is kept by hand
     setDragEnabled(true);
     setAcceptDrops(true);
     setDropIndicatorShown(false);
@@ -257,8 +305,49 @@ ShelfView::ShelfView(QWidget *parent) : QListView(parent), m_delegate(new ShelfD
 
 ShelfModel *ShelfView::shelfModel() const { return static_cast<ShelfModel *>(model()); }
 
+QStringList ShelfView::selectedNotes() const {
+    QStringList ids;
+    for (const ShelfRow &r : shelfModel()->rows())
+        if (r.kind == TreeRow::NoteRow && m_delegate->multi.contains(r.id) && !ids.contains(r.id)) ids << r.id;
+    return ids;
+}
+
+void ShelfView::clearMulti() {
+    if (m_delegate->multi.isEmpty()) return;
+    m_delegate->multi.clear();
+    viewport()->update();
+}
+
+void ShelfView::toggleMulti(const ShelfRow &r) {
+    QSet<QString> &multi = m_delegate->multi;
+    // Trash and live notes are not picked together: they take different actions.
+    if (!multi.isEmpty()) {
+        const int row = shelfModel()->indexOfNote(*multi.begin());
+        if (row >= 0 && shelfModel()->row(row).trash != r.trash) multi.clear();
+    }
+    if (multi.isEmpty() && !m_delegate->selectedNote.isEmpty() && m_delegate->selectedNote != r.id) {
+        const int open = shelfModel()->indexOfNote(m_delegate->selectedNote);
+        if (open >= 0 && shelfModel()->row(open).trash == r.trash) multi.insert(m_delegate->selectedNote);
+    }
+    if (multi.contains(r.id)) multi.remove(r.id);
+    else multi.insert(r.id);
+    viewport()->update();
+}
+
+void ShelfView::selectRange(int from, int to) {
+    if (from > to) std::swap(from, to);
+    const bool trash = shelfModel()->row(to).trash;
+    m_delegate->multi.clear();
+    for (int i = from; i <= to; ++i) {
+        const ShelfRow &r = shelfModel()->row(i);
+        if (r.kind == TreeRow::NoteRow && r.trash == trash) m_delegate->multi.insert(r.id);
+    }
+    viewport()->update();
+}
+
 void ShelfView::mousePressEvent(QMouseEvent *e) {
     const QModelIndex idx = indexAt(e->pos());
+    m_releaseOpens = -1;
     if (e->button() == Qt::LeftButton && idx.isValid()) {
         const ShelfRow &r = shelfModel()->row(idx.row());
         if (r.kind == TreeRow::Heading) {
@@ -271,10 +360,30 @@ void ShelfView::mousePressEvent(QMouseEvent *e) {
         }
         setCurrentIndex(idx);
         if (r.kind == TreeRow::NoteRow) {
+            const auto mods = e->modifiers();
             QListView::mousePressEvent(e); // allows dragging
+            if (mods & (Qt::ControlModifier | Qt::MetaModifier)) {
+                toggleMulti(r);
+                m_anchorKey = r.key;
+                return;
+            }
+            if (mods & Qt::ShiftModifier) {
+                int anchor = shelfModel()->indexOfKey(m_anchorKey);
+                if (anchor < 0) anchor = shelfModel()->indexOfNote(m_delegate->selectedNote);
+                selectRange(anchor < 0 ? idx.row() : anchor, idx.row());
+                return;
+            }
+            m_anchorKey = r.key;
+            if (m_delegate->multi.size() > 1 && m_delegate->multi.contains(r.id)) {
+                // Maybe the start of dragging the whole selection.
+                m_releaseOpens = idx.row();
+                return;
+            }
+            clearMulti();
             emit activated(idx.row(), false);
             return;
         }
+        clearMulti();
         if (r.kind == TreeRow::FolderRow) {
             QListView::mousePressEvent(e);
         }
@@ -282,6 +391,17 @@ void ShelfView::mousePressEvent(QMouseEvent *e) {
         return;
     }
     QListView::mousePressEvent(e);
+}
+
+void ShelfView::mouseReleaseEvent(QMouseEvent *e) {
+    QListView::mouseReleaseEvent(e);
+    if (m_releaseOpens >= 0 && m_releaseOpens < model()->rowCount() && indexAt(e->pos()).row() == m_releaseOpens) {
+        const int row = m_releaseOpens;
+        m_releaseOpens = -1;
+        clearMulti();
+        emit activated(row, false);
+    }
+    m_releaseOpens = -1;
 }
 
 void ShelfView::mouseMoveEvent(QMouseEvent *e) {
@@ -300,9 +420,19 @@ void ShelfView::leaveEvent(QEvent *e) {
 }
 
 void ShelfView::keyPressEvent(QKeyEvent *e) {
+    if (e->key() == Qt::Key_Escape && !m_delegate->multi.isEmpty()) return clearMulti();
+    if (e->matches(QKeySequence::SelectAll)) {
+        // Every live note that is showing.
+        m_delegate->multi.clear();
+        for (const ShelfRow &r : shelfModel()->rows())
+            if (r.kind == TreeRow::NoteRow && !r.trash) m_delegate->multi.insert(r.id);
+        viewport()->update();
+        return;
+    }
     const QModelIndex idx = currentIndex();
     if (!idx.isValid()) return QListView::keyPressEvent(e);
     const ShelfRow &r = shelfModel()->row(idx.row());
+    if (e->key() == Qt::Key_Up || e->key() == Qt::Key_Down) clearMulti();
     switch (e->key()) {
     case Qt::Key_Return:
     case Qt::Key_Enter:
@@ -393,32 +523,49 @@ void ShelfView::dropEvent(QDropEvent *e) {
     const int row = dropRowAt(e->position().toPoint(), e->mimeData());
     if (row < 0) return e->ignore();
     const QString mime = e->mimeData()->hasFormat(kFolderMime) ? QLatin1String(kFolderMime) : QLatin1String(kNoteMime);
+    clearMulti();
     emit dropped(mime, QString::fromUtf8(e->mimeData()->data(mime)), row);
     e->setDropAction(Qt::CopyAction); // the model is rebuilt; nothing to remove
     e->accept();
 }
 
 void ShelfView::startDrag(Qt::DropActions actions) {
+    m_releaseOpens = -1;
     const QModelIndex idx = currentIndex();
     if (!idx.isValid()) return;
     QMimeData *mime = model()->mimeData({idx});
     if (!mime) return;
+    const ShelfRow &r = shelfModel()->row(idx.row());
+    QString text = idx.data().toString();
+    int count = 1;
+    if (r.kind == TreeRow::NoteRow && m_delegate->multi.size() > 1 && m_delegate->multi.contains(r.id)) {
+        // The whole selection travels together.
+        const QStringList ids = selectedNotes();
+        mime->setData(kNoteMime, ids.join(u'\n').toUtf8());
+        count = int(ids.size());
+        text = (i18n::isZh() ? QStringLiteral("%1 篇笔记") : QStringLiteral("%1 notes")).arg(count);
+    }
     auto *drag = new QDrag(this);
     drag->setMimeData(mime);
-    // A small pill with the title as the drag image.
-    const QString text = idx.data().toString();
+    // A small label with the title (or the count) as the drag image.
+    const Tokens &k = Theme::t();
     QFont f = Theme::uiFont(13);
     const int w = std::min(240, QFontMetrics(f).horizontalAdvance(text) + 28);
-    QPixmap pm(QSize(w, 28) * devicePixelRatioF());
+    const int stack = count > 1 ? 3 : 0;
+    QPixmap pm(QSize(w + stack, 28 + stack) * devicePixelRatioF());
     pm.setDevicePixelRatio(devicePixelRatioF());
     pm.fill(Qt::transparent);
     QPainter p(&pm);
     p.setRenderHint(QPainter::Antialiasing);
-    p.setBrush(Theme::t().surface);
-    p.setPen(QPen(Theme::t().line, 1));
-    p.drawRoundedRect(QRectF(0.5, 0.5, w - 1, 27), 14, 14);
+    p.setPen(QPen(k.line.darker(Theme::dark() ? 70 : 115), 1));
+    if (stack) {
+        p.setBrush(k.sunken);
+        p.drawRoundedRect(QRectF(stack + 0.5, stack + 0.5, w - 1, 27), Theme::radius, Theme::radius);
+    }
+    p.setBrush(k.surface);
+    p.drawRoundedRect(QRectF(0.5, 0.5, w - 1, 27), Theme::radius, Theme::radius);
     p.setFont(f);
-    p.setPen(Theme::t().ink);
+    p.setPen(k.ink);
     p.drawText(QRect(14, 0, w - 28, 28), Qt::AlignVCenter, QFontMetrics(f).elidedText(text, Qt::ElideRight, w - 28));
     p.end();
     drag->setPixmap(pm);
@@ -435,19 +582,12 @@ Shelf::Shelf(QWidget *parent) : QWidget(parent), m_model(new ShelfModel(this)), 
     col->setSpacing(0);
 
     auto *header = new QWidget(this);
-    header->setFixedHeight(52);
+    header->setFixedHeight(48);
     auto *hrow = new QHBoxLayout(header);
-    hrow->setContentsMargins(12, 6, 8, 2);
+    hrow->setContentsMargins(6, 8, 8, 0);
     hrow->setSpacing(2);
-    m_vaultButton = new QToolButton(header);
-    m_vaultButton->setAutoRaise(true);
-    m_vaultButton->setCursor(Qt::PointingHandCursor);
-    m_vaultButton->setToolButtonStyle(Qt::ToolButtonTextOnly);
-    m_vaultButton->setFont(Theme::serif(19));
+    m_vaultButton = new VaultButton(header);
     m_vaultButton->setToolTip(T("切换笔记库"));
-    m_vaultButton->setSizePolicy(QSizePolicy::Preferred, QSizePolicy::Fixed);
-    m_vaultButton->setMinimumWidth(0);
-    m_vaultButton->setStyleSheet(QStringLiteral("QToolButton{border:none;padding:4px 6px;border-radius:10px;text-align:left;}"));
     connect(m_vaultButton, &QToolButton::clicked, this, [this] {
         emit vaultMenuRequested(m_vaultButton->mapToGlobal(QPoint(0, m_vaultButton->height() + 2)));
     });
@@ -490,6 +630,19 @@ Shelf::Shelf(QWidget *parent) : QWidget(parent), m_model(new ShelfModel(this)), 
     m_rebuildTimer.setSingleShot(true);
     m_rebuildTimer.setInterval(0);
     connect(&m_rebuildTimer, &QTimer::timeout, this, &Shelf::rebuild);
+    m_motion.setStartValue(0.0);
+    m_motion.setEndValue(1.0);
+    m_motion.setDuration(200);
+    m_motion.setEasingCurve(Theme::easeOut());
+    connect(&m_motion, &QVariantAnimation::valueChanged, this, [this](const QVariant &v) {
+        m_view->delegate()->motion = v.toReal();
+        m_view->viewport()->update();
+    });
+    connect(&m_motion, &QVariantAnimation::finished, this, [this] {
+        m_view->delegate()->motion = 1.0;
+        m_view->delegate()->fresh.clear();
+        m_view->viewport()->update();
+    });
     m_clock.setInterval(30000);
     connect(&m_clock, &QTimer::timeout, this, &Shelf::updateStatus);
     m_clock.start();
@@ -514,6 +667,7 @@ void Shelf::setSession(Session *session) {
     m_engine = session ? session->engine() : nullptr;
     m_current.clear();
     m_view->delegate()->selectedNote.clear();
+    m_view->delegate()->multi.clear();
     if (session) {
         loadState();
         connect(m_engine, &SyncEngine::dataChanged, this, [this] { m_rebuildTimer.start(); });
@@ -528,7 +682,8 @@ void Shelf::setSession(Session *session) {
 
 void Shelf::updateHeader() {
     const QString name = m_session ? m_session->info().name : QString();
-    m_vaultButton->setText(name + QStringLiteral("  ▾"));
+    m_vaultButton->setText(name);
+    m_vaultButton->update();
     m_vaultButton->setToolTip(m_session && m_session->isRemote()
                                   ? QStringLiteral("%1\n%2 · %3").arg(name, m_session->info().server, m_session->info().username)
                                   : name + u'\n' + T("本地笔记库"));
@@ -588,6 +743,23 @@ void Shelf::rebuild() {
             }
             rows << r;
         }
+    }
+    // Rows that were not there before fade in (an opened notebook, a new note).
+    QSet<QString> before;
+    for (const ShelfRow &r : m_model->rows()) before.insert(r.key);
+    QSet<QString> fresh;
+    QSet<QString> notes;
+    for (const ShelfRow &r : std::as_const(rows)) {
+        if (!before.isEmpty() && !before.contains(r.key)) fresh.insert(r.key);
+        if (r.kind == TreeRow::NoteRow) notes.insert(r.id);
+    }
+    // A picked note that is no longer showing is no longer picked.
+    m_view->delegate()->multi.intersect(notes);
+    if (!fresh.isEmpty() && !Theme::reducedMotion() && isVisible()) {
+        m_view->delegate()->fresh.unite(fresh);
+        m_view->delegate()->motion = 0.0;
+        m_motion.stop();
+        m_motion.start();
     }
     const int scroll = m_view->verticalScrollBar()->value();
     m_model->setRows(rows);
@@ -657,6 +829,13 @@ void Shelf::onToggle(int row) {
     if (!r.expandable) return;
     if (m_expanded.contains(r.key)) m_expanded.remove(r.key);
     else m_expanded.insert(r.key);
+    m_view->delegate()->turnKey = r.key;
+    m_view->delegate()->turnOpen = m_expanded.contains(r.key);
+    if (!Theme::reducedMotion()) {
+        m_view->delegate()->motion = 0.0;
+        m_motion.stop();
+        m_motion.start();
+    }
     rebuild();
     saveState();
 }
@@ -693,26 +872,51 @@ void Shelf::renameRow(int row) {
     }
 }
 
+void Shelf::trashNotes(const QStringList &ids, bool trashed) {
+    if (!m_engine || ids.isEmpty()) return;
+    QStringList changed;
+    for (const QString &id : ids) {
+        const Note *n = m_engine->note(id);
+        if (!n || n->trashed() == trashed) continue;
+        NotePatch p;
+        p.trashed = trashed;
+        m_engine->updateNote(id, p);
+        changed << id;
+    }
+    m_view->clearMulti();
+    if (!trashed || changed.isEmpty()) return;
+    QPointer<SyncEngine> e(m_engine);
+    const QString text = changed.size() == 1 ? T("已移到回收站")
+                                             : (i18n::isZh() ? QStringLiteral("已将 %1 篇笔记移到回收站") : QStringLiteral("Moved %1 notes to the trash")).arg(changed.size());
+    Toaster::show(text, false, T("撤销"), [e, changed] {
+        if (!e) return;
+        for (const QString &id : changed) {
+            NotePatch u;
+            u.trashed = false;
+            e->updateNote(id, u);
+        }
+    });
+}
+
 void Shelf::deleteRow(int row) {
     if (!m_engine) return;
     const ShelfRow r = m_model->row(row);
+    const QStringList picked = m_view->selectedNotes();
+    if (r.kind == TreeRow::NoteRow && picked.size() > 1 && picked.contains(r.id)) {
+        if (!r.trash) return trashNotes(picked, true);
+        const QString text = (i18n::isZh() ? QStringLiteral("永久删除这 %1 篇笔记？此操作无法撤销。") : QStringLiteral("Permanently delete these %1 notes? This cannot be undone.")).arg(picked.size());
+        if (QMessageBox::question(this, T("永久删除"), text) != QMessageBox::Yes) return;
+        m_view->clearMulti();
+        for (const QString &id : picked) m_engine->deleteNote(id);
+        return;
+    }
     if (r.kind == TreeRow::NoteRow) {
         if (r.trash) {
             if (QMessageBox::question(this, T("永久删除"), T("永久删除这篇笔记？此操作无法撤销。")) == QMessageBox::Yes)
                 m_engine->deleteNote(r.id);
             return;
         }
-        NotePatch p;
-        p.trashed = true;
-        m_engine->updateNote(r.id, p);
-        QPointer<SyncEngine> e(m_engine);
-        const QString id = r.id;
-        Toaster::show(T("已移到回收站"), false, T("撤销"), [e, id] {
-            if (!e) return;
-            NotePatch u;
-            u.trashed = false;
-            e->updateNote(id, u);
-        });
+        trashNotes({r.id}, true);
     } else if (r.kind == TreeRow::FolderRow) {
         const auto answer = QMessageBox::question(
             this, T("删除笔记本"),
@@ -728,6 +932,9 @@ void Shelf::deleteRow(int row) {
 void Shelf::onContextMenu(int row, const QPoint &global) {
     if (!m_engine) return;
     const ShelfRow r = m_model->row(row);
+    const QStringList picked = m_view->selectedNotes();
+    if (r.kind == TreeRow::NoteRow && picked.size() > 1 && picked.contains(r.id)) return batchMenu(picked, r.trash, global);
+    m_view->clearMulti();
     QMenu menu(this);
     QPointer<SyncEngine> e(m_engine);
     const QString id = r.id;
@@ -751,7 +958,7 @@ void Shelf::onContextMenu(int row, const QPoint &global) {
             if (e) e->updateNote(id, p);
         });
         menu.addAction(icons::themed("edit"), T("重命名"), this, [this, row] { renameRow(row); });
-        menu.addAction(icons::themed("move"), T("移动到…"), this, [this, id] { emit moveNote(id); });
+        menu.addAction(icons::themed("move"), T("移动到…"), this, [this, id] { emit moveNotes({id}); });
         menu.addSeparator();
         menu.addAction(icons::themed("trash"), T("移到回收站"), this, [this, row] { deleteRow(row); });
     } else if (r.kind == TreeRow::TagRow) {
@@ -785,6 +992,42 @@ void Shelf::onContextMenu(int row, const QPoint &global) {
     menu.exec(global);
 }
 
+void Shelf::batchMenu(const QStringList &ids, bool trash, const QPoint &global) {
+    QMenu menu(this);
+    QPointer<SyncEngine> e(m_engine);
+    auto *head = menu.addAction((i18n::isZh() ? QStringLiteral("已选 %1 篇笔记") : QStringLiteral("%1 notes selected")).arg(ids.size()));
+    head->setEnabled(false);
+    menu.addSeparator();
+    if (trash) {
+        menu.addAction(icons::themed("restore"), T("恢复"), this, [this, ids] { trashNotes(ids, false); });
+        menu.addAction(icons::themed("trash"), T("永久删除"), this, [this, ids] {
+            const int row = m_model->indexOfNote(ids.first());
+            if (row >= 0) deleteRow(row);
+        });
+    } else {
+        bool allPinned = true;
+        for (const QString &id : ids)
+            if (const Note *n = m_engine->note(id); n && !n->pinned) allPinned = false;
+        menu.addAction(icons::themed("pin"), allPinned ? T("取消置顶") : T("设为置顶"), this, [this, e, ids, allPinned] {
+            for (const QString &id : ids) {
+                NotePatch p;
+                p.pinned = !allPinned;
+                if (e) e->updateNote(id, p);
+            }
+            m_view->clearMulti();
+        });
+        menu.addAction(icons::themed("move"), T("移动到…"), this, [this, ids] {
+            emit moveNotes(ids);
+            m_view->clearMulti();
+        });
+        menu.addSeparator();
+        menu.addAction(icons::themed("trash"), T("移到回收站"), this, [this, ids] { trashNotes(ids, true); });
+    }
+    menu.addSeparator();
+    menu.addAction(T("取消选择"), this, [this] { m_view->clearMulti(); });
+    menu.exec(global);
+}
+
 void Shelf::onHeadingButton(int which, const QPoint &global) {
     if (which == 0) {
         QMenu menu(this);
@@ -806,11 +1049,12 @@ void Shelf::onHeadingButton(int which, const QPoint &global) {
     }
 }
 
-void Shelf::onDropped(const QString &mime, const QString &id, int row) {
+void Shelf::onDropped(const QString &mime, const QString &ids, int row) {
     if (!m_engine) return;
     const ShelfRow r = m_model->row(row);
     const QString target = r.kind == TreeRow::Heading ? QString() : r.dropFolder;
     if (mime == QLatin1String(kFolderMime)) {
+        const QString id = ids;
         if (id == target) return;
         if (!m_engine->canMoveFolder(id, target)) {
             Toaster::show(T("不能把笔记本移到它自己里面"), true);
@@ -818,9 +1062,17 @@ void Shelf::onDropped(const QString &mime, const QString &id, int row) {
         }
         m_engine->updateFolder(id, std::nullopt, target);
     } else {
-        NotePatch p;
-        p.folderId = target;
-        m_engine->updateNote(id, p);
+        int moved = 0;
+        for (const QString &id : splitIds(ids)) {
+            const Note *n = m_engine->note(id);
+            if (!n || n->trashed() || n->folderId == target) continue;
+            NotePatch p;
+            p.folderId = target;
+            m_engine->updateNote(id, p);
+            moved++;
+        }
+        if (moved > 1)
+            Toaster::show((i18n::isZh() ? QStringLiteral("已移动 %1 篇笔记") : QStringLiteral("Moved %1 notes")).arg(moved));
     }
     if (!target.isEmpty()) m_expanded.insert(target);
     rebuild();

@@ -1,6 +1,7 @@
 #include "ui/editor.h"
 
 #include "core/i18n.h"
+#include "core/markdown.h"
 #include "ui/theme.h"
 
 #include <QAbstractItemView>
@@ -8,7 +9,9 @@
 #include <QApplication>
 #include <QCompleter>
 #include <QFileInfo>
+#include <QContextMenuEvent>
 #include <QKeyEvent>
+#include <QMenu>
 #include <QMimeData>
 #include <QPainter>
 #include <QPainterPath>
@@ -18,6 +21,7 @@
 #include <QTextBlock>
 #include <QTextDocument>
 #include <QTextLayout>
+#include <QVariantAnimation>
 
 MarkdownEditor::MarkdownEditor(QWidget *parent)
     : QTextEdit(parent), m_hl(new MarkdownHighlighter(document())), m_completer(new QCompleter(this)),
@@ -61,7 +65,34 @@ MarkdownEditor::MarkdownEditor(QWidget *parent)
         }
     });
     connect(this, &QTextEdit::selectionChanged, this, &MarkdownEditor::updateActive);
-    connect(document(), &QTextDocument::contentsChange, this, [this](int, int removed, int added) {
+    m_reveal.setStartValue(1.0);
+    m_reveal.setEndValue(0.0);
+    m_reveal.setDuration(150);
+    m_reveal.setEasingCurve(QEasingCurve::OutCubic);
+    connect(&m_reveal, &QVariantAnimation::valueChanged, viewport(), qOverload<>(&QWidget::update));
+    connect(&m_reveal, &QVariantAnimation::finished, this, [this] {
+        m_revealShot = QPixmap();
+        viewport()->update();
+    });
+    // A scrolled or edited view no longer matches the snapshot.
+    connect(verticalScrollBar(), &QScrollBar::valueChanged, this, [this] {
+        if (m_reveal.state() == QAbstractAnimation::Running) {
+            m_reveal.stop();
+            m_revealShot = QPixmap();
+        }
+    });
+    connect(document(), &QTextDocument::contentsChange, this, [this](int pos, int removed, int added) {
+        if (m_relayout) return;
+        // The highlighter has run; lay out the lines whose kind changed.
+        if (!m_undoing && document()->isUndoRedoEnabled()) {
+            QList<int> blocks = m_hl->takeChanged();
+            const int a = document()->findBlock(pos).blockNumber();
+            const int b = document()->findBlock(pos + added).blockNumber();
+            for (int i = std::max(0, a); i <= b; ++i) blocks << i;
+            relayout(blocks, true);
+        } else if (!document()->isUndoRedoEnabled()) {
+            m_hl->takeChanged();
+        }
         if (m_loading || (removed == 0 && added == 0)) return;
         emit edited();
     });
@@ -94,14 +125,91 @@ void MarkdownEditor::setMarkdown(const QString &text) {
     updateActive();
 }
 
-void MarkdownEditor::applyLineHeight() {
-    // Block formats only change while loading, so they never reach the undo
-    // stack; new lines inherit them.
+QTextBlockFormat MarkdownEditor::blockFormatFor(const QTextBlock &b) const {
+    // Spacing and indents by kind: code sits inset on its panel, wrapped
+    // lines of lists and quotes hang under their text.
+    const bool live = m_hl->mode() == MarkdownHighlighter::Live;
+    const auto *info = static_cast<BlockInfo *>(b.userData());
+    QTextBlockFormat f;
+    int lh = live ? 175 : 165;
+    qreal left = 0, indent = 0;
+    if (info && (info->kind == BlockInfo::Code || info->kind == BlockInfo::Fence)) {
+        left = 16;
+        lh = 150;
+    } else if (info && info->hang > 0) {
+        left = std::round(info->hang);
+        indent = -left;
+    }
+    f.setLineHeight(lh, QTextBlockFormat::ProportionalHeight);
+    f.setLeftMargin(left);
+    f.setRightMargin(info && (info->kind == BlockInfo::Code || info->kind == BlockInfo::Fence) ? 16 : 0);
+    f.setTextIndent(indent);
+    return f;
+}
+
+void MarkdownEditor::relayout(const QList<int> &blocks, bool afterEdit) {
+    // Block formats follow the text. After an edit they land on the undo
+    // stack as a step of their own, which undo and redo take together with
+    // the edit before it (see undo()).
+    QList<QPair<int, QTextBlockFormat>> changes;
+    for (int n : blocks) {
+        const QTextBlock b = document()->findBlockByNumber(n);
+        if (!b.isValid()) continue;
+        const QTextBlockFormat want = blockFormatFor(b);
+        const QTextBlockFormat now = b.blockFormat();
+        if (now.lineHeight() != want.lineHeight() || now.lineHeightType() != want.lineHeightType() || now.leftMargin() != want.leftMargin() ||
+            now.rightMargin() != want.rightMargin() || now.textIndent() != want.textIndent())
+            changes.append({b.position(), want});
+    }
+    if (changes.isEmpty()) return;
+    m_relayout = true;
     QTextCursor c(document());
-    c.select(QTextCursor::Document);
-    QTextBlockFormat bf;
-    bf.setLineHeight(m_hl->mode() == MarkdownHighlighter::Live ? 175 : 165, QTextBlockFormat::ProportionalHeight);
-    c.mergeBlockFormat(bf);
+    c.beginEditBlock();
+    for (const auto &[pos, f] : std::as_const(changes)) {
+        c.setPosition(pos);
+        c.mergeBlockFormat(f);
+    }
+    c.endEditBlock();
+    m_relayout = false;
+    Q_UNUSED(afterEdit);
+}
+
+bool MarkdownEditor::layoutSettled() const {
+    for (QTextBlock b = document()->begin(); b.isValid(); b = b.next()) {
+        const QTextBlockFormat want = blockFormatFor(b), now = b.blockFormat();
+        if (now.leftMargin() != want.leftMargin() || now.textIndent() != want.textIndent() || now.lineHeight() != want.lineHeight() ||
+            now.rightMargin() != want.rightMargin())
+            return false;
+    }
+    return true;
+}
+
+void MarkdownEditor::undo() {
+    // A layout step sits right after the edit that caused it: when one
+    // step leaves layout and text out of step, take the next one too.
+    QTextDocument *d = document();
+    m_undoing = true;
+    d->undo();
+    for (int i = 0; i < 2 && !layoutSettled() && d->isUndoAvailable(); ++i) d->undo();
+    m_undoing = false;
+    m_hl->takeChanged();
+}
+
+void MarkdownEditor::redo() {
+    QTextDocument *d = document();
+    m_undoing = true;
+    d->redo();
+    for (int i = 0; i < 2 && !layoutSettled() && d->isRedoAvailable(); ++i) d->redo();
+    m_undoing = false;
+    m_hl->takeChanged();
+}
+
+void MarkdownEditor::applyLineHeight() {
+    // Callers keep this off the undo stack; new lines inherit the formats.
+    m_hl->takeChanged();
+    QList<int> all;
+    for (int i = 0; i < document()->blockCount(); ++i) all << i;
+    relayout(all, false);
     // Room to scroll the last line up from the bottom edge.
     QTextFrameFormat ff = document()->rootFrame()->frameFormat();
     ff.setBottomMargin(std::max(120, int(viewport()->height() * 0.4)));
@@ -157,6 +265,14 @@ void MarkdownEditor::setFontSize(int px) {
     document()->setDefaultFont(f);
     setFont(f);
     m_hl->setFontSize(m_px);
+    m_hl->rehighlight(); // marker widths follow the font
+    if (!m_loading && !document()->isEmpty()) {
+        // Indents change with the font; not an edit, so off the undo stack.
+        const bool undo = document()->isUndoRedoEnabled();
+        document()->setUndoRedoEnabled(false);
+        applyLineHeight();
+        document()->setUndoRedoEnabled(undo);
+    }
 }
 
 void MarkdownEditor::setColumnWidth(int maxWidth) {
@@ -170,6 +286,13 @@ void MarkdownEditor::updateMargins() {
     setViewportMargins(side, 0, side, 0);
     m_hl->setColumnWidth(std::min(m_maxColumn, w - 2 * side));
     m_hl->setViewportHeight(height());
+    emit columnChanged();
+}
+
+QRect MarkdownEditor::textColumn() const {
+    const int side = viewportMargins().left();
+    // documentMargin matches the 2 px a frameless line edit keeps before its text.
+    return {side, 0, std::max(0, width() - 2 * side), height()};
 }
 
 void MarkdownEditor::resizeEvent(QResizeEvent *e) {
@@ -195,13 +318,46 @@ void MarkdownEditor::refreshAttachment(const QString &id) {
 void MarkdownEditor::updateActive() {
     // Only the line being edited shows its source.
     if (!hasFocus() && !m_completer->popup()->isVisible()) {
-        m_hl->setActive(-1, -1);
+        setActiveLines(-1, -1);
         return;
     }
     const QTextCursor c = textCursor();
-    const int a = document()->findBlock(c.selectionStart()).blockNumber();
-    const int b = document()->findBlock(c.selectionEnd()).blockNumber();
-    m_hl->setActive(a, b);
+    QTextBlock first = document()->findBlock(c.selectionStart());
+    QTextBlock last = document()->findBlock(c.selectionEnd());
+    // A table shows its source as a whole, so its columns stay lined up.
+    auto inTable = [](const QTextBlock &b) {
+        const auto *info = b.isValid() ? static_cast<BlockInfo *>(b.userData()) : nullptr;
+        return info && info->kind == BlockInfo::Table;
+    };
+    if (inTable(first))
+        while (inTable(first.previous()) && static_cast<BlockInfo *>(first.userData())->tableRow > 0) first = first.previous();
+    if (inTable(last))
+        while (inTable(last.next()) && static_cast<BlockInfo *>(last.next().userData())->tableRow > 0) last = last.next();
+    setActiveLines(first.blockNumber(), last.blockNumber());
+}
+
+void MarkdownEditor::setActiveLines(int first, int last) {
+    if (first == m_hl->activeFirst() && last == m_hl->activeLast()) return;
+    // Revealing or hiding a line's syntax cross-fades instead of cutting —
+    // but not while typing, when the text itself is moving.
+    const bool edited = document()->revision() != m_seenRevision;
+    m_seenRevision = document()->revision();
+    auto marked = [this](int a, int b) {
+        static const QRegularExpression syntax(QStringLiteral(R"([#>*_`~=|\[\]!]|^\s*([-+]|\d+[.)])\s)"));
+        for (int i = std::max(0, a); a >= 0 && i <= b; ++i) {
+            const QTextBlock blk = document()->findBlockByNumber(i);
+            const auto *info = static_cast<BlockInfo *>(blk.userData());
+            if ((info && info->kind != BlockInfo::Text) || syntax.match(blk.text()).hasMatch()) return true;
+        }
+        return false;
+    };
+    if (!edited && m_hl->mode() == MarkdownHighlighter::Live && isVisible() && !Theme::reducedMotion() &&
+        (marked(m_hl->activeFirst(), m_hl->activeLast()) || marked(first, last))) {
+        m_reveal.stop();
+        m_revealShot = viewport()->grab();
+        m_reveal.start();
+    }
+    m_hl->setActive(first, last);
 }
 
 void MarkdownEditor::scrollToLine(int line) {
@@ -246,18 +402,21 @@ void MarkdownEditor::paintEvent(QPaintEvent *e) {
         QRectF run;
         auto flush = [&] {
             if (run.isNull()) return;
-            p.setPen(Qt::NoPen);
+            // A soft panel with a hairline edge.
+            p.setPen(QPen(Theme::dark() ? QColor(255, 255, 255, 14) : QColor(16, 24, 32, 12), 1));
             p.setBrush(k.codeBg.darker(Theme::dark() ? 70 : 102));
-            p.drawRoundedRect(run.adjusted(-6, -2, 6, 2), live ? 12 : 8, live ? 12 : 8);
+            p.drawRoundedRect(run.adjusted(0.5, 0.5, -0.5, -0.5), 6, 6);
             run = QRectF();
         };
         for (QTextBlock b = first; b.isValid(); b = b.next()) {
             const QRectF r = layout->blockBoundingRect(b);
             if (r.top() > visible.bottom()) break;
             const auto *info = static_cast<BlockInfo *>(b.userData());
-            const bool code = info && (info->kind == BlockInfo::Code || (info->kind == BlockInfo::Fence && live));
+            const bool code = info && (info->kind == BlockInfo::Code || info->kind == BlockInfo::Fence);
             if (code) {
-                const QRectF rr(colLeft, r.top() + off.y(), colRight - colLeft, r.height());
+                // To the next line's top: line leading is outside the block rect.
+                const qreal bottom = b.next().isValid() ? layout->blockBoundingRect(b.next()).top() : r.bottom();
+                const QRectF rr(colLeft + 4, r.top() + off.y(), colRight - colLeft - 8, bottom - r.top());
                 run = run.isNull() ? rr : run.united(rr);
             } else {
                 flush();
@@ -267,8 +426,19 @@ void MarkdownEditor::paintEvent(QPaintEvent *e) {
     }
 
     QTextEdit::paintEvent(e);
+    if (live) paintRendered(first);
+    if (!m_revealShot.isNull() && m_reveal.state() == QAbstractAnimation::Running) {
+        QPainter p(viewport());
+        p.setOpacity(m_reveal.currentValue().toReal());
+        p.drawPixmap(0, 0, m_revealShot);
+    }
+}
 
-    if (!live) return;
+void MarkdownEditor::paintRendered(QTextBlock first) {
+    const Tokens &k = Theme::t();
+    QAbstractTextDocumentLayout *layout = document()->documentLayout();
+    const QPointF off(-horizontalScrollBar()->value(), -verticalScrollBar()->value());
+    const QRectF visible = QRectF(viewport()->rect()).translated(-off);
     QPainter p(viewport());
     p.setRenderHint(QPainter::Antialiasing);
     p.setRenderHint(QPainter::SmoothPixmapTransform);
@@ -279,10 +449,32 @@ void MarkdownEditor::paintEvent(QPaintEvent *e) {
         const auto *info = static_cast<BlockInfo *>(b.userData());
         if (!info) continue;
         const QRectF r = br.translated(off);
+        if (info->kind == BlockInfo::Table && !info->active) {
+            // Rows run to the next line's top: the line height's leading is
+            // not part of the block's rectangle.
+            QRectF row = r;
+            if (b.next().isValid()) row.setBottom(layout->blockBoundingRect(b.next()).top() + off.y());
+            paintTableRow(p, b, row);
+            continue;
+        }
         if (info->kind == BlockInfo::Quote && !info->active) {
+            // One bar down the rendered quote, joined across its lines; a
+            // line being edited shows its ">" instead.
+            const QTextLayout *tl = b.layout();
+            const auto *prevInfo = b.previous().isValid() ? static_cast<BlockInfo *>(b.previous().userData()) : nullptr;
+            const auto *nextInfo = b.next().isValid() ? static_cast<BlockInfo *>(b.next().userData()) : nullptr;
+            const bool joinUp = prevInfo && prevInfo->kind == BlockInfo::Quote && !prevInfo->active;
+            const bool joinDown = nextInfo && nextInfo->kind == BlockInfo::Quote && !nextInfo->active;
+            qreal top = r.top(), bottom = r.bottom();
+            if (tl && tl->lineCount() > 0) {
+                const QTextLine last = tl->lineAt(tl->lineCount() - 1);
+                top = r.top() + tl->lineAt(0).y() + (joinUp ? 0 : 4);
+                bottom = joinDown ? layout->blockBoundingRect(b.next()).top() + off.y()
+                                  : r.top() + last.y() + last.ascent() + last.descent() + 4;
+            }
             p.setPen(Qt::NoPen);
-            p.setBrush(Theme::alpha(k.ivy, 0.35));
-            p.drawRoundedRect(QRectF(r.left() + 2, r.top() + 5, 2, r.height() - 10), 1, 1);
+            p.setBrush(Theme::alpha(k.ivy, 0.4));
+            p.drawRect(QRectF(r.left() + 1, top, 2.5, bottom - top));
         }
         if (info->active) continue;
         if (info->kind == BlockInfo::Rule) {
@@ -293,15 +485,16 @@ void MarkdownEditor::paintEvent(QPaintEvent *e) {
             const QRectF cr = charRect(b, pos);
             p.setPen(Qt::NoPen);
             p.setBrush(k.ink2);
-            p.drawEllipse(QPointF(cr.center().x(), cr.center().y() + 1), 2.6, 2.6);
+            p.drawEllipse(QPointF(cr.left() + 4, cr.center().y() + 1), 2.6, 2.6);
         }
-        for (const auto &[pos, done] : info->tasks) {
-            const QRectF cr = charRect(b, pos);
+        for (qsizetype t = 0; t < info->tasks.size(); ++t) {
+            const bool done = info->tasks[t].second;
+            const QRectF cr = charRect(b, info->taskBoxes.value(t, info->tasks[t].first));
             const qreal s = std::min<qreal>(16, m_px);
             const QRectF box(cr.left() + 1, cr.center().y() - s / 2 + 1, s, s);
             p.setPen(done ? Qt::NoPen : QPen(k.faint, 1.4));
             p.setBrush(done ? k.ivy : Qt::transparent);
-            p.drawRoundedRect(box, 4, 4);
+            p.drawRoundedRect(box, 3, 3);
             if (done) {
                 QPainterPath tick;
                 tick.moveTo(box.left() + s * 0.26, box.top() + s * 0.52);
@@ -316,7 +509,7 @@ void MarkdownEditor::paintEvent(QPaintEvent *e) {
             const QRectF area(r.left(), r.top() + 6, info->imageSize.width(), info->imageSize.height());
             const QImage img = image ? image(info->imageId) : QImage();
             QPainterPath clip;
-            clip.addRoundedRect(area, 16, 16);
+            clip.addRoundedRect(area, Theme::radius, Theme::radius);
             if (!img.isNull()) {
                 p.save();
                 p.setClipPath(clip);
@@ -333,6 +526,31 @@ void MarkdownEditor::paintEvent(QPaintEvent *e) {
             Q_UNUSED(dpr);
         }
     }
+}
+
+void MarkdownEditor::paintTableRow(QPainter &p, const QTextBlock &block, const QRectF &r) const {
+    const Tokens &k = Theme::t();
+    const auto *info = static_cast<BlockInfo *>(block.userData());
+    const MarkdownHighlighter::TableGeometry g = m_hl->tableGeometry(block);
+    if (g.cols == 0 || g.x.size() < 2 || info->tableRow == 1) return;
+    p.save();
+    p.setRenderHint(QPainter::Antialiasing, false);
+    const qreal left = std::round(r.left());
+    const qreal top = std::round(r.top());
+    const qreal bottom = std::round(r.bottom());
+    const qreal right = left + g.x.last();
+    // As on the web: rules between rows, a quiet header, no grid; long
+    // cells wrap and the row grows.
+    p.setPen(QPen(Theme::dark() ? k.line.lighter(125) : k.line, 1));
+    p.drawLine(QPointF(left, bottom), QPointF(right, bottom));
+    const QStringList cells = md::tableCells(block.text());
+    p.setFont(Theme::uiFont(m_px - 2, info->tableRow == 0 ? QFont::Medium : QFont::Normal));
+    p.setPen(info->tableRow == 0 ? k.muted : k.ink);
+    for (int c = 0; c < g.cols && c < cells.size(); ++c) {
+        const QRectF cell(left + g.x[c] + 12, top + 8, g.x[c + 1] - g.x[c] - 24, bottom - top - 8);
+        p.drawText(cell, Qt::AlignTop | Qt::TextWordWrap | g.align.value(c, Qt::AlignLeft), md::plainInline(cells[c]));
+    }
+    p.restore();
 }
 
 const LinkSpan *MarkdownEditor::linkAt(const QPoint &pos, QTextBlock *blockOut) const {
@@ -358,9 +576,11 @@ int MarkdownEditor::taskAt(const QPoint &pos, QTextBlock *blockOut) const {
     const QTextBlock b = c.block();
     const auto *info = static_cast<BlockInfo *>(b.userData());
     if (!info || info->active || m_hl->mode() != MarkdownHighlighter::Live) return -1;
-    for (const auto &[p, done] : info->tasks) {
-        const QRectF cr = charRect(b, p);
-        const QRectF hit(cr.left() - 4, cr.top(), 26, cr.height());
+    for (qsizetype t = 0; t < info->tasks.size(); ++t) {
+        const int p = info->tasks[t].first;
+        const QRectF cr = charRect(b, info->taskBoxes.value(t, p));
+        const QRectF end = charRect(b, p + 2);
+        const QRectF hit(cr.left() - 4, cr.top(), std::max<qreal>(26, end.right() - cr.left() + 8), cr.height());
         if (hit.contains(pos)) {
             *blockOut = b;
             return p;
@@ -409,6 +629,22 @@ void MarkdownEditor::mouseMoveEvent(QMouseEvent *e) {
     QTextEdit::mouseMoveEvent(e);
 }
 
+void MarkdownEditor::contextMenuEvent(QContextMenuEvent *e) {
+    // The standard menu, with undo and redo routed through ours.
+    QMenu *menu = createStandardContextMenu(e->pos());
+    for (QAction *a : menu->actions()) {
+        if (a->objectName() == QLatin1String("edit-undo")) {
+            a->disconnect();
+            connect(a, &QAction::triggered, this, &MarkdownEditor::undo);
+        } else if (a->objectName() == QLatin1String("edit-redo")) {
+            a->disconnect();
+            connect(a, &QAction::triggered, this, &MarkdownEditor::redo);
+        }
+    }
+    menu->exec(e->globalPos());
+    delete menu;
+}
+
 void MarkdownEditor::focusInEvent(QFocusEvent *e) {
     QTextEdit::focusInEvent(e);
     updateActive();
@@ -417,7 +653,7 @@ void MarkdownEditor::focusInEvent(QFocusEvent *e) {
 void MarkdownEditor::focusOutEvent(QFocusEvent *e) {
     QTextEdit::focusOutEvent(e);
     // Show the line rendered once the editor is left.
-    if (!m_completer->popup()->isVisible()) m_hl->setActive(-1, -1);
+    if (!m_completer->popup()->isVisible()) setActiveLines(-1, -1);
 }
 
 // --- typing ---
@@ -527,6 +763,8 @@ bool MarkdownEditor::continueList() {
 }
 
 void MarkdownEditor::keyPressEvent(QKeyEvent *e) {
+    if (e->matches(QKeySequence::Undo)) return undo();
+    if (e->matches(QKeySequence::Redo)) return redo();
     if (m_completer->popup()->isVisible()) {
         switch (e->key()) {
         case Qt::Key_Enter:

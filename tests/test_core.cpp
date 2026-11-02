@@ -68,6 +68,23 @@ private slots:
         QCOMPARE(md::toggleTask(body, 9), body);
     }
 
+    void tables() {
+        QVERIFY(md::isTableDelimiter(QStringLiteral("|---|:-:|")));
+        QVERIFY(md::isTableDelimiter(QStringLiteral("--- | ---:")));
+        QVERIFY(!md::isTableDelimiter(QStringLiteral("---")));
+        QVERIFY(!md::isTableDelimiter(QStringLiteral("| a | b |")));
+        QCOMPARE(md::tableCells(QStringLiteral("| a | `x|y` | c \\| d |")), (QStringList{"a", "`x|y`", "c | d"}));
+        QCOMPARE(md::tableAlignments(QStringLiteral("|:--|:-:|--:|---|")),
+                 (QList<int>{Qt::AlignLeft, Qt::AlignHCenter, Qt::AlignRight, Qt::AlignLeft}));
+        QCOMPARE(md::plainInline(QStringLiteral("**b** *i* `c` [[T|A]] [l](https://x)")), QStringLiteral("b i c A l"));
+        // A table right under a paragraph line is split off; code is left alone.
+        QCOMPARE(md::separateTables(QStringLiteral("text\n| a |\n|---|\n| 1 |")), QStringLiteral("text\n\n| a |\n|---|\n| 1 |"));
+        const QString code = QStringLiteral("```\ntext\n| a |\n|---|\n```");
+        QCOMPARE(md::separateTables(code), code);
+        const QString plain = QStringLiteral("| a |\n|---|\n| 1 |\n| 2 |");
+        QCOMPARE(md::separateTables(plain), plain);
+    }
+
     void outlineAndSlug() {
         const auto o = md::outline(QStringLiteral("# One\ntext\n```\n# not\n```\n### Three ###"));
         QCOMPARE(o.size(), 2);

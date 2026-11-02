@@ -54,10 +54,10 @@ protected:
         p.setRenderHint(QPainter::Antialiasing);
         const QRectF r = QRectF(rect()).adjusted(0.5, 0.5, -0.5, -0.5);
         p.setPen(Qt::NoPen);
-        p.setBrush(QColor(0, 0, 0, Theme::dark() ? 90 : 35));
-        p.drawRoundedRect(r.adjusted(1, 3, -1, 2), r.height() / 2, r.height() / 2);
+        p.setBrush(QColor(0, 0, 0, Theme::dark() ? 90 : 30));
+        p.drawRoundedRect(r.adjusted(0, 2, 0, 1.5), Theme::radius, Theme::radius);
         p.setBrush(Theme::t().ink);
-        p.drawRoundedRect(r, r.height() / 2, r.height() / 2);
+        p.drawRoundedRect(r, Theme::radius, Theme::radius);
         if (m_error) {
             p.setBrush(Theme::t().danger);
             p.drawEllipse(QPointF(16, r.center().y()), 3.5, 3.5);

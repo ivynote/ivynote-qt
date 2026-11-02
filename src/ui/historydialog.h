@@ -26,7 +26,7 @@ private:
     QPointer<Session> m_session;
     QString m_noteId;
     QListWidget *m_list;
-    QTextBrowser *m_view;
+    class MarkdownView *m_view;
     QTabBar *m_mode;
     QLabel *m_status;
     QPushButton *m_restore;

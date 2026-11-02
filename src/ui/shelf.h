@@ -9,6 +9,7 @@
 #include <QSet>
 #include <QStyledItemDelegate>
 #include <QTimer>
+#include <QVariantAnimation>
 #include <QWidget>
 
 class Session;
@@ -69,9 +70,17 @@ public:
     void paint(QPainter *p, const QStyleOptionViewItem &opt, const QModelIndex &index) const override;
     QSize sizeHint(const QStyleOptionViewItem &opt, const QModelIndex &index) const override;
 
+    bool isSelected(const ShelfRow &r) const;
+
     QString selectedNote;
+    QSet<QString> multi; // note ids picked with Ctrl/Shift; empty = just the open note
     QString dropKey;
     int hoverRow = -1;
+    // Motion: rows that just appeared fade in; a toggled arrow turns.
+    QSet<QString> fresh;
+    QString turnKey;
+    bool turnOpen = false;
+    qreal motion = 1.0;
     static QRect headingButton(const QRect &row, int i); // 0 sort, 1 new notebook, 2 new note
 };
 
@@ -80,6 +89,8 @@ class ShelfView : public QListView {
 public:
     explicit ShelfView(QWidget *parent = nullptr);
     ShelfDelegate *delegate() const { return m_delegate; }
+    QStringList selectedNotes() const; // multi selection in row order
+    void clearMulti();
 
 signals:
     void activated(int row, bool viaKeyboard);
@@ -92,6 +103,7 @@ signals:
 
 protected:
     void mousePressEvent(QMouseEvent *e) override;
+    void mouseReleaseEvent(QMouseEvent *e) override;
     void mouseMoveEvent(QMouseEvent *e) override;
     void leaveEvent(QEvent *e) override;
     void keyPressEvent(QKeyEvent *e) override;
@@ -105,10 +117,14 @@ protected:
 private:
     ShelfModel *shelfModel() const;
     int dropRowAt(const QPoint &pos, const QMimeData *mime) const;
+    void toggleMulti(const ShelfRow &r);
+    void selectRange(int from, int to);
 
     ShelfDelegate *m_delegate;
     QTimer m_expandTimer;
     int m_expandRow = -1;
+    QString m_anchorKey;     // where a Shift range starts
+    int m_releaseOpens = -1; // a plain press inside the selection opens on release unless it drags
 };
 
 class Shelf : public QWidget {
@@ -124,7 +140,7 @@ public:
 signals:
     void openNote(const QString &id);
     void newNote(const QString &folderId);
-    void moveNote(const QString &id);
+    void moveNotes(const QStringList &ids);
     void searchRequested();
     void collapseRequested();
     void vaultMenuRequested(const QPoint &global);
@@ -137,8 +153,10 @@ private:
     void onToggle(int row);
     void onContextMenu(int row, const QPoint &global);
     void onHeadingButton(int which, const QPoint &global);
-    void onDropped(const QString &mime, const QString &id, int row);
+    void onDropped(const QString &mime, const QString &ids, int row);
     void deleteRow(int row);
+    void trashNotes(const QStringList &ids, bool trashed);
+    void batchMenu(const QStringList &ids, bool trash, const QPoint &global);
     void renameRow(int row);
     void newFolder(const QString &parentId);
     void updateStatus();
@@ -160,4 +178,5 @@ private:
     QString m_current;
     QTimer m_rebuildTimer;
     QTimer m_clock;
+    QVariantAnimation m_motion;
 };

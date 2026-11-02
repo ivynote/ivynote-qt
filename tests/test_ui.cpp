@@ -28,7 +28,8 @@ const QString kSample = QStringLiteral(
     "> quoted line\n\n"
     "![pic](ivy://res/abcdefgh12345678)\n\n"
     "```js\nconst a = '[[not a link]]';\n```\n\n"
-    "See [[Other Note|alias]] and [site](https://example.com).\n\n---\n");
+    "See [[Other Note|alias]] and [site](https://example.com).\n\n---\n"
+    "Before\n| a | **b** |\n|:--|--:|\n| 1 | [[x]] |\n");
 
 } // namespace
 
@@ -163,6 +164,72 @@ private slots:
         QVERIFY(html.contains(QLatin1String("href=\"https://example.com\"")));
         QVERIFY(html.contains(QLatin1String("href=\"ivy-wiki:Wiki%20Target%23Sec\"")));
         QVERIFY(html.contains(QLatin1String(">Alias</a>")));
+    }
+
+    void rendererTables() {
+        // GitHub lets a table follow a paragraph line directly.
+        const QString html = renderMarkdown(QStringLiteral("Intro\n| a | b |\n|---|--:|\n| 1 | 2 |"));
+        QVERIFY(html.contains(QLatin1String("<table")));
+        QVERIFY(html.contains(QLatin1String("<p>Intro</p>")));
+    }
+
+    void viewTaskLists() {
+        RenderOptions o;
+        o.forView = true;
+        o.interactiveTasks = true;
+        const QString html = renderMarkdown(QStringLiteral("- [ ] a\n- [x] b\n  - [ ] c\n- plain\n\n---\n\n```\nx\n```"), o);
+        // Rows instead of list items: no bullet next to the box.
+        QVERIFY(!html.contains(QLatin1String("<li")));
+        QVERIFY(html.contains(QLatin1String("ivy-check:0")));
+        QVERIFY(html.contains(QLatin1String("ivy-check:1")));
+        QVERIFY(html.contains(QLatin1String("ivy-task:2")));
+        QVERIFY(html.contains(QLatin1String("class=\"td\""))); // done item muted and struck
+        QVERIFY(html.contains(QLatin1String("class=\"hr\"")));
+        QVERIFY(html.contains(QLatin1String("<pre><code>x</code></pre>")));
+        // Plain HTML for the clipboard keeps ordinary lists.
+        QVERIFY(renderMarkdown(QStringLiteral("- [x] b")).contains(QLatin1String("<li")));
+        QVERIFY(renderMarkdown(QStringLiteral("- [x] b")).contains(QStringLiteral("☑")));
+    }
+
+    void hangingIndentFollowsEdits() {
+        MarkdownEditor e;
+        e.resize(800, 600);
+        e.show();
+        e.setMode(MarkdownHighlighter::Live);
+        e.setMarkdown(QStringLiteral("text"));
+        QCOMPARE(e.document()->begin().blockFormat().leftMargin(), 0.0);
+        QTextCursor c(e.document());
+        e.setTextCursor(c);
+        e.insertPlainText(QStringLiteral("> "));
+        // Wrapped lines of a quote hang under its text.
+        const qreal hang = e.document()->begin().blockFormat().leftMargin();
+        QVERIFY(hang > 0);
+        QCOMPARE(e.document()->begin().blockFormat().textIndent(), -hang);
+        e.undo();
+        QCOMPARE(e.markdown(), QStringLiteral("text"));
+        QCOMPARE(e.document()->begin().blockFormat().leftMargin(), 0.0);
+        e.redo();
+        QCOMPARE(e.document()->begin().blockFormat().leftMargin(), hang);
+    }
+
+    void liveTableActivatesWhole() {
+        MarkdownEditor e;
+        e.resize(800, 600);
+        e.show();
+        e.setMode(MarkdownHighlighter::Live);
+        e.setMarkdown(QStringLiteral("x\n\n| a | b |\n|---|---|\n| 1 | 2 |\n| 3 | 4 |\n\ny"));
+        for (int i = 2; i <= 5; ++i) {
+            const auto *info = static_cast<BlockInfo *>(e.document()->findBlockByNumber(i).userData());
+            QVERIFY(info && info->kind == BlockInfo::Table);
+            QCOMPARE(info->tableRow, i - 2);
+        }
+        e.activateWindow();
+        e.setFocus();
+        QVERIFY(QTest::qWaitForWindowActive(&e));
+        e.setTextCursor(QTextCursor(e.document()->findBlockByNumber(4)));
+        // The cursor on one row shows the whole table's source.
+        for (int i = 2; i <= 5; ++i) QVERIFY(static_cast<BlockInfo *>(e.document()->findBlockByNumber(i).userData())->active);
+        QVERIFY(!static_cast<BlockInfo *>(e.document()->findBlockByNumber(0).userData())->active);
     }
 
     void rendererTasksAndFiles() {

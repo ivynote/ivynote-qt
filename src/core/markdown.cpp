@@ -249,4 +249,100 @@ LinkIndex buildLinkIndex(const QList<const Note *> &notes) {
     return idx;
 }
 
+// --- tables ---
+
+namespace {
+
+// Splits on unescaped pipes that are not inside a code span.
+QStringList splitRow(const QString &line) {
+    QString t = line.trimmed();
+    QStringList cells;
+    QString cur;
+    bool code = false;
+    for (qsizetype i = 0; i < t.size(); ++i) {
+        const QChar c = t[i];
+        if (c == u'\\' && i + 1 < t.size() && t[i + 1] == u'|') {
+            cur += u'|';
+            ++i;
+            continue;
+        }
+        if (c == u'`') code = !code;
+        if (c == u'|' && !code) {
+            cells << cur;
+            cur.clear();
+            continue;
+        }
+        cur += c;
+    }
+    cells << cur;
+    // Leading and trailing pipes are optional.
+    if (t.startsWith(u'|') && !cells.isEmpty()) cells.removeFirst();
+    if (t.endsWith(u'|') && !t.endsWith(QLatin1String("\\|")) && !cells.isEmpty()) cells.removeLast();
+    for (QString &c : cells) c = c.trimmed();
+    return cells;
+}
+
+} // namespace
+
+bool isTableRow(const QString &line) {
+    const QString t = line.trimmed();
+    if (t.isEmpty() || !t.contains(u'|')) return false;
+    // Lines inside a quote or indented as code are not table rows here.
+    return !t.startsWith(u'>') && !line.startsWith(QLatin1String("    ")) && !line.startsWith(u'\t');
+}
+
+bool isTableDelimiter(const QString &line) {
+    static const QRegularExpression re(QStringLiteral(R"(^\s*\|?\s*:?-+:?\s*(\|\s*:?-+:?\s*)*\|?\s*$)"));
+    return line.contains(u'|') && line.contains(u'-') && re.match(line).hasMatch() && !line.startsWith(QLatin1String("    "));
+}
+
+QStringList tableCells(const QString &line) { return splitRow(line); }
+
+QList<int> tableAlignments(const QString &delimiter) {
+    QList<int> out;
+    for (const QString &c : splitRow(delimiter)) {
+        const bool l = c.startsWith(u':'), r = c.endsWith(u':');
+        out << (l && r ? int(Qt::AlignHCenter) : r ? int(Qt::AlignRight) : int(Qt::AlignLeft));
+    }
+    return out;
+}
+
+QString plainInline(const QString &text) {
+    static const QRegularExpression wiki(QStringLiteral(R"(\[\[([^\]|]*\|)?([^\]]+)\]\])"));
+    static const QRegularExpression link(QStringLiteral(R"(!?\[([^\]]*)\]\([^)]*\))"));
+    static const QRegularExpression marks(QStringLiteral(R"((\*\*|__|~~|==|`))"));
+    static const QRegularExpression em(QStringLiteral(R"((?<![\w*])\*(?=\S)(.+?)(?<=\S)\*(?![\w*])|(?<![\w_])_(?=\S)(.+?)(?<=\S)_(?![\w_]))"));
+    QString s = text;
+    s.replace(wiki, QStringLiteral("\\2"));
+    s.replace(link, QStringLiteral("\\1"));
+    s.replace(marks, QString());
+    s.replace(em, QStringLiteral("\\1\\2"));
+    return s;
+}
+
+QString separateTables(const QString &body) {
+    if (!body.contains(u'|')) return body;
+    const QStringList lines = body.split(u'\n');
+    QStringList out;
+    out.reserve(lines.size() + 4);
+    bool fence = false, table = false;
+    for (qsizetype i = 0; i < lines.size(); ++i) {
+        const QString &line = lines[i];
+        if (isFenceLine(line)) {
+            fence = !fence;
+            table = false;
+        }
+        if (!fence) {
+            if (table && !isTableRow(line)) table = false;
+            if (!table && isTableRow(line) && i + 1 < lines.size() && isTableDelimiter(lines[i + 1]) && !isTableDelimiter(line)) {
+                table = true;
+                const QString prev = i > 0 ? lines[i - 1] : QString();
+                if (!prev.trimmed().isEmpty() && !isFenceLine(prev)) out << QString();
+            }
+        }
+        out << line;
+    }
+    return out.join(u'\n');
+}
+
 } // namespace md

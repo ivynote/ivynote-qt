@@ -8,7 +8,7 @@
 class Session;
 class Shelf;
 class NotePane;
-class QSplitter;
+class Divider;
 class QStackedWidget;
 class QAction;
 class QActionGroup;
@@ -37,10 +37,13 @@ private:
     void newNote(const QString &folderId);
     void openNote(const QString &id);
     void moveNote(const QString &id);
+    void moveNotes(const QStringList &ids);
+    void dropEmptyDraft(const QString &next);
     void duplicateNote(const QString &id);
     void emptyTrash();
     void showSearch(const QString &initial = {});
-    void showSettings(bool vaultTab = false);
+    enum SettingsPage { GeneralPage, VaultPage, AboutPage };
+    void showSettings(SettingsPage page = GeneralPage);
     void signIn();
     void toggleShelf();
     void applyPrefs();
@@ -53,11 +56,12 @@ private:
     void updateTitle();
 
     QPointer<Session> m_session;
-    QSplitter *m_split;
+    Divider *m_split;
     Shelf *m_shelf;
     QStackedWidget *m_stack;
     NotePane *m_pane;
     QWidget *m_empty;
+    QString m_draftId; // a note made with "new note"; dropped if left empty
     bool m_shelfCollapsed = false;
     bool m_signInOpen = false;
     bool m_signInAsked = false; // prompt by itself once per vault; later via the status line
