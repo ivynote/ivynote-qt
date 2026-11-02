@@ -31,6 +31,13 @@ DESTDIR="$APPDIR" cmake --install "$BUILD_DIR" --prefix /usr
 export QMAKE=${QMAKE:-$(command -v qmake6 || command -v qmake)}
 QT_PLUGINS=$("$QMAKE" -query QT_INSTALL_PLUGINS)
 
+# Ship the Wayland platform plugin next to xcb so Wayland sessions run
+# natively. Under XWayland the bundled Qt's xcb plugin never receives mouse
+# button events on KDE Plasma (the whole window ignores clicks), and native
+# Wayland also gets input methods through text-input. Qt prefers "wayland"
+# on Wayland sessions and falls back to xcb on X11.
+export EXTRA_PLATFORM_PLUGINS="libqwayland-generic.so;libqwayland-egl.so"
+
 linuxdeploy --appdir "$APPDIR" \
     --executable "$APPDIR/usr/bin/ivynote" \
     --desktop-file "$APPDIR/usr/share/applications/$APP_ID.desktop" \
@@ -56,6 +63,11 @@ for so in "$QT_PLUGINS"/platforminputcontexts/*.so; do
     fi
 done
 echo "bundled input-method plugins:"; ls "$IMDIR" || true
+
+# Without these a Wayland session falls back to XWayland, where clicks are lost.
+for f in platforms/libqwayland-generic.so wayland-shell-integration/libxdg-shell.so; do
+    [[ -e "$APPDIR/usr/plugins/$f" ]] || { echo "missing Wayland plugin $f" >&2; exit 1; }
+done
 
 mkdir -p "$OUT_DIR"
 rm -f "$OUT" "$OUT.zsync"
