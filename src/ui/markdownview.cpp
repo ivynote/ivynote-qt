@@ -58,7 +58,7 @@ void MarkdownView::restyle() {
         "table.g{margin-top:20px;margin-bottom:20px;font-size:14px;border-collapse:collapse;}"
         "td.g,th.g{padding:8px 12px;border-bottom:1px solid %15;text-align:left;}"
         "th.g{color:%8;font-weight:500;}"
-        "p.hr{color:%14;margin-top:36px;margin-bottom:36px;}"
+        "table.hr{margin-top:24px;margin-bottom:24px;} td.hr{border-bottom:1px solid %15;font-size:1px;}"
         ".mark{background-color:%16;} .file{color:%7;}");
     css = css.arg(k.ink.name(), serif, QString::number(qRound(px * 1.6)), QString::number(qRound(px * 1.3)), QString::number(qRound(px * 1.1)),
                   QString::number(px), k.ivy.name(), k.muted.name(), mono)

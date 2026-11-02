@@ -5,7 +5,11 @@
 #include "ui/highlighter.h"
 
 #include <QHash>
+#include <QSet>
 #include <QImage>
+#include <QPixmap>
+#include <QVariantAnimation>
+#include <QTextBlockFormat>
 #include <QTextEdit>
 #include <functional>
 
@@ -19,6 +23,9 @@ public:
     explicit MarkdownEditor(QWidget *parent = nullptr);
 
     void setMarkdown(const QString &text); // loads a note; resets undo
+    // Undo and redo step over layout-only changes along with their edit.
+    void undo();
+    void redo();
     QString markdown() const { return toPlainText(); }
     // Replaces the text with the smallest edit, keeping the cursor in place.
     void applyRemote(const QString &text);
@@ -64,6 +71,7 @@ protected:
     void dropEvent(QDropEvent *e) override;
     void focusInEvent(QFocusEvent *e) override;
     void focusOutEvent(QFocusEvent *e) override;
+    void contextMenuEvent(QContextMenuEvent *e) override;
 
 private:
     void updateActive();
@@ -75,18 +83,22 @@ private:
     const LinkSpan *linkAt(const QPoint &pos, QTextBlock *blockOut) const;
     int taskAt(const QPoint &pos, QTextBlock *blockOut) const;
     QRectF charRect(const QTextBlock &block, int pos) const;
-    struct TableGeometry {
-        int cols = 0;
-        QList<qreal> x;   // column edges from the table's left, cols + 1 of them
-        QList<int> align; // per column
-    };
-    TableGeometry tableGeometry(const QTextBlock &start) const;
-    void paintTableRow(QPainter &p, const QTextBlock &block, const QRectF &r, QHash<int, TableGeometry> &cache) const;
+    void paintTableRow(QPainter &p, const QTextBlock &block, const QRectF &r) const;
+    QTextBlockFormat blockFormatFor(const QTextBlock &b) const;
+    void relayout(const QList<int> &blocks, bool afterEdit);
+    void setActiveLines(int first, int last);
+    bool layoutSettled() const;
+    void paintRendered(QTextBlock first);
 
     MarkdownHighlighter *m_hl;
     QCompleter *m_completer;
     QStringListModel *m_titles;
     bool m_loading = false;
+    bool m_relayout = false;
+    bool m_undoing = false;
+    int m_seenRevision = -1;
+    QVariantAnimation m_reveal;
+    QPixmap m_revealShot;
     int m_maxColumn = 680;
     int m_px = 16;
     int m_lastLine = -1;

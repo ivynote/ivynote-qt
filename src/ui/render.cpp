@@ -122,7 +122,8 @@ QString layoutForView(QString html) {
                                            "<td class=\"qt\">\\1</td></tr></table>\n"));
         if (html == before) break;
     }
-    html.replace(QLatin1String("<hr>"), QLatin1String("<p class=\"hr\" align=\"center\">&middot;&nbsp;&nbsp;&middot;&nbsp;&nbsp;&middot;</p>"));
+    // A thin full-width line, as the live editor draws it.
+    html.replace(QLatin1String("<hr>"), QLatin1String("<table class=\"hr\" width=\"100%\" cellspacing=\"0\" cellpadding=\"0\"><tr><td class=\"hr\"></td></tr></table>"));
     return html;
 }
 

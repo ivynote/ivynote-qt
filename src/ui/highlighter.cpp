@@ -27,6 +27,27 @@ QTextCharFormat fontFormat(const QFont &f) {
 
 } // namespace
 
+qreal MarkdownHighlighter::advance(const QTextCharFormat &f, const QString &text) const {
+    if (text.isEmpty()) return 0;
+    QFont font = f.font().resolve(document()->defaultFont());
+    if (!f.hasProperty(QTextFormat::FontFamilies) && !f.hasProperty(QTextFormat::FontPixelSize) && !f.hasProperty(QTextFormat::FontPointSize))
+        font = document()->defaultFont();
+    if (f.hasProperty(QTextFormat::FontLetterSpacing)) font.setLetterSpacing(QFont::SpacingType(f.fontLetterSpacingType()), f.fontLetterSpacing());
+    return QFontMetricsF(font).horizontalAdvance(text);
+}
+
+QTextCharFormat MarkdownHighlighter::tallChar(qreal height, qreal lineFactor) const {
+    // One invisible, nearly zero-width character sized so its line is
+    // `height` tall: images, table rows and code padding use it.
+    const qreal ratio = QFontMetricsF(Theme::uiFont(100)).height() / 100.0;
+    QTextCharFormat tall;
+    tall.setForeground(Qt::transparent);
+    tall.setProperty(QTextFormat::FontPixelSize, std::max(1, int(std::round(height / (ratio * lineFactor)))));
+    tall.setFontLetterSpacingType(QFont::PercentageSpacing);
+    tall.setFontLetterSpacing(1);
+    return tall;
+}
+
 MarkdownHighlighter::MarkdownHighlighter(QTextDocument *doc) : QSyntaxHighlighter(doc) {
     connect(Theme::instance(), &Theme::changed, this, &QSyntaxHighlighter::rehighlight);
 }
@@ -85,9 +106,23 @@ void MarkdownHighlighter::highlightBlock(const QString &text) {
     const bool live = m_mode == Live;
     const bool active = !live || (num >= m_first && num <= m_last);
     const int prev = previousBlockState() < 0 ? 0 : previousBlockState();
+    // Note what the line was, to tell the editor when its layout must change.
+    struct Watch {
+        MarkdownHighlighter *h;
+        int num;
+        int kind;
+        qreal hang;
+        BlockInfo *info = nullptr;
+        ~Watch() {
+            if (info && (int(info->kind) != kind || info->hang != hang)) h->m_changed.insert(num);
+        }
+    };
+    const auto *old = static_cast<BlockInfo *>(currentBlockUserData());
+    Watch watch{this, num, old ? int(old->kind) : int(BlockInfo::Text), old ? old->hang : 0.0};
     auto *info = new BlockInfo;
     info->active = active;
     setCurrentBlockUserData(info);
+    watch.info = info;
     const QFont mono = Theme::mono(live ? std::max(13, int(m_px * 0.85)) : std::max(13, m_px - 2));
 
     QTextCharFormat faint;
@@ -100,7 +135,11 @@ void MarkdownHighlighter::highlightBlock(const QString &text) {
         QTextCharFormat f = fontFormat(mono);
         f.setForeground(k.faint);
         setFormat(0, int(text.size()), f);
-        if (!active) hide(0, int(text.size()));
+        if (!active && live) {
+            // The fence vanishes but keeps a little height: the panel's padding.
+            hide(0, int(text.size()));
+            if (!text.isEmpty()) setFormat(0, 1, tallChar(m_px * 0.55, 1.5));
+        }
         return;
     }
     if (prev & 1) {
@@ -189,36 +228,38 @@ void MarkdownHighlighter::highlightBlock(const QString &text) {
             setFormat(0, int(text.size()), base);
         }
         from = int(m.capturedEnd());
-        if (live && !active) {
-            // The marker stays as invisible indent; the bar is drawn in it.
-            QTextCharFormat indent = base;
-            indent.setForeground(Qt::transparent);
-            indent.setFontLetterSpacingType(QFont::AbsoluteSpacing);
-            indent.setFontLetterSpacing(4);
-            setFormat(0, from, indent);
-        } else {
-            setFormat(0, from, faint);
+        // The marker keeps the same width shown or hidden (the bar is drawn
+        // in it), so revealing the source never shifts the text; wrapped
+        // lines hang under the text, not under the bar.
+        QTextCharFormat mark = live ? base : fontFormat(Theme::mono(std::max(13, m_px - 2)));
+        mark.setForeground(live && !active ? QColor(Qt::transparent) : k.faint);
+        if (live) {
+            mark.setFontLetterSpacingType(QFont::AbsoluteSpacing);
+            mark.setFontLetterSpacing(6);
         }
+        setFormat(0, from, mark);
+        info->hang = advance(mark, text.left(from));
     }
 
     // Lists and tasks.
     if (auto m = re(R"(^(\s*)([-*+]|\d+[.)])(\s+)(\[[ xX]\]\s+)?)").match(text, from); m.hasMatch() && m.capturedStart() == from) {
         const bool ordered = m.captured(2).front().isDigit();
+        QTextCharFormat faint = base; // markers keep the line's font, so widths match
+        faint.setForeground(k.faint);
         const int markStart = int(m.capturedStart(2));
         const int markLen = int(m.capturedLength(2));
         if (!m.captured(4).isEmpty()) {
             const int box = int(m.capturedStart(4));
             const bool done = m.captured(4).at(1) != u' ';
             if (live && !active) {
-                // The marker vanishes; the box keeps its width under a drawn checkbox.
-                if (!ordered) hide(markStart, markLen + int(m.capturedLength(3)));
-                // Widen the hidden "[ ]" so the drawn box has room.
+                // "- [ ]" turns invisible at its own width; the checkbox is
+                // drawn over it (where the bullet was, for "- [ ]").
                 QTextCharFormat clear = base;
                 clear.setForeground(Qt::transparent);
-                clear.setFontLetterSpacingType(QFont::AbsoluteSpacing);
-                clear.setFontLetterSpacing(std::max(2.0, m_px * 0.2));
+                setFormat(markStart, markLen, clear);
                 setFormat(box, 3, clear);
                 info->tasks.append({box, done});
+                info->taskBoxes.append(ordered ? box : markStart);
                 if (done) {
                     QTextCharFormat d = base;
                     d.setForeground(k.muted);
@@ -230,19 +271,21 @@ void MarkdownHighlighter::highlightBlock(const QString &text) {
                 setFormat(box, 3, faint);
             }
         } else if (!ordered) {
-            if (live && !active) {
-                QTextCharFormat clear = base;
-                clear.setForeground(Qt::transparent);
-                setFormat(markStart, markLen, clear);
-                info->bullets << markStart;
-            } else {
-                setFormat(markStart, markLen, faint);
+            // A little air after the bullet, the same shown or hidden.
+            QTextCharFormat mark = live && !active ? base : faint;
+            if (live && !active) mark.setForeground(Qt::transparent);
+            if (live) {
+                mark.setFontLetterSpacingType(QFont::AbsoluteSpacing);
+                mark.setFontLetterSpacing(6);
             }
+            setFormat(markStart, markLen, mark);
+            if (live && !active) info->bullets << markStart;
         } else {
             QTextCharFormat num = base;
             num.setForeground(k.muted);
             setFormat(markStart, markLen, num);
         }
+        info->hang += advance(base, text.mid(from, m.capturedEnd() - from));
         from = int(m.capturedEnd());
     }
 
@@ -284,14 +327,10 @@ bool MarkdownHighlighter::tableBlock(const QString &text, BlockInfo *info, bool 
         // delimiter row shrinks to a hairline under the header.
         hide(0, int(text.size()));
         if (info->tableRow != 1 && !text.isEmpty()) {
-            const qreal ratio = QFontMetricsF(Theme::uiFont(100)).height() / 100.0;
-            const int px = std::max(8, int(std::round(m_px * 2.1 / (ratio * 1.75))));
-            QTextCharFormat tall;
-            tall.setForeground(Qt::transparent);
-            tall.setProperty(QTextFormat::FontPixelSize, px);
-            tall.setFontLetterSpacingType(QFont::PercentageSpacing);
-            tall.setFontLetterSpacing(1);
-            setFormat(0, 1, tall);
+            // Tall enough for the row's most wrapped cell.
+            const TableGeometry g = tableGeometry(cur);
+            const int i = cur.blockNumber() - g.start;
+            setFormat(0, 1, tallChar(i >= 0 && i < g.rowHeight.size() ? g.rowHeight[i] : m_px * 2.1));
         }
         return true;
     }
@@ -311,6 +350,90 @@ bool MarkdownHighlighter::tableBlock(const QString &text, BlockInfo *info, bool 
     for (int i = 0; i < text.size(); ++i)
         if (text[i] == u'|' && (i == 0 || text[i - 1] != u'\\')) setFormat(i, 1, faint);
     return true;
+}
+
+MarkdownHighlighter::TableGeometry MarkdownHighlighter::tableGeometry(const QTextBlock &row) const {
+    auto isHeader = [](const QTextBlock &b) {
+        return md::isTableRow(b.text()) && !md::isTableDelimiter(b.text()) && b.next().isValid() && md::isTableDelimiter(b.next().text());
+    };
+    QTextBlock start = row;
+    while (!isHeader(start) && start.previous().isValid() && md::isTableRow(start.previous().text())) start = start.previous();
+    if (!isHeader(start)) return {};
+    // One pass per table and edit, shared by every row.
+    const int rev = document()->revision();
+    if (m_tableRevision != rev || m_tablePx != m_px || m_tableWidth != m_columnWidth) {
+        m_tables.clear();
+        m_tableRevision = rev;
+        m_tablePx = m_px;
+        m_tableWidth = m_columnWidth;
+    }
+    if (auto it = m_tables.constFind(start.blockNumber()); it != m_tables.constEnd()) return *it;
+
+    TableGeometry g;
+    g.start = start.blockNumber();
+    QList<QStringList> rows;
+    for (QTextBlock b = start; b.isValid() && md::isTableRow(b.text()); b = b.next()) {
+        if (b != start && rows.size() != 1 && isHeader(b)) break;
+        rows << md::tableCells(b.text());
+    }
+    g.cols = int(std::max<qsizetype>(1, rows.value(0).size()));
+    g.align = md::tableAlignments(start.next().text());
+    while (g.align.size() < g.cols) g.align << int(Qt::AlignLeft);
+    for (QStringList &r : rows)
+        for (QString &c : r) c = md::plainInline(c);
+    const QFontMetricsF head(Theme::uiFont(m_px - 2, QFont::Medium));
+    const QFontMetricsF body(Theme::uiFont(m_px - 2));
+    const qreal pad = 12;
+    // Widths: natural when they fit; otherwise narrow columns keep theirs
+    // and the wide ones share what is left, in proportion.
+    QList<qreal> natural(g.cols, 48);
+    for (int i = 0; i < rows.size(); ++i) {
+        if (i == 1) continue;
+        for (int c = 0; c < g.cols && c < rows[i].size(); ++c)
+            natural[c] = std::max(natural[c], (i == 0 ? head : body).horizontalAdvance(rows[i][c]) + 2 * pad + 1);
+    }
+    const qreal avail = std::max(120, m_columnWidth - 2);
+    QList<qreal> w = natural;
+    qreal sum = 0;
+    for (qreal x : natural) sum += x;
+    if (sum > avail) {
+        QList<bool> fixed(g.cols, false);
+        qreal room = avail;
+        for (bool changed = true; changed;) {
+            changed = false;
+            int open = 0;
+            for (int c = 0; c < g.cols; ++c) open += !fixed[c];
+            if (!open) break;
+            for (int c = 0; c < g.cols; ++c)
+                if (!fixed[c] && natural[c] <= room / open) {
+                    fixed[c] = true;
+                    room -= natural[c];
+                    changed = true;
+                }
+        }
+        qreal rest = 0;
+        for (int c = 0; c < g.cols; ++c)
+            if (!fixed[c]) rest += natural[c];
+        for (int c = 0; c < g.cols; ++c)
+            if (!fixed[c]) w[c] = std::max<qreal>(56, room * natural[c] / std::max<qreal>(1, rest));
+    }
+    g.x << 0;
+    for (qreal x : w) g.x << g.x.last() + std::round(x);
+    // Row heights: the tallest wrapped cell plus padding.
+    for (int i = 0; i < rows.size(); ++i) {
+        if (i == 1) {
+            g.rowHeight << 2;
+            continue;
+        }
+        qreal h = (i == 0 ? head : body).height();
+        for (int c = 0; c < g.cols && c < rows[i].size(); ++c) {
+            const QRectF r = (i == 0 ? head : body).boundingRect(QRectF(0, 0, w[c] - 2 * pad, 1e6), Qt::TextWordWrap, rows[i][c]);
+            h = std::max(h, r.height());
+        }
+        g.rowHeight << std::ceil(h + 16);
+    }
+    m_tables.insert(g.start, g);
+    return g;
 }
 
 void MarkdownHighlighter::inlineSpans(const QString &text, int from, BlockInfo *info, bool live, const QTextCharFormat &base) {

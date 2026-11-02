@@ -4,6 +4,7 @@
 // images); the cursor's line shows its source.
 #pragma once
 
+#include <QHash>
 #include <QSet>
 #include <QSize>
 #include <QSyntaxHighlighter>
@@ -25,7 +26,9 @@ public:
     int tableRow = -1; // 0 header, 1 delimiter, 2… body
     bool active = false;
     QList<QPair<int, bool>> tasks; // position of '[' and whether done
+    QList<int> taskBoxes;          // where each task's checkbox is drawn
     QList<int> bullets;            // position of the list marker
+    qreal hang = 0;                // hanging indent of wrapped lines (lists, quotes)
     QList<LinkSpan> links;
     QString imageId;
     QSize imageSize; // reserved display size
@@ -43,8 +46,22 @@ public:
     int fontSize() const { return m_px; }
     // Which blocks show their source (the cursor's lines).
     void setActive(int first, int last);
+    int activeFirst() const { return m_first; }
+    int activeLast() const { return m_last; }
     void setColumnWidth(int w) { m_columnWidth = w; }
     void setViewportHeight(int h) { m_viewportHeight = h; }
+
+    struct TableGeometry {
+        int start = -1;            // block number of the header
+        int cols = 0;
+        QList<qreal> x;            // column edges from the table's left, cols + 1
+        QList<int> align;          // per column
+        QList<qreal> rowHeight;    // per row, delimiter included
+    };
+    TableGeometry tableGeometry(const QTextBlock &row) const;
+    int columnWidth() const { return m_columnWidth; }
+    // Blocks whose kind or hanging indent changed since the last call.
+    QList<int> takeChanged() { QList<int> l(m_changed.begin(), m_changed.end()); m_changed.clear(); return l; }
 
     std::function<bool(const QString &title)> wikiExists;
     std::function<QSize(const QString &id)> imageSize; // natural size or invalid
@@ -55,6 +72,8 @@ protected:
 
 private:
     void hide(int start, int len);
+    qreal advance(const QTextCharFormat &f, const QString &text) const;
+    QTextCharFormat tallChar(qreal height, qreal lineFactor = 1.75) const;
     bool tableBlock(const QString &text, BlockInfo *info, bool live, bool active, const QFont &mono);
     void inlineSpans(const QString &text, int from, BlockInfo *info, bool live, const QTextCharFormat &base);
     QSize displaySize(const QString &id) const;
@@ -64,4 +83,7 @@ private:
     int m_first = -1, m_last = -1;
     int m_columnWidth = 680;
     int m_viewportHeight = 800;
+    mutable QHash<int, TableGeometry> m_tables;
+    QSet<int> m_changed;
+    mutable int m_tableRevision = -1, m_tablePx = 0, m_tableWidth = 0;
 };

@@ -184,11 +184,32 @@ private slots:
         QVERIFY(html.contains(QLatin1String("ivy-check:1")));
         QVERIFY(html.contains(QLatin1String("ivy-task:2")));
         QVERIFY(html.contains(QLatin1String("class=\"td\""))); // done item muted and struck
-        QVERIFY(html.contains(QLatin1String("&middot;")));
+        QVERIFY(html.contains(QLatin1String("class=\"hr\"")));
         QVERIFY(html.contains(QLatin1String("<pre><code>x</code></pre>")));
         // Plain HTML for the clipboard keeps ordinary lists.
         QVERIFY(renderMarkdown(QStringLiteral("- [x] b")).contains(QLatin1String("<li")));
         QVERIFY(renderMarkdown(QStringLiteral("- [x] b")).contains(QStringLiteral("☑")));
+    }
+
+    void hangingIndentFollowsEdits() {
+        MarkdownEditor e;
+        e.resize(800, 600);
+        e.show();
+        e.setMode(MarkdownHighlighter::Live);
+        e.setMarkdown(QStringLiteral("text"));
+        QCOMPARE(e.document()->begin().blockFormat().leftMargin(), 0.0);
+        QTextCursor c(e.document());
+        e.setTextCursor(c);
+        e.insertPlainText(QStringLiteral("> "));
+        // Wrapped lines of a quote hang under its text.
+        const qreal hang = e.document()->begin().blockFormat().leftMargin();
+        QVERIFY(hang > 0);
+        QCOMPARE(e.document()->begin().blockFormat().textIndent(), -hang);
+        e.undo();
+        QCOMPARE(e.markdown(), QStringLiteral("text"));
+        QCOMPARE(e.document()->begin().blockFormat().leftMargin(), 0.0);
+        e.redo();
+        QCOMPARE(e.document()->begin().blockFormat().leftMargin(), hang);
     }
 
     void liveTableActivatesWhole() {
