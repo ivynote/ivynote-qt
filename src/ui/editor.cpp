@@ -457,13 +457,14 @@ void MarkdownEditor::paintRendered(QTextBlock first) {
             paintTableRow(p, b, row);
             continue;
         }
-        if (info->kind == BlockInfo::Quote) {
-            // One bar down the whole quote, joined across its lines.
+        if (info->kind == BlockInfo::Quote && !info->active) {
+            // One bar down the rendered quote, joined across its lines; a
+            // line being edited shows its ">" instead.
             const QTextLayout *tl = b.layout();
             const auto *prevInfo = b.previous().isValid() ? static_cast<BlockInfo *>(b.previous().userData()) : nullptr;
             const auto *nextInfo = b.next().isValid() ? static_cast<BlockInfo *>(b.next().userData()) : nullptr;
-            const bool joinUp = prevInfo && prevInfo->kind == BlockInfo::Quote;
-            const bool joinDown = nextInfo && nextInfo->kind == BlockInfo::Quote;
+            const bool joinUp = prevInfo && prevInfo->kind == BlockInfo::Quote && !prevInfo->active;
+            const bool joinDown = nextInfo && nextInfo->kind == BlockInfo::Quote && !nextInfo->active;
             qreal top = r.top(), bottom = r.bottom();
             if (tl && tl->lineCount() > 0) {
                 const QTextLine last = tl->lineAt(tl->lineCount() - 1);
