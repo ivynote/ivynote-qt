@@ -2,6 +2,7 @@
 
 #include "core/i18n.h"
 #include "core/markdown.h"
+#include "ui/remoteimages.h"
 #include "ui/theme.h"
 
 #include <QAbstractItemView>
@@ -40,12 +41,11 @@ MarkdownEditor::MarkdownEditor(QWidget *parent)
 
     m_hl->wikiExists = [this](const QString &t) { return !wikiExists || wikiExists(t); };
     m_hl->imageSize = [this](const QString &id) -> QSize {
-        if (image) {
-            const QImage img = image(id);
-            if (!img.isNull()) return img.size() / std::max(1.0, img.devicePixelRatio());
-        }
-        return imageMeta ? imageMeta(id) : QSize();
+        const QImage img = imageFor(id);
+        if (!img.isNull()) return img.size() / std::max(1.0, img.devicePixelRatio());
+        return imageMeta && !RemoteImages::isRemote(id) ? imageMeta(id) : QSize();
     };
+    connect(RemoteImages::instance(), &RemoteImages::ready, this, &MarkdownEditor::refreshAttachment);
     m_hl->attachmentKind = [this](const QString &id) { return attachmentKind ? attachmentKind(id) : QString(); };
 
     m_completer->setModel(m_titles);
@@ -309,6 +309,11 @@ void MarkdownEditor::resizeEvent(QResizeEvent *e) {
 
 void MarkdownEditor::setWikiTitles(const QStringList &titles) { m_titles->setStringList(titles); }
 
+QImage MarkdownEditor::imageFor(const QString &id) const {
+    if (RemoteImages::isRemote(id)) return RemoteImages::instance()->image(id);
+    return image ? image(id) : QImage();
+}
+
 void MarkdownEditor::refreshAttachment(const QString &id) {
     for (QTextBlock b = document()->begin(); b.isValid(); b = b.next())
         if (b.text().contains(id)) m_hl->rehighlightBlock(b);
@@ -507,7 +512,7 @@ void MarkdownEditor::paintRendered(QTextBlock first) {
         }
         if (info->kind == BlockInfo::Image && info->imageSize.isValid()) {
             const QRectF area(r.left(), r.top() + 6, info->imageSize.width(), info->imageSize.height());
-            const QImage img = image ? image(info->imageId) : QImage();
+            const QImage img = imageFor(info->imageId);
             QPainterPath clip;
             clip.addRoundedRect(area, Theme::radius, Theme::radius);
             if (!img.isNull()) {

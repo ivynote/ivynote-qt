@@ -3,13 +3,16 @@
 
 #include "ui/render.h"
 
+#include <QHash>
 #include <QImage>
+#include <QUrl>
 #include <QTextBrowser>
 #include <functional>
 
 // Rendered Markdown laid out like the web client's .prose-ivy: its spacing,
 // line height, checkboxes, code blocks, quotes and tables, within what
-// QTextBrowser can draw. Loads ivy://res images through `image`.
+// QTextBrowser can draw. Loads ivy://res images through `image`,
+// https images through RemoteImages.
 class MarkdownView : public QTextBrowser {
     Q_OBJECT
 public:
@@ -24,5 +27,7 @@ protected:
 
 private:
     void restyle();
+    int maxImageWidth() const;
     int m_px = 16;
+    QHash<QString, QUrl> m_waiting; // remote images shown as placeholders
 };

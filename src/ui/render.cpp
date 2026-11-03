@@ -205,8 +205,10 @@ QString renderMarkdown(const QString &markdown, const RenderOptions &opts) {
                 if (name.isEmpty() && opts.resourceName) name = escape(opts.resourceName(id));
                 result += QStringLiteral("<a href=\"ivy://res/%1\" class=\"file\">%2 %3</a>").arg(id, icon, name);
             }
+        } else if (opts.remoteImages && (url.startsWith(QLatin1String("https://")) || url.startsWith(QLatin1String("http://")))) {
+            result += QStringLiteral("<img src=\"%1\" alt=\"%2\">").arg(m.captured(1), m.captured(2));
         } else if (isSafeExternalUrl(url)) {
-            // Remote images are not fetched (no tracking pixels); show a link.
+            // Without remoteImages nothing is fetched; show a link.
             result += QStringLiteral("<a href=\"%1\">🖼 %2</a>").arg(m.captured(1), m.captured(2).isEmpty() ? m.captured(1) : m.captured(2));
         } else {
             result += m.captured(2);

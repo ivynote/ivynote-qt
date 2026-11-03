@@ -1,6 +1,7 @@
 #include "ui/highlighter.h"
 
 #include "core/markdown.h"
+#include "ui/remoteimages.h"
 #include "ui/theme.h"
 
 #include <QFontMetricsF>
@@ -191,10 +192,13 @@ void MarkdownHighlighter::highlightBlock(const QString &text) {
     }
 
     // An image alone on its line becomes the image.
-    if (auto m = re(R"(^\s*!\[([^\]\n]*)\]\(ivy://res/([A-Za-z0-9_-]{8,64})\)\s*$)").match(text); m.hasMatch()) {
-        const QString id = m.captured(2);
-        const QString kind = attachmentKind ? attachmentKind(id) : QString();
-        if (kind.isEmpty() || kind == QLatin1String("image")) {
+    // Remote images (https://…) are keyed by their URL; a broken one stays source.
+    if (auto m = re(R"(^\s*!\[([^\]\n]*)\]\((?:ivy://res/([A-Za-z0-9_-]{8,64})|(https?://[^)\s]+))(?:\s+"[^"\n]*")?\)\s*$)").match(text);
+        m.hasMatch()) {
+        const bool remote = m.hasCaptured(3);
+        const QString id = remote ? m.captured(3) : m.captured(2);
+        const QString kind = remote ? QString() : attachmentKind ? attachmentKind(id) : QString();
+        if (remote ? !RemoteImages::instance()->failed(id) : kind.isEmpty() || kind == QLatin1String("image")) {
             info->kind = BlockInfo::Image;
             info->imageId = id;
             if (live && !active) {

@@ -74,6 +74,7 @@ protected:
     void contextMenuEvent(QContextMenuEvent *e) override;
 
 private:
+    QImage imageFor(const QString &id) const; // attachment or remote URL
     void updateActive();
     void applyLineHeight();
     void updateMargins();

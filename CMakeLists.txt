@@ -68,6 +68,7 @@ add_library(ivyui STATIC
     src/ui/editor.cpp
     src/ui/highlighter.cpp
     src/ui/markdownview.cpp
+    src/ui/remoteimages.cpp
     src/ui/notepane.cpp
     src/ui/palette.cpp
     src/ui/dialogs.cpp

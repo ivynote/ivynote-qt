@@ -1,5 +1,6 @@
 #include "ui/markdownview.h"
 
+#include "ui/remoteimages.h"
 #include "ui/theme.h"
 
 #include <QFontMetricsF>
@@ -7,6 +8,7 @@
 #include <QPainter>
 #include <QPainterPath>
 #include <QScrollBar>
+#include <QStyle>
 #include <QTextBlock>
 #include <QTextCursor>
 
@@ -21,6 +23,15 @@ MarkdownView::MarkdownView(QWidget *parent) : QTextBrowser(parent) {
     setFont(Theme::uiFont(m_px));
     restyle();
     connect(Theme::instance(), &Theme::changed, this, &MarkdownView::restyle);
+    connect(RemoteImages::instance(), &RemoteImages::ready, this, [this](const QString &url) {
+        const auto it = m_waiting.constFind(url);
+        if (it == m_waiting.constEnd()) return;
+        const QUrl name = *it;
+        m_waiting.erase(it);
+        // Replace the placeholder the document cached, then lay out again.
+        document()->addResource(QTextDocument::ImageResource, name, loadResource(QTextDocument::ImageResource, name));
+        document()->markContentsDirty(0, document()->characterCount());
+    });
 }
 
 void MarkdownView::setBaseSize(int px) {
@@ -73,11 +84,13 @@ void MarkdownView::restyle() {
 
 void MarkdownView::setMarkdown(const QString &markdown, RenderOptions opts, const QString &title) {
     opts.forView = true;
+    opts.remoteImages = true;
     QString html = renderMarkdown(markdown, opts);
     if (!title.isNull()) html = QStringLiteral("<h1>%1</h1>").arg(title.toHtmlEscaped()) + html;
     // The box images follow the theme; a new name per theme skips the cache.
     html.replace(QLatin1String("src=\"ivy-check:"), Theme::dark() ? QLatin1String("src=\"ivy-check:d") : QLatin1String("src=\"ivy-check:l"));
     const int scroll = verticalScrollBar()->value();
+    m_waiting.clear();
     setHtml(html);
     // Line height as on the web: 1.85 em for text, 1.7 for code, snug
     // headings. Qt scales the font's own height (tall for CJK fonts), so the
@@ -105,6 +118,13 @@ void MarkdownView::setMarkdown(const QString &markdown, RenderOptions opts, cons
     }
     cur.endEditBlock();
     verticalScrollBar()->setValue(scroll);
+}
+
+int MarkdownView::maxImageWidth() const {
+    // Leave room for the scroll bar a tall image is about to bring.
+    int w = viewport()->width() - 2 * int(document()->documentMargin()) - 4;
+    if (!verticalScrollBar()->isVisible()) w -= style()->pixelMetric(QStyle::PM_ScrollBarExtent, nullptr, this);
+    return std::max(200, w);
 }
 
 QVariant MarkdownView::loadResource(int type, const QUrl &name) {
@@ -141,10 +161,23 @@ QVariant MarkdownView::loadResource(int type, const QUrl &name) {
             img = QImage(320, 120, QImage::Format_ARGB32_Premultiplied);
             img.fill(Theme::t().sunken);
         }
-        const int maxW = std::max(200, viewport()->width() - 2 * int(document()->documentMargin()) - 4);
+        const int maxW = maxImageWidth();
         if (img.width() > maxW) img = img.scaledToWidth(maxW, Qt::SmoothTransformation);
         return img;
     }
-    // Nothing else is fetched: no remote images, no file access.
+    if (name.scheme() == QLatin1String("https") || name.scheme() == QLatin1String("http")) {
+        // Fetched in the background; a placeholder holds the place until then.
+        const QString url = name.toString();
+        QImage img = RemoteImages::instance()->image(url);
+        if (img.isNull()) {
+            if (!RemoteImages::instance()->failed(url)) m_waiting.insert(url, name);
+            img = QImage(320, 120, QImage::Format_ARGB32_Premultiplied);
+            img.fill(Theme::t().sunken);
+        }
+        const int maxW = maxImageWidth();
+        if (img.width() > maxW) img = img.scaledToWidth(maxW, Qt::SmoothTransformation);
+        return img;
+    }
+    // Nothing else is fetched: no file access.
     return {};
 }
