@@ -14,6 +14,9 @@ struct RenderOptions {
     // Markup for MarkdownView: task lists as checkbox rows, padded code
     // blocks, the quote bar. Plain HTML (for the clipboard) leaves it off.
     bool forView = false;
+    // Keep https images as images (MarkdownView fetches them); otherwise
+    // they become links, so pasted HTML loads nothing on its own.
+    bool remoteImages = false;
 };
 
 QString renderMarkdown(const QString &markdown, const RenderOptions &opts = {});

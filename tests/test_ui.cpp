@@ -164,6 +164,12 @@ private slots:
         QVERIFY(html.contains(QLatin1String("href=\"https://example.com\"")));
         QVERIFY(html.contains(QLatin1String("href=\"ivy-wiki:Wiki%20Target%23Sec\"")));
         QVERIFY(html.contains(QLatin1String(">Alias</a>")));
+        // The view shows remote images; other schemes still never load.
+        RenderOptions view;
+        view.remoteImages = true;
+        const QString shown = renderMarkdown(QStringLiteral("![a](https://img.example/p.png) ![b](file:///etc/passwd)"), view);
+        QVERIFY(shown.contains(QLatin1String("<img src=\"https://img.example/p.png\" alt=\"a\">")));
+        QVERIFY(!shown.contains(QLatin1String("file:")));
     }
 
     void rendererTables() {

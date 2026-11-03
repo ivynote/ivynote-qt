@@ -616,15 +616,18 @@ void NotePane::buildScrollMap() {
     QAbstractTextDocumentLayout *dl = dst->documentLayout();
     QList<qreal> srcHeads, srcTables, dstHeads, dstTables;
     QList<QPair<QString, qreal>> srcImages, dstImages;
-    static const QRegularExpression image(QStringLiteral(R"(!\[[^\]\n]*\]\(ivy://res/([A-Za-z0-9_-]{8,64})\))"));
+    static const QRegularExpression image(QStringLiteral(R"(!\[[^\]\n]*\]\((?:ivy://res/([A-Za-z0-9_-]{8,64})|(https?://[^)\s]+)))"));
     for (QTextBlock b = src->begin(); b.isValid(); b = b.next()) {
         const auto *info = static_cast<BlockInfo *>(b.userData());
         if (info && (info->kind == BlockInfo::Code || info->kind == BlockInfo::Fence)) continue;
         const qreal y = sl->blockBoundingRect(b).top();
         if (info && info->kind == BlockInfo::Heading) srcHeads << y;
         else if (info && info->kind == BlockInfo::Table && info->tableRow == 0) srcTables << y;
-        if (b.text().contains(QLatin1String("ivy://res/")))
-            for (auto it = image.globalMatch(b.text()); it.hasNext();) srcImages.append({it.next().captured(1), y});
+        if (b.text().contains(QLatin1String("![")))
+            for (auto it = image.globalMatch(b.text()); it.hasNext();) {
+                const auto m = it.next();
+                srcImages.append({m.hasCaptured(1) ? m.captured(1) : m.captured(2), y});
+            }
     }
     QSet<const QTextFrame *> seen;
     for (QTextBlock b = dst->begin(); b.isValid(); b = b.next()) {
@@ -639,6 +642,7 @@ void NotePane::buildScrollMap() {
             if (!cf.isImageFormat()) continue;
             const QString name = cf.toImageFormat().name();
             if (name.startsWith(QLatin1String("ivy://res/"))) dstImages.append({name.mid(10), y});
+            else if (name.startsWith(QLatin1String("http"))) dstImages.append({name, y});
         }
     }
     QList<QPair<qreal, qreal>> points;
