@@ -36,6 +36,7 @@ public:
     void flush(); // hands unsaved text to the engine
     void focusEditor();
     void focusTitle();
+    void showFind();
     void setEditorMode(EditorMode mode);
     EditorMode editorMode() const { return m_mode; }
     void setFontSize(int px);
@@ -61,6 +62,8 @@ private:
     void refreshIndex();     // titles for links and completion; backlinks
     void refreshPreview();
     void refreshOutline();
+    void findNext(bool backward = false);
+    void refreshFind();
     void scheduleBody();
     void openLink(const QString &target, bool wiki);
     void addImage(const QImage &img);
@@ -81,6 +84,10 @@ private:
     bool m_titleDirty = false;
     QHash<QString, QString> m_titleIndex; // normalized title -> newest live note id
 
+    QWidget *m_findBar;
+    QLineEdit *m_findText;
+    QLabel *m_findCount;
+    QToolButton *m_findCase;
     QWidget *m_topBar;
     IconButton *m_expandShelf;
     QHBoxLayout *m_crumbs;

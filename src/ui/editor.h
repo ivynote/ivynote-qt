@@ -40,6 +40,8 @@ public:
     void refreshAttachment(const QString &id);
     void insertBlockText(const QString &markdown); // on its own line at the cursor
     void scrollToLine(int line);
+    void showInsertMenu();
+    void insertElement(const QString &id);
     void toggleFormat(const QString &mark);
     void setHeading(int level);
     void toggleList(const QString &kind); // "1." / "-" / "- [ ]"
@@ -53,6 +55,7 @@ public:
 signals:
     void edited();
     void linkActivated(const QString &target, bool wiki);
+    void attachmentRequested();
     void filesDropped(const QStringList &paths);
     void imagePasted(const QImage &image);
     void cursorLineChanged(int line);
@@ -88,7 +91,6 @@ private:
     QTextBlockFormat blockFormatFor(const QTextBlock &b) const;
     void relayout(const QList<int> &blocks, bool afterEdit);
     void setActiveLines(int first, int last);
-    bool layoutSettled() const;
     void paintRendered(QTextBlock first);
 
     MarkdownHighlighter *m_hl;

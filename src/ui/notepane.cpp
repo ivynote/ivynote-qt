@@ -18,6 +18,8 @@
 
 #include <QAbstractTextDocumentLayout>
 #include <QBuffer>
+#include <QComboBox>
+#include <QShortcut>
 #include <QDateTime>
 #include <QDesktopServices>
 #include <QFile>
@@ -92,6 +94,30 @@ NotePane::NotePane(QWidget *parent) : QWidget(parent) {
     m_savedLabel->hide();
     top->addWidget(m_savedLabel);
     top->addStretch(1);
+    auto *modePicker = new QComboBox(m_topBar);
+    modePicker->setObjectName(QStringLiteral("editorModePicker"));
+    modePicker->setFont(Theme::uiFont(12));
+    modePicker->addItem(T("即时渲染"), int(EditorMode::Live));
+    modePicker->addItem(T("源码"), int(EditorMode::Source));
+    modePicker->addItem(T("双栏"), int(EditorMode::Split));
+    modePicker->setToolTip(T("编辑模式"));
+    connect(modePicker, &QComboBox::activated, this, [this, modePicker](int i) {
+        setEditorMode(EditorMode(modePicker->itemData(i).toInt()));
+        focusEditor();
+    });
+    connect(this, &NotePane::editorModeChanged, modePicker, [modePicker](EditorMode mode) {
+        modePicker->setCurrentIndex(modePicker->findData(int(mode)));
+    });
+    top->addWidget(modePicker);
+    auto *insertButton = new QToolButton(m_topBar);
+    insertButton->setText(QStringLiteral("＋"));
+    insertButton->setAutoRaise(true);
+    insertButton->setObjectName(QStringLiteral("insertButton"));
+    insertButton->setToolTip(T("插入") + QStringLiteral(" (Ctrl+/)"));
+    connect(insertButton, &QToolButton::clicked, this, [this] { m_editor->showInsertMenu(); });
+    top->addWidget(insertButton);
+
+
     m_shareButton = new IconButton(QStringLiteral("share"), T("分享"), m_topBar);
     m_outlineButton = new IconButton(QStringLiteral("outline"), T("大纲"), m_topBar);
     m_outlineButton->setCheckable(true);
@@ -161,6 +187,51 @@ NotePane::NotePane(QWidget *parent) : QWidget(parent) {
     headRow->setContentsMargins(24, 0, 24, 0);
     headRow->addWidget(head);
     col->addWidget(m_headHost);
+    m_findBar = new QWidget(this);
+    m_findBar->setObjectName(QStringLiteral("noteFindBar"));
+    auto *findRow = new QHBoxLayout(m_findBar);
+    findRow->setContentsMargins(24, 4, 24, 4);
+    m_findText = new QLineEdit(m_findBar);
+    m_findText->setObjectName(QStringLiteral("noteFindText"));
+    m_findText->setPlaceholderText(T("在笔记中查找"));
+    m_findCount = new QLabel(m_findBar);
+    m_findCase = new QToolButton(m_findBar);
+    m_findCase->setText(QStringLiteral("Aa"));
+    m_findCase->setToolTip(T("区分大小写"));
+    m_findCase->setCheckable(true);
+    auto *previous = new QToolButton(m_findBar);
+    previous->setText(QStringLiteral("↑")); previous->setToolTip(T("上一个"));
+    auto *next = new QToolButton(m_findBar);
+    next->setText(QStringLiteral("↓")); next->setToolTip(T("下一个"));
+    auto *closeFind = new QToolButton(m_findBar);
+    closeFind->setText(QStringLiteral("×")); closeFind->setToolTip(T("关闭"));
+    findRow->addWidget(m_findText, 1);
+    findRow->addWidget(m_findCount);
+    findRow->addWidget(m_findCase);
+    findRow->addWidget(previous);
+    findRow->addWidget(next);
+    findRow->addWidget(closeFind);
+    m_findBar->hide();
+    col->addWidget(m_findBar);
+    connect(m_findText, &QLineEdit::textChanged, this, [this] { refreshFind(); if (!m_findText->text().isEmpty()) findNext(); });
+    connect(m_findText, &QLineEdit::returnPressed, this, [this] { findNext(); });
+    connect(m_findCase, &QToolButton::toggled, this, [this] { refreshFind(); });
+    connect(previous, &QToolButton::clicked, this, [this] { findNext(true); });
+    connect(next, &QToolButton::clicked, this, [this] { findNext(); });
+    auto closeSearch = [this] { m_findBar->hide(); m_editor->setExtraSelections({}); focusEditor(); };
+    connect(closeFind, &QToolButton::clicked, this, closeSearch);
+    auto *escapeFind = new QShortcut(QKeySequence(Qt::Key_Escape), m_findBar);
+    escapeFind->setContext(Qt::WidgetWithChildrenShortcut);
+    connect(escapeFind, &QShortcut::activated, this, closeSearch);
+    auto *findShortcut = new QShortcut(QKeySequence::Find, this);
+    findShortcut->setContext(Qt::WidgetWithChildrenShortcut);
+    connect(findShortcut, &QShortcut::activated, this, &NotePane::showFind);
+    for (bool back : {false, true}) {
+        auto *shortcut = new QShortcut(QKeySequence(back ? QStringLiteral("Shift+F3") : QStringLiteral("F3")), this);
+        shortcut->setContext(Qt::WidgetWithChildrenShortcut);
+        connect(shortcut, &QShortcut::activated, this, [this, back] { if (!m_findBar->isVisible()) showFind(); else findNext(back); });
+    }
+
 
     // Editor, preview and outline.
     auto *body = m_body = new QWidget(this);
@@ -245,6 +316,7 @@ NotePane::NotePane(QWidget *parent) : QWidget(parent) {
     });
     connect(m_preview->document()->documentLayout(), &QAbstractTextDocumentLayout::documentSizeChanged, this, [this] { m_scrollMap.clear(); });
     connect(m_editor, &MarkdownEditor::edited, this, [this] {
+        refreshFind();
         m_bodyDirty = true;
         m_bodyTimer.start();
         if (m_mode == EditorMode::Split) m_previewTimer.start();
@@ -262,12 +334,13 @@ NotePane::NotePane(QWidget *parent) : QWidget(parent) {
         m_editor->setFocus();
     });
     connect(m_editor, &MarkdownEditor::linkActivated, this, &NotePane::openLink);
+    connect(m_editor, &MarkdownEditor::attachmentRequested, this, &NotePane::pickFiles);
     connect(m_editor, &MarkdownEditor::filesDropped, this, &NotePane::insertFiles);
     connect(m_editor, &MarkdownEditor::imagePasted, this, &NotePane::addImage);
     connect(m_preview, &QTextBrowser::anchorClicked, this, [this](const QUrl &url) {
         const QString s = url.toString();
         if (s.startsWith(QLatin1String("ivy-task:"))) {
-            if (m_engine && !m_engine->note(m_id)->trashed()) {
+            if (m_engine && m_engine->note(m_id) && !m_editor->isReadOnly()) {
                 flush();
                 const QString body = md::toggleTask(m_editor->markdown(), s.mid(9).toInt());
                 m_editor->applyRemote(body);
@@ -353,6 +426,8 @@ void NotePane::setSession(Session *session) {
 
 void NotePane::setNote(const QString &id) {
     flush();
+    m_findBar->hide();
+    m_editor->setExtraSelections({});
     m_id = id;
     m_bodyDirty = m_titleDirty = false;
     const Note *n = m_engine && !id.isEmpty() ? m_engine->note(id) : nullptr;
@@ -566,6 +641,57 @@ void NotePane::refreshIndex() {
     if (linking.isEmpty()) m_backlinks->hide();
 }
 
+void NotePane::showFind() {
+    m_findBar->show();
+    if (m_editor->textCursor().hasSelection()) {
+        const QString selected = m_editor->textCursor().selectedText();
+        if (!selected.contains(QChar::ParagraphSeparator)) m_findText->setText(selected);
+    }
+    m_findText->setFocus();
+    m_findText->selectAll();
+    refreshFind();
+}
+
+void NotePane::refreshFind() {
+    if (!m_findBar->isVisible()) return;
+    const QString query = m_findText->text();
+    QList<QTextEdit::ExtraSelection> marks;
+    QTextDocument::FindFlags flags;
+    if (m_findCase->isChecked()) flags |= QTextDocument::FindCaseSensitively;
+    QTextCursor c(m_editor->document());
+    int count = 0;
+    while (!query.isEmpty()) {
+        c = m_editor->document()->find(query, c, flags);
+        if (c.isNull()) break;
+        ++count;
+        // Bound decoration cost on large notes, while reporting the full count.
+        if (marks.size() < 2000) {
+            QTextEdit::ExtraSelection mark;
+            mark.cursor = c;
+            mark.format.setBackground(Theme::alpha(Theme::t().warn, 0.25));
+            marks << mark;
+        }
+    }
+    m_findCount->setText(query.isEmpty() ? QString() : QString::number(count));
+    m_editor->setExtraSelections(marks);
+}
+
+void NotePane::findNext(bool backward) {
+    if (m_findText->text().isEmpty()) return;
+    QTextDocument::FindFlags flags;
+    if (backward) flags |= QTextDocument::FindBackward;
+    if (m_findCase->isChecked()) flags |= QTextDocument::FindCaseSensitively;
+    QTextCursor found = m_editor->document()->find(m_findText->text(), m_editor->textCursor(), flags);
+    if (found.isNull()) {
+        QTextCursor edge(m_editor->document());
+        if (backward) edge.movePosition(QTextCursor::End);
+        found = m_editor->document()->find(m_findText->text(), edge, flags);
+    }
+    if (found.isNull()) return;
+    m_editor->setTextCursor(found);
+    m_editor->ensureCursorVisible();
+}
+
 void NotePane::refreshOutline() {
     m_outline->clear();
     if (!m_outlineOpen) return;
@@ -623,7 +749,9 @@ void NotePane::buildScrollMap() {
         const qreal y = sl->blockBoundingRect(b).top();
         if (info && info->kind == BlockInfo::Heading) srcHeads << y;
         else if (info && info->kind == BlockInfo::Table && info->tableRow == 0) srcTables << y;
-        if (b.text().contains(QLatin1String("![")))
+        if (info && info->kind == BlockInfo::Image && !info->imageId.isEmpty()) {
+            srcImages.append({info->imageId, y});
+        } else if (b.text().contains(QLatin1String("![")))
             for (auto it = image.globalMatch(b.text()); it.hasNext();) {
                 const auto m = it.next();
                 srcImages.append({m.hasCaptured(1) ? m.captured(1) : m.captured(2), y});
@@ -633,7 +761,7 @@ void NotePane::buildScrollMap() {
     for (QTextBlock b = dst->begin(); b.isValid(); b = b.next()) {
         const qreal y = dl->blockBoundingRect(b).top();
         if (b.blockFormat().headingLevel() > 0) dstHeads << y;
-        if (QTextFrame *f = QTextCursor(b).currentFrame(); f && f != dst->rootFrame() && qobject_cast<QTextTable *>(f) && !seen.contains(f)) {
+        if (QTextFrame *f = QTextCursor(b).currentFrame(); f && f != dst->rootFrame() && qobject_cast<QTextTable *>(f) && !seen.contains(f) && qobject_cast<QTextTable *>(f)->cellAt(0, 0).format().hasProperty(QTextFormat::TableCellBottomBorder)) {
             seen.insert(f);
             dstTables << dl->frameBoundingRect(f).top();
         }
@@ -701,7 +829,7 @@ void NotePane::setEditorMode(EditorMode mode) {
     m_preview->setVisible(mode == EditorMode::Split);
     m_editor->setColumnWidth(mode == EditorMode::Split ? 560 : 680);
     if (mode == EditorMode::Split) {
-        m_split->setSizes({1, 1});
+        if (!wasSplit) m_split->setSizes({1, 1});
         refreshPreview();
         if (!wasSplit) rise(m_preview, 220);
     }

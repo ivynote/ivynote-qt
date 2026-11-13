@@ -2,6 +2,9 @@
 
 #include "ui/remoteimages.h"
 #include "ui/theme.h"
+#include "core/i18n.h"
+#include <QContextMenuEvent>
+#include <QMenu>
 
 #include <QFontMetricsF>
 #include <QFrame>
@@ -9,6 +12,7 @@
 #include <QPainterPath>
 #include <QScrollBar>
 #include <QStyle>
+#include <QResizeEvent>
 #include <QTextBlock>
 #include <QTextCursor>
 
@@ -21,13 +25,18 @@ MarkdownView::MarkdownView(QWidget *parent) : QTextBrowser(parent) {
     document()->setDocumentMargin(28);
     document()->setIndentWidth(24);
     setFont(Theme::uiFont(m_px));
+    m_resizeTimer.setSingleShot(true);
+    m_resizeTimer.setInterval(80);
+    connect(&m_resizeTimer, &QTimer::timeout, this, [this] {
+        if (m_hasMarkdown) setMarkdown(m_markdown, m_options, m_title);
+    });
     restyle();
     connect(Theme::instance(), &Theme::changed, this, &MarkdownView::restyle);
     connect(RemoteImages::instance(), &RemoteImages::ready, this, [this](const QString &url) {
         const auto it = m_waiting.constFind(url);
         if (it == m_waiting.constEnd()) return;
         const QUrl name = *it;
-        m_waiting.erase(it);
+        // Keep the URL registered so an explicit retry also updates failures.
         // Replace the placeholder the document cached, then lay out again.
         document()->addResource(QTextDocument::ImageResource, name, loadResource(QTextDocument::ImageResource, name));
         document()->markContentsDirty(0, document()->characterCount());
@@ -60,14 +69,14 @@ void MarkdownView::restyle() {
         "li{margin-top:6px;margin-bottom:6px;}"
         "a{color:%7;text-decoration:none;} a.missing{color:%8;}"
         "code{font-family:'%9';font-size:%10px;background-color:%11;}"
-        "pre{font-family:'%9';font-size:13px;margin:0px;}"
+        "pre{font-family:'%9';font-size:%10px;margin:0px;}"
         "table.c{margin-top:20px;margin-bottom:20px;} td.c{background-color:%11;padding:16px 20px;}"
         "table.q{margin-top:20px;margin-bottom:20px;} td.qb{background-color:%12;} td.qt{padding-left:18px;color:%13;font-family:'%2';}"
         "table.t{margin-top:12px;margin-bottom:12px;} td.tb{padding-top:3px;padding-bottom:3px;}"
         "td.tm{padding-top:3px;padding-bottom:3px;color:%14;}"
         "td.ti{padding-top:3px;padding-bottom:3px;} td.td{padding-top:3px;padding-bottom:3px;color:%8;text-decoration:line-through;}"
-        "table.g{margin-top:20px;margin-bottom:20px;font-size:14px;border-collapse:collapse;}"
-        "td.g,th.g{padding:8px 12px;border-bottom:1px solid %15;text-align:left;}"
+        "table.g{margin-top:20px;margin-bottom:20px;font-size:%17px;border-collapse:collapse;}"
+        "td.g,th.g{padding:8px 12px;border-bottom:1px solid %15;}"
         "th.g{color:%8;font-weight:500;}"
         "table.hr{margin-top:24px;margin-bottom:24px;} td.hr{border-bottom:1px solid %15;font-size:1px;}"
         ".mark{background-color:%16;} .file{color:%7;}");
@@ -80,9 +89,14 @@ void MarkdownView::restyle() {
     p.setColor(QPalette::Base, k.surface);
     p.setColor(QPalette::Text, k.ink);
     setPalette(p);
+    if (m_hasMarkdown) setMarkdown(m_markdown, m_options, m_title);
 }
 
 void MarkdownView::setMarkdown(const QString &markdown, RenderOptions opts, const QString &title) {
+    m_markdown = markdown;
+    m_options = opts;
+    m_title = title;
+    m_hasMarkdown = true;
     opts.forView = true;
     opts.remoteImages = true;
     QString html = renderMarkdown(markdown, opts);
@@ -124,7 +138,20 @@ int MarkdownView::maxImageWidth() const {
     // Leave room for the scroll bar a tall image is about to bring.
     int w = viewport()->width() - 2 * int(document()->documentMargin()) - 4;
     if (!verticalScrollBar()->isVisible()) w -= style()->pixelMetric(QStyle::PM_ScrollBarExtent, nullptr, this);
-    return std::max(200, w);
+    return std::max(1, w);
+}
+
+void MarkdownView::contextMenuEvent(QContextMenuEvent *event) {
+    QMenu *menu = createStandardContextMenu(event->pos());
+    menu->addSeparator();
+    menu->addAction(T("重新加载图片"), RemoteImages::instance(), &RemoteImages::retryFailed);
+    menu->exec(event->globalPos());
+    delete menu;
+}
+
+void MarkdownView::resizeEvent(QResizeEvent *event) {
+    QTextBrowser::resizeEvent(event);
+    if (event->size().width() != event->oldSize().width() && m_hasMarkdown) m_resizeTimer.start();
 }
 
 QVariant MarkdownView::loadResource(int type, const QUrl &name) {
@@ -170,9 +197,14 @@ QVariant MarkdownView::loadResource(int type, const QUrl &name) {
         const QString url = name.toString();
         QImage img = RemoteImages::instance()->image(url);
         if (img.isNull()) {
-            if (!RemoteImages::instance()->failed(url)) m_waiting.insert(url, name);
+            m_waiting.insert(url, name);
             img = QImage(320, 120, QImage::Format_ARGB32_Premultiplied);
             img.fill(Theme::t().sunken);
+            QPainter painter(&img);
+            painter.setPen(Theme::t().muted);
+            painter.setFont(Theme::uiFont(13));
+            painter.drawText(img.rect().adjusted(8, 8, -8, -8), Qt::AlignCenter | Qt::TextWordWrap,
+                             RemoteImages::instance()->failed(url) ? T("图片加载失败，右键可重试") : T("图片加载中…"));
         }
         const int maxW = maxImageWidth();
         if (img.width() > maxW) img = img.scaledToWidth(maxW, Qt::SmoothTransformation);

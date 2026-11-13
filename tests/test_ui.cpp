@@ -1,5 +1,17 @@
 // Editor and renderer behavior (guide 13, "内容").
 #include "ui/editor.h"
+#include "ui/notepane.h"
+#include "ui/remoteimages.h"
+#include <QNetworkAccessManager>
+#include <QNetworkReply>
+#include <cstring>
+#include <QBuffer>
+#include <QPainter>
+#include <QSplitter>
+#include <QLineEdit>
+#include "ui/markdownview.h"
+#include "core/markdown.h"
+#include <QTextTable>
 #include "ui/palette.h"
 #include "ui/settingsdialog.h"
 #include "ui/vaultdialog.h"
@@ -20,6 +32,47 @@
 #include <QtTest>
 
 namespace {
+
+class ImageReply : public QNetworkReply {
+public:
+    ImageReply(const QNetworkRequest &request, QByteArray data, bool fail, QObject *parent)
+        : QNetworkReply(parent), m_data(std::move(data)) {
+        setRequest(request);
+        setUrl(request.url());
+        open(QIODevice::ReadOnly);
+        QTimer::singleShot(0, this, [this, fail] {
+            if (fail) setError(QNetworkReply::TemporaryNetworkFailureError, QStringLiteral("offline"));
+            else emit readyRead();
+            setFinished(true);
+            emit finished();
+        });
+    }
+    void abort() override {}
+    qint64 bytesAvailable() const override { return m_data.size() - m_offset + QNetworkReply::bytesAvailable(); }
+protected:
+    qint64 readData(char *buffer, qint64 size) override {
+        const qint64 n = std::min<qint64>(size, m_data.size() - m_offset);
+        if (!n) return -1;
+        std::memcpy(buffer, m_data.constData() + m_offset, size_t(n));
+        m_offset += n;
+        return n;
+    }
+private:
+    QByteArray m_data;
+    qint64 m_offset = 0;
+};
+
+class ImageNetwork : public QNetworkAccessManager {
+public:
+    QByteArray png;
+    bool fail = true;
+    int requests = 0;
+protected:
+    QNetworkReply *createRequest(Operation, const QNetworkRequest &request, QIODevice *) override {
+        ++requests;
+        return new ImageReply(request, png, fail, this);
+    }
+};
 
 const QString kSample = QStringLiteral(
     "# Title\n\n"
@@ -117,6 +170,264 @@ private slots:
         QApplication::clipboard()->setMimeData(mime);
         e.paste();
         QCOMPARE(e.markdown(), QStringLiteral("rich\nline"));
+    }
+
+    void modeAndSizeKeepUndo() {
+        MarkdownEditor e;
+        e.setMarkdown(QStringLiteral("# title\n\ntext"));
+        e.moveCursor(QTextCursor::End);
+        QTest::keyClicks(&e, QStringLiteral(" added"));
+        e.setMode(MarkdownHighlighter::Source);
+        e.setFontSize(20);
+        e.setMode(MarkdownHighlighter::Live);
+        QVERIFY(e.document()->isUndoAvailable());
+        e.undo();
+        QCOMPARE(e.markdown(), QStringLiteral("# title\n\ntext"));
+        e.redo();
+        QCOMPARE(e.markdown(), QStringLiteral("# title\n\ntext added"));
+    }
+
+    void fencesKeepLiteralContent() {
+        const QString body = QStringLiteral("````md\n```\n~~~\n# not a heading\n- [ ] literal\n[[not a link]]\n````\n# Real\n- [ ] real");
+        MarkdownEditor e;
+        e.setMarkdown(body);
+        QCOMPARE(md::outline(body).size(), 1);
+        QVERIFY(md::wikiTargets(body).isEmpty());
+        QCOMPARE(md::toggleTask(body, 0), QString(body).replace(QStringLiteral("[ ] real"), QStringLiteral("[x] real")));
+        for (int i = 1; i <= 5; ++i) {
+            const auto *info = static_cast<BlockInfo *>(e.document()->findBlockByNumber(i).userData());
+            QVERIFY(info);
+            QCOMPARE(info->kind, BlockInfo::Code);
+        }
+        e.setTextCursor(QTextCursor(e.document()->findBlockByNumber(4)));
+        e.moveCursor(QTextCursor::EndOfBlock);
+        QTest::keyClick(&e, Qt::Key_Return);
+        QVERIFY(e.markdown().contains(QStringLiteral("- [ ] literal\n\n[[")));
+    }
+
+    void indentSelectionExcludesNextLine() {
+        MarkdownEditor e;
+        e.setMarkdown(QStringLiteral("one\ntwo\nthree"));
+        QTextCursor c(e.document());
+        c.setPosition(4, QTextCursor::KeepAnchor);
+        e.setTextCursor(c);
+        QTest::keyClick(&e, Qt::Key_Tab);
+        QCOMPARE(e.markdown(), QStringLiteral("  one\ntwo\nthree"));
+    }
+
+    void highlightDoesNotRewriteAttributesOrCode() {
+        const QString html = renderMarkdown(QStringLiteral("[link](https://example.com/==path==) ==mark== `==literal==`"));
+        QVERIFY(html.contains(QStringLiteral("href=\"https://example.com/==path==\"")));
+        QVERIFY(html.contains(QStringLiteral("<span class=\"mark\">mark</span>")));
+        QVERIFY(html.contains(QStringLiteral("<code>==literal==</code>")));
+    }
+
+    void previewImagesFollowWidth() {
+        MarkdownView view;
+        view.image = [](const QString &) { QImage img(1600, 800, QImage::Format_RGB32); img.fill(Qt::green); return img; };
+        view.resize(800, 600);
+        view.show();
+        view.setMarkdown(QStringLiteral("![test](ivy://res/abcdefgh12345678)"), {});
+        QTest::qWait(120);
+        auto width = [&] { return view.document()->resource(QTextDocument::ImageResource, QUrl(QStringLiteral("ivy://res/abcdefgh12345678"))).value<QImage>().width(); };
+        const int wide = width();
+        view.resize(320, 600);
+        QTest::qWait(180);
+        QVERIFY(width() < wide);
+        QVERIFY(width() <= view.viewport()->width());
+    }
+
+    void imagesParseCommonMarkAndLegacyLinks() {
+        const QString url = QStringLiteral("https://example.com/photo(1).png?x=1&y=2");
+        for (const QString &markdown : {
+                 QStringLiteral("![](<%1>)").arg(url),
+                 QStringLiteral("![alt](%1 \"caption\")").arg(url),
+                 QStringLiteral("![alt](<%1> 'caption')").arg(url)}) {
+            QCOMPARE(md::standaloneImage(markdown).url, url);
+            MarkdownEditor editor;
+            editor.setMarkdown(markdown + QStringLiteral("\n\ntext"));
+            const auto *info = static_cast<BlockInfo *>(editor.document()->begin().userData());
+            QVERIFY(info);
+            QCOMPARE(info->kind, BlockInfo::Image);
+            QCOMPARE(info->imageId, url);
+            QCOMPARE(editor.markdown(), markdown + QStringLiteral("\n\ntext"));
+        }
+        const QString old = QStringLiteral("# [%1](%1)").arg(url);
+        QVERIFY(md::standaloneImage(old).legacy);
+        RenderOptions opts;
+        opts.remoteImages = true;
+        const QString html = renderMarkdown(old, opts);
+        QVERIFY(html.contains(QStringLiteral("<img src=")));
+        QVERIFY(!html.contains(QStringLiteral("<h1>")));
+        const QString ordinary = QStringLiteral("[Read the article](https://example.com/photo.png)");
+        QVERIFY(md::standaloneImage(ordinary).url.isEmpty());
+        QVERIFY(renderMarkdown(ordinary, opts).contains(QStringLiteral("<a href=")));
+        QVERIFY(!renderMarkdown(QStringLiteral("```md\n") + old + QStringLiteral("\n```"), opts).contains(QStringLiteral("<img ")));
+    }
+
+    void imageParagraphAndReferenceKeepSource() {
+        MarkdownEditor editor;
+        editor.resize(700, 600);
+        editor.image = [](const QString &) { QImage image(400, 200, QImage::Format_RGB32); image.fill(Qt::green); return image; };
+        const QString body = QStringLiteral("Text ![alt](ivy://res/abcdefgh12345678) after\n\n![ref][pic]\n\n[pic]: https://example.com/photo.png");
+        editor.setMarkdown(body);
+        const auto *paragraph = static_cast<BlockInfo *>(editor.document()->begin().userData());
+        QVERIFY(paragraph && paragraph->kind == BlockInfo::ImageParagraph);
+        QVERIFY(paragraph->imageDocument);
+        QVERIFY(paragraph->imageSize.height() >= 200);
+        const auto *reference = static_cast<BlockInfo *>(editor.document()->findBlockByNumber(2).userData());
+        QVERIFY(reference && reference->kind == BlockInfo::Image);
+        QCOMPARE(reference->imageId, QStringLiteral("https://example.com/photo.png"));
+        QCOMPARE(editor.markdown(), body);
+    }
+
+    void editingImageReferenceUpdatesDisplay() {
+        MarkdownEditor editor;
+        editor.setMarkdown(QStringLiteral("![ref][pic]\n\n[pic]: https://example.com/first.png"));
+        QTest::qWait(150);
+        QTextCursor c(editor.document()->lastBlock());
+        c.select(QTextCursor::LineUnderCursor);
+        c.insertText(QStringLiteral("[pic]: https://example.com/second.png"));
+        QTRY_COMPARE(static_cast<BlockInfo *>(editor.document()->begin().userData())->imageId, QStringLiteral("https://example.com/second.png"));
+    }
+
+    void remoteImageLoadsAndRetries() {
+        ImageNetwork network;
+        QImage photo(90, 50, QImage::Format_RGB32);
+        photo.fill(QColor(20, 160, 70));
+        QBuffer buffer(&network.png);
+        buffer.open(QIODevice::WriteOnly);
+        QVERIFY(photo.save(&buffer, "PNG"));
+        RemoteImages images(nullptr, &network);
+        const QString url = QStringLiteral("https://example.test/photo(1).png");
+        QVERIFY(images.image(url).isNull());
+        QTRY_VERIFY(images.failed(url));
+        QCOMPARE(network.requests, 1);
+        QVERIFY(images.image(url).isNull());
+        QCOMPARE(network.requests, 1); // repaint does not repeatedly retry
+        network.fail = false;
+        images.retryFailed();
+        QTRY_VERIFY(!images.image(url).isNull());
+        QCOMPARE(images.image(url).size(), photo.size());
+        QCOMPARE(images.image(url).pixelColor(0, 0), photo.pixelColor(0, 0));
+        QCOMPARE(network.requests, 2);
+    }
+
+    void insertMenuCommandsKeepMarkdown() {
+        MarkdownEditor editor;
+        editor.setMarkdown(QString());
+        editor.insertElement(QStringLiteral("table"));
+        QVERIFY(renderMarkdown(editor.markdown()).contains(QStringLiteral("<table")));
+        editor.undo();
+        QCOMPARE(editor.markdown(), QString());
+        editor.setMarkdown(QStringLiteral("a ``` delimiter"));
+        editor.selectAll();
+        editor.insertElement(QStringLiteral("codeblock"));
+        QVERIFY(editor.markdown().startsWith(QStringLiteral("````\na ``` delimiter\n````")));
+        editor.setReadOnly(true);
+        const QString before = editor.markdown();
+        editor.insertElement(QStringLiteral("table"));
+        QCOMPARE(editor.markdown(), before);
+    }
+
+    void findInNoteDoesNotEdit() {
+        NotePane pane;
+        pane.resize(900, 650);
+        for (QWidget *child : pane.findChildren<QWidget *>(Qt::FindDirectChildrenOnly)) child->setEnabled(true);
+        pane.setEnabled(true);
+        pane.editor()->setEnabled(true);
+        pane.editor()->setMarkdown(QStringLiteral("alpha Beta alpha"));
+        pane.show();
+        pane.showFind();
+        auto *input = pane.findChild<QLineEdit *>(QStringLiteral("noteFindText"));
+        QVERIFY(input);
+        input->setText(QStringLiteral("alpha"));
+        QCOMPARE(pane.editor()->textCursor().selectedText(), QStringLiteral("alpha"));
+        QCOMPARE(pane.editor()->extraSelections().size(), 2);
+        const int first = pane.editor()->textCursor().selectionStart();
+        QTest::keyClick(input, Qt::Key_Return);
+        QVERIFY(pane.editor()->textCursor().selectionStart() != first);
+        QTest::keyClick(input, Qt::Key_Return);
+        QCOMPARE(pane.editor()->textCursor().selectionStart(), first);
+        QCOMPARE(pane.editor()->markdown(), QStringLiteral("alpha Beta alpha"));
+    }
+
+    void variableBackticksStayLiteral() {
+        MarkdownEditor e;
+        e.setMarkdown(QStringLiteral("``[[literal]] and `tick` and **bold**``"));
+        const auto *info = static_cast<BlockInfo *>(e.document()->begin().userData());
+        QVERIFY(info);
+        QVERIFY(info->links.isEmpty());
+        QCOMPARE(e.markdown(), QStringLiteral("``[[literal]] and `tick` and **bold**``"));
+    }
+
+    void formattedHeadingAnchors() {
+        const QString html = renderMarkdown(QStringLiteral("## **A** & B"));
+        QVERIFY(html.contains(QStringLiteral("name=\"a-b\"")));
+    }
+
+    void tasksUseSameOrderAsPreview() {
+        const QString body = QStringLiteral("中文\n\n    - [ ] code\n\n> - [ ] quoted\n\n- [ ] outer\n  - [x] nested");
+        const QString changed = md::toggleTask(body, 0);
+        QVERIFY(changed.contains(QStringLiteral("    - [ ] code")));
+        QVERIFY(changed.contains(QStringLiteral("> - [x] quoted")));
+        QVERIFY(md::toggleTask(body, 2).contains(QStringLiteral("  - [ ] nested")));
+    }
+
+    void imageVisualFixture() {
+        const QString shots = qEnvironmentVariable("IVY_SHOTS_DIR");
+        if (shots.isEmpty()) return;
+        QImage photo(640, 280, QImage::Format_RGB32);
+        photo.fill(QColor("#196c4d"));
+        {
+            QPainter painter(&photo);
+            painter.setPen(Qt::white);
+            painter.setFont(Theme::uiFont(32));
+            painter.drawText(photo.rect(), Qt::AlignCenter, QStringLiteral("Ivynote · Markdown image"));
+        }
+        const QString body = QStringLiteral("# 图片展示\n\n![](<ivy://res/abcdefgh12345678> \"caption\")\n\n图文混排 ![示例](ivy://res/abcdefgh12345678) 图片之后的文字。\n\n![reference][pic]\n\n[pic]: ivy://res/abcdefgh12345678\n");
+        QSplitter split;
+        split.resize(1440, 980);
+        auto *editor = new MarkdownEditor(&split);
+        auto *preview = new MarkdownView(&split);
+        editor->image = [photo](const QString &) { return photo; };
+        preview->image = [photo](const QString &) { return photo; };
+        editor->setMarkdown(body);
+        preview->setMarkdown(body, {});
+        split.show();
+        preview->setFocus();
+        QTest::qWait(200);
+        split.grab().save(shots + QStringLiteral("/images-live-preview.png"));
+        editor->setMode(MarkdownHighlighter::Source);
+        QTest::qWait(100);
+        split.grab().save(shots + QStringLiteral("/images-source-preview.png"));
+        editor->setMode(MarkdownHighlighter::Live);
+        const auto original = Theme::instance()->mode();
+        Theme::instance()->setMode(Theme::Dark);
+        QTest::qWait(150);
+        split.grab().save(shots + QStringLiteral("/images-dark-preview.png"));
+        Theme::instance()->setMode(original);
+        QCOMPARE(editor->markdown(), body);
+    }
+
+    void editorVisualFixture() {
+        const QString shots = qEnvironmentVariable("IVY_SHOTS_DIR");
+        if (shots.isEmpty()) return;
+        MarkdownEditor editor;
+        editor.resize(760, 850);
+        editor.setMarkdown(kSample);
+        editor.show();
+        editor.clearFocus();
+        QTest::qWait(150);
+        editor.grab().save(shots + QStringLiteral("/editor-live.png"));
+        editor.setMode(MarkdownHighlighter::Source);
+        editor.grab().save(shots + QStringLiteral("/editor-source.png"));
+        MarkdownView preview;
+        preview.resize(760, 850);
+        preview.setMarkdown(kSample, {});
+        preview.show();
+        QTest::qWait(150);
+        preview.grab().save(shots + QStringLiteral("/editor-preview.png"));
     }
 
     // Builds the dialogs (and saves pictures of them when IVY_SHOTS_DIR is set).

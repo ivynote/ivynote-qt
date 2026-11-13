@@ -4,6 +4,10 @@
 
 #include <QRegularExpression>
 #include <algorithm>
+#include <md4c.h>
+#include <md4c-html.h>
+#include <QTextDocumentFragment>
+#include <QUrl>
 
 namespace md {
 
@@ -55,8 +59,13 @@ QString normalizeTitle(const QString &t) {
 }
 
 QString stripCode(const QString &body) {
-    QString s = body;
-    s.remove(fenceRe());
+    QStringList kept;
+    int fence = 0;
+    for (const QString &line : body.split(u'\n')) {
+        if (advanceFence(line, fence) || fence) kept << QString();
+        else kept << line;
+    }
+    QString s = kept.join(u'\n');
     s.remove(inlineCodeRe());
     return s;
 }
@@ -148,22 +157,86 @@ QString slug(const QString &text) {
     return kept;
 }
 
+QString imageDefinitions(const QString &body) {
+    static const QRegularExpression definition(QStringLiteral(R"(^ {0,3}\[[^\]\n]+\]:[^\n]*(?:\n[ \t]+[^\n]+)?)"), QRegularExpression::MultilineOption);
+    QStringList lines;
+    const QString outsideCode = stripCode(body);
+    for (auto it = definition.globalMatch(outsideCode); it.hasNext();) lines << it.next().captured(0);
+    return lines.join(u'\n');
+}
+
+ImageLink standaloneImage(const QString &line, const QString &definitions) {
+    const QString trimmed = line.trimmed();
+    if (!trimmed.startsWith(QLatin1String("![")) && !trimmed.startsWith(u'[') && !trimmed.startsWith(u'#')) return {};
+    if (!trimmed.contains(u'[')) return {};
+    const QByteArray input = (line + QStringLiteral("\n\n") + definitions).toUtf8();
+    QByteArray output;
+    md_html(input.constData(), MD_SIZE(input.size()), [](const MD_CHAR *s, MD_SIZE n, void *p) {
+        static_cast<QByteArray *>(p)->append(s, n);
+    }, &output, MD_DIALECT_GITHUB | MD_FLAG_NOHTML, 0);
+    const QString html = QString::fromUtf8(output).trimmed();
+    auto decode = [](const QString &s) { return QTextDocumentFragment::fromHtml(s).toPlainText(); };
+    static const QRegularExpression image(QStringLiteral(R"RE(^(?:<p>|<h[1-6]>)<img src="([^"]*)" alt="([^"]*)"[^>]*>(?:</p>|</h[1-6]>)$)RE"));
+    if (const auto m = image.match(html); m.hasMatch()) return {decode(m.captured(1)), decode(m.captured(2)), false};
+    static const QRegularExpression link(QStringLiteral(R"RE(^(?:<p>|<h[1-6]>)<a href="([^"]*)"[^>]*>([^<>]*)</a>(?:</p>|</h[1-6]>)$)RE"));
+    const auto m = link.match(html);
+    if (!m.hasMatch()) return {};
+    const QString url = decode(m.captured(1)), label = decode(m.captured(2));
+    const QUrl u(url);
+    static const QRegularExpression extension(QStringLiteral(R"(\.(?:png|jpe?g|gif|webp|bmp|svg|avif)$)"), QRegularExpression::CaseInsensitiveOption);
+    if ((u.scheme().compare(QLatin1String("https"), Qt::CaseInsensitive) == 0 || u.scheme().compare(QLatin1String("http"), Qt::CaseInsensitive) == 0) &&
+        label == url && extension.match(u.path()).hasMatch()) return {url, label, true};
+    return {};
+}
+
+QString displayMarkdown(const QString &body) {
+    QStringList lines = body.split(u'\n');
+    int fence = 0;
+    for (QString &line : lines) {
+        if (advanceFence(line, fence) || fence) continue;
+        if (!line.contains(QLatin1String("](http"), Qt::CaseInsensitive) && !line.contains(QLatin1String("](<http"), Qt::CaseInsensitive)) continue;
+        if (const ImageLink image = standaloneImage(line); image.legacy) {
+            // Angle destinations preserve parentheses. md4c escaped the source;
+            // use its resolved URL, escaping angle brackets for Markdown.
+            QString url = image.url;
+            url.replace(u'<', QStringLiteral("%3C")).replace(u'>', QStringLiteral("%3E"));
+            line = QStringLiteral("![](<%1>)").arg(url);
+        }
+    }
+    return lines.join(u'\n');
+}
+
+bool advanceFence(const QString &line, int &state) {
+    static const QRegularExpression fence(QStringLiteral(R"(^ {0,3}(`{3,}|~{3,})(.*)$)"));
+    const auto m = fence.match(line);
+    if (!m.hasMatch()) return false;
+    const QString run = m.captured(1), tail = m.captured(2);
+    const bool tilde = run.front() == u'~';
+    if (state) {
+        if (tilde != bool(state & 1) || run.size() < (state >> 1) || !tail.trimmed().isEmpty()) return false;
+        state = 0;
+    } else {
+        if (!tilde && tail.contains(u'`')) return false;
+        state = (int(run.size()) << 1) | int(tilde);
+    }
+    return true;
+}
+
 bool isFenceLine(const QString &line) {
-    const QString t = line.trimmed();
-    return t.startsWith(QLatin1String("```")) || t.startsWith(QLatin1String("~~~"));
+    int state = 0;
+    return advanceFence(line, state);
 }
 
 QList<Heading> outline(const QString &body) {
     static const QRegularExpression re(QStringLiteral(R"(^(#{1,6})\s+(.+?)\s*#*\s*$)"));
     QList<Heading> out;
-    bool fence = false;
+    int fence = 0;
     const QStringList lines = body.split(u'\n');
     for (int i = 0; i < lines.size(); ++i) {
-        if (isFenceLine(lines[i])) {
-            fence = !fence;
+        if (advanceFence(lines[i], fence)) {
             continue;
         }
-        if (fence) continue;
+        if (fence || standaloneImage(lines[i]).legacy) continue;
         const auto m = re.match(lines[i]);
         if (m.hasMatch()) out << Heading{int(m.capturedLength(1)), m.captured(2), i};
     }
@@ -171,25 +244,26 @@ QList<Heading> outline(const QString &body) {
 }
 
 QString toggleTask(const QString &body, int index) {
-    static const QRegularExpression re(QStringLiteral(R"(^(\s*(?:[-*+]|\d+[.)])\s+\[)([ xX])(\].*)$)"));
-    QStringList lines = body.split(u'\n');
-    bool fence = false;
-    int n = 0;
-    for (QString &line : lines) {
-        if (isFenceLine(line)) {
-            fence = !fence;
-            continue;
+    if (index < 0) return body;
+    struct Tasks { int wanted; int count = 0; qsizetype offset = -1; } tasks{index};
+    MD_PARSER parser{};
+    parser.flags = MD_DIALECT_GITHUB | MD_FLAG_NOHTML | MD_FLAG_WIKILINKS;
+    parser.enter_block = [](MD_BLOCKTYPE type, void *detail, void *data) -> int {
+        auto &tasks = *static_cast<Tasks *>(data);
+        if (type == MD_BLOCK_LI) {
+            const auto &li = *static_cast<MD_BLOCK_LI_DETAIL *>(detail);
+            if (li.is_task && tasks.count++ == tasks.wanted) tasks.offset = li.task_mark_offset;
         }
-        if (fence) continue;
-        const auto m = re.match(line);
-        if (!m.hasMatch()) continue;
-        if (n++ == index) {
-            const bool done = m.captured(2) != QLatin1String(" ");
-            line = m.captured(1) + (done ? QStringLiteral(" ") : QStringLiteral("x")) + m.captured(3);
-            return lines.join(u'\n');
-        }
-    }
-    return body;
+        return 0;
+    };
+    parser.leave_block = [](MD_BLOCKTYPE, void *, void *) { return 0; };
+    parser.enter_span = [](MD_SPANTYPE, void *, void *) { return 0; };
+    parser.leave_span = [](MD_SPANTYPE, void *, void *) { return 0; };
+    parser.text = [](MD_TEXTTYPE, const MD_CHAR *, MD_SIZE, void *) { return 0; };
+    QByteArray source = body.toUtf8();
+    if (md_parse(source.constData(), MD_SIZE(source.size()), &parser, &tasks) != 0 || tasks.offset < 0 || tasks.offset >= source.size()) return body;
+    source[tasks.offset] = source[tasks.offset] == ' ' ? 'x' : ' ';
+    return QString::fromUtf8(source);
 }
 
 QString linkContext(const QString &body, const QString &title, int max) {
@@ -325,11 +399,11 @@ QString separateTables(const QString &body) {
     const QStringList lines = body.split(u'\n');
     QStringList out;
     out.reserve(lines.size() + 4);
-    bool fence = false, table = false;
+    int fence = 0;
+    bool table = false;
     for (qsizetype i = 0; i < lines.size(); ++i) {
         const QString &line = lines[i];
-        if (isFenceLine(line)) {
-            fence = !fence;
+        if (advanceFence(line, fence)) {
             table = false;
         }
         if (!fence) {

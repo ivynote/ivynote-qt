@@ -25,10 +25,10 @@ bool RemoteImages::isRemote(const QString &url) {
     return url.startsWith(QLatin1String("https://"), Qt::CaseInsensitive) || url.startsWith(QLatin1String("http://"), Qt::CaseInsensitive);
 }
 
-RemoteImages::RemoteImages(QObject *parent) : QObject(parent), m_nam(new QNetworkAccessManager(this)) {
+RemoteImages::RemoteImages(QObject *parent, QNetworkAccessManager *manager) : QObject(parent), m_nam(manager ? manager : new QNetworkAccessManager(this)) {
     m_cache.setMaxCost(256 * 1024);
     const QString dir = QStandardPaths::writableLocation(QStandardPaths::CacheLocation);
-    if (!dir.isEmpty()) {
+    if (!manager && !dir.isEmpty()) {
         auto *disk = new QNetworkDiskCache(m_nam);
         disk->setCacheDirectory(dir + QStringLiteral("/images"));
         disk->setMaximumCacheSize(200LL * 1024 * 1024);
@@ -42,6 +42,12 @@ QImage RemoteImages::image(const QString &url) {
     if (const QImage *img = m_cache.object(url)) return *img;
     if (!m_failed.contains(url) && !m_pending.contains(url)) fetch(url);
     return {};
+}
+
+void RemoteImages::retryFailed() {
+    const QSet<QString> failed = m_failed;
+    m_failed.clear();
+    for (const QString &url : failed) if (isRemote(url)) fetch(url);
 }
 
 void RemoteImages::fetch(const QString &url) {

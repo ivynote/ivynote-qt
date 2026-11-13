@@ -51,8 +51,21 @@ struct LinkIndex {
 };
 LinkIndex buildLinkIndex(const QList<const Note *> &notes);
 
+struct ImageLink {
+    QString url, alt;
+    bool legacy = false;
+};
+// Parse a whole image block with the same CommonMark parser as the preview.
+// Also recognize old imports containing a standalone self-labelled image link.
+QString imageDefinitions(const QString &body);
+ImageLink standaloneImage(const QString &line, const QString &definitions = QString());
+QString displayMarkdown(const QString &body); // display-only legacy compatibility
+
 // Line-level fence tracking, used by the editor highlighter and toggles.
 bool isFenceLine(const QString &line);
+// 0 outside code; otherwise encodes marker and minimum closing length.
+// Returns true only for an opening or matching closing delimiter.
+bool advanceFence(const QString &line, int &state);
 
 // GFM tables: a header row, a delimiter row (|---|:-:|), then body rows.
 bool isTableRow(const QString &line);       // has a cell separator

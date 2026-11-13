@@ -4,6 +4,7 @@
 #include "core/markdown.h"
 #include "ui/remoteimages.h"
 #include "ui/theme.h"
+#include "ui/render.h"
 
 #include <QAbstractItemView>
 #include <QAbstractTextDocumentLayout>
@@ -12,6 +13,9 @@
 #include <QFileInfo>
 #include <QContextMenuEvent>
 #include <QKeyEvent>
+#include <QInputDialog>
+#include <QDateTime>
+#include <QUrl>
 #include <QMenu>
 #include <QMimeData>
 #include <QPainter>
@@ -40,6 +44,7 @@ MarkdownEditor::MarkdownEditor(QWidget *parent)
     setPlaceholderText(T("开始书写… 输入 [[ 链接其他笔记"));
 
     m_hl->wikiExists = [this](const QString &t) { return !wikiExists || wikiExists(t); };
+    m_hl->imageLoader = [this](const QString &id) { return imageFor(id); };
     m_hl->imageSize = [this](const QString &id) -> QSize {
         const QImage img = imageFor(id);
         if (!img.isNull()) return img.size() / std::max(1.0, img.devicePixelRatio());
@@ -174,34 +179,47 @@ void MarkdownEditor::relayout(const QList<int> &blocks, bool afterEdit) {
     Q_UNUSED(afterEdit);
 }
 
-bool MarkdownEditor::layoutSettled() const {
-    for (QTextBlock b = document()->begin(); b.isValid(); b = b.next()) {
-        const QTextBlockFormat want = blockFormatFor(b), now = b.blockFormat();
-        if (now.leftMargin() != want.leftMargin() || now.textIndent() != want.textIndent() || now.lineHeight() != want.lineHeight() ||
-            now.rightMargin() != want.rightMargin())
-            return false;
-    }
-    return true;
-}
 
 void MarkdownEditor::undo() {
-    // A layout step sits right after the edit that caused it: when one
-    // step leaves layout and text out of step, take the next one too.
+    // Mode/font/layout commands share Qt's stack; one user undo must
+    // reach a text change even after any number of presentation changes.
     QTextDocument *d = document();
     m_undoing = true;
-    d->undo();
-    for (int i = 0; i < 2 && !layoutSettled() && d->isUndoAvailable(); ++i) d->undo();
+    m_loading = true;
+    const QString before = toPlainText();
+    QTextCursor c = textCursor();
+    do { d->undo(&c); } while (toPlainText() == before && d->isUndoAvailable());
+    setTextCursor(c);
     m_undoing = false;
+    m_loading = false;
     m_hl->takeChanged();
+    if (toPlainText() != before) emit edited();
 }
 
 void MarkdownEditor::redo() {
     QTextDocument *d = document();
     m_undoing = true;
-    d->redo();
-    for (int i = 0; i < 2 && !layoutSettled() && d->isRedoAvailable(); ++i) d->redo();
+    m_loading = true;
+    const QString before = toPlainText();
+    QTextCursor c = textCursor();
+    do { d->redo(&c); } while (toPlainText() == before && d->isRedoAvailable());
+    // Qt exposes no command type. Probe the next command and immediately
+    // put it back if it edits text; consume formatting belonging to this edit.
+    const QString after = toPlainText();
+    while (d->isRedoAvailable()) {
+        const QTextCursor previous = c;
+        d->redo(&c);
+        if (toPlainText() != after) {
+            d->undo(&c);
+            c = previous;
+            break;
+        }
+    }
+    setTextCursor(c);
     m_undoing = false;
+    m_loading = false;
     m_hl->takeChanged();
+    if (toPlainText() != before) emit edited();
 }
 
 void MarkdownEditor::applyLineHeight() {
@@ -245,34 +263,28 @@ void MarkdownEditor::applyRemote(const QString &text) {
 }
 
 void MarkdownEditor::setMode(MarkdownHighlighter::Mode m) {
+    if (m_hl->mode() == m) return;
+    m_loading = true;
     m_hl->setMode(m);
     setFontSize(m_px);
-    m_loading = true;
-    const bool undo = document()->isUndoRedoEnabled();
-    // Line height changes should not land on the undo stack.
-    document()->setUndoRedoEnabled(false);
     applyLineHeight();
-    document()->setUndoRedoEnabled(undo);
     m_loading = false;
     updateActive();
     viewport()->update();
 }
 
 void MarkdownEditor::setFontSize(int px) {
+    const bool loading = m_loading;
+    m_loading = true;
     m_px = std::clamp(px, 13, 22);
     const bool live = m_hl->mode() == MarkdownHighlighter::Live;
     QFont f = live ? Theme::uiFont(m_px) : Theme::mono(std::max(13, m_px - 2));
     document()->setDefaultFont(f);
     setFont(f);
     m_hl->setFontSize(m_px);
-    m_hl->rehighlight(); // marker widths follow the font
-    if (!m_loading && !document()->isEmpty()) {
-        // Indents change with the font; not an edit, so off the undo stack.
-        const bool undo = document()->isUndoRedoEnabled();
-        document()->setUndoRedoEnabled(false);
-        applyLineHeight();
-        document()->setUndoRedoEnabled(undo);
-    }
+    m_hl->rehighlight();
+    if (!document()->isEmpty()) applyLineHeight();
+    m_loading = loading;
 }
 
 void MarkdownEditor::setColumnWidth(int maxWidth) {
@@ -300,7 +312,7 @@ void MarkdownEditor::resizeEvent(QResizeEvent *e) {
     const int before = m_hl->property("cw").toInt();
     updateMargins();
     const int cw = std::min(m_maxColumn, width() - 2 * std::max(24, (width() - m_maxColumn) / 2));
-    if (std::abs(cw - before) > 40) {
+    if (cw != before) {
         // Image sizes depend on the column width.
         m_hl->setProperty("cw", cw);
         m_hl->rehighlight();
@@ -316,13 +328,13 @@ QImage MarkdownEditor::imageFor(const QString &id) const {
 
 void MarkdownEditor::refreshAttachment(const QString &id) {
     for (QTextBlock b = document()->begin(); b.isValid(); b = b.next())
-        if (b.text().contains(id)) m_hl->rehighlightBlock(b);
+        if (b.text().contains(id) || (b.userData() && (static_cast<BlockInfo *>(b.userData())->kind == BlockInfo::ImageParagraph || static_cast<BlockInfo *>(b.userData())->imageId == id))) m_hl->rehighlightBlock(b);
     viewport()->update();
 }
 
 void MarkdownEditor::updateActive() {
     // Only the line being edited shows its source.
-    if (!hasFocus() && !m_completer->popup()->isVisible()) {
+    if (!hasFocus() && !m_completer->popup()->isVisible() && !textCursor().hasSelection()) {
         setActiveLines(-1, -1);
         return;
     }
@@ -510,6 +522,12 @@ void MarkdownEditor::paintRendered(QTextBlock first) {
                 p.drawPath(tick);
             }
         }
+        if (info->kind == BlockInfo::ImageParagraph && info->imageDocument) {
+            p.save();
+            p.translate(r.left(), r.top() + 6);
+            info->imageDocument->drawContents(&p);
+            p.restore();
+        }
         if (info->kind == BlockInfo::Image && info->imageSize.isValid()) {
             const QRectF area(r.left(), r.top() + 6, info->imageSize.width(), info->imageSize.height());
             const QImage img = imageFor(info->imageId);
@@ -526,7 +544,7 @@ void MarkdownEditor::paintRendered(QTextBlock first) {
                 p.drawPath(clip);
                 p.setPen(k.faint);
                 p.setFont(Theme::uiFont(12));
-                p.drawText(area, Qt::AlignCenter, QStringLiteral("🖼"));
+                p.drawText(area, Qt::AlignCenter, RemoteImages::isRemote(info->imageId) && RemoteImages::instance()->failed(info->imageId) ? T("图片加载失败，右键可重试") : T("图片加载中…"));
             }
             Q_UNUSED(dpr);
         }
@@ -608,6 +626,18 @@ void MarkdownEditor::mousePressEvent(QMouseEvent *e) {
         }
     }
     if (e->button() == Qt::LeftButton) {
+        const QTextBlock block = cursorForPosition(e->pos()).block();
+        const auto *rendered = static_cast<BlockInfo *>(block.userData());
+        if (rendered && !rendered->active && rendered->imageDocument) {
+            const QRectF rect = document()->documentLayout()->blockBoundingRect(block);
+            const QPointF point = QPointF(e->pos()) + QPointF(horizontalScrollBar()->value(), verticalScrollBar()->value()) - rect.topLeft() - QPointF(0, 6);
+            const QString target = rendered->imageDocument->documentLayout()->anchorAt(point);
+            if (!target.isEmpty()) {
+                if (target.startsWith(QLatin1String("ivy-wiki:"))) emit linkActivated(QUrl::fromPercentEncoding(target.mid(9).toUtf8()), true);
+                else emit linkActivated(target, false);
+                return;
+            }
+        }
         QTextBlock b;
         if (const LinkSpan *l = linkAt(e->pos(), &b)) {
             const auto *info = static_cast<BlockInfo *>(b.userData());
@@ -646,6 +676,8 @@ void MarkdownEditor::contextMenuEvent(QContextMenuEvent *e) {
             connect(a, &QAction::triggered, this, &MarkdownEditor::redo);
         }
     }
+    menu->addSeparator();
+    menu->addAction(T("重新加载图片"), RemoteImages::instance(), &RemoteImages::retryFailed);
     menu->exec(e->globalPos());
     delete menu;
 }
@@ -662,6 +694,81 @@ void MarkdownEditor::focusOutEvent(QFocusEvent *e) {
 }
 
 // --- typing ---
+
+void MarkdownEditor::showInsertMenu() {
+    if (isReadOnly()) return;
+    auto *menu = new QMenu(this);
+    menu->setAttribute(Qt::WA_DeleteOnClose);
+    const QList<QPair<QString, const char *>> items{
+        {"h1", "一级标题"}, {"h2", "二级标题"}, {"h3", "三级标题"},
+        {"bold", "粗体"}, {"italic", "斜体"}, {"highlight", "高亮"},
+        {"todo", "待办"}, {"bullet", "无序列表"}, {"ordered", "有序列表"},
+        {"quote", "引用"}, {"codeblock", "代码块"}, {"table", "表格"}, {"divider", "分割线"},
+        {"today", "今天的日期"}, {"now", "当前时间"},
+        {"link", "网页链接"}, {"image", "网络图片"}, {"file", "插入图片或文件…"}
+    };
+    for (const auto &[id, label] : items) {
+        auto *action = menu->addAction(T(label));
+        action->setObjectName(QStringLiteral("insert-") + id);
+        connect(action, &QAction::triggered, this, [this, id] { insertElement(id); });
+    }
+    menu->popup(viewport()->mapToGlobal(cursorRect().bottomLeft()));
+}
+
+void MarkdownEditor::insertElement(const QString &id) {
+    if (isReadOnly()) return;
+    setFocus();
+    if (id == QLatin1String("h1")) return setHeading(1);
+    if (id == QLatin1String("h2")) return setHeading(2);
+    if (id == QLatin1String("h3")) return setHeading(3);
+    if (id == QLatin1String("bold")) return toggleFormat(QStringLiteral("**"));
+    if (id == QLatin1String("italic")) return toggleFormat(QStringLiteral("*"));
+    if (id == QLatin1String("highlight")) return toggleFormat(QStringLiteral("=="));
+    if (id == QLatin1String("todo")) return toggleList(QStringLiteral("- [ ]"));
+    if (id == QLatin1String("bullet")) return toggleList(QStringLiteral("-"));
+    if (id == QLatin1String("ordered")) return toggleList(QStringLiteral("1."));
+    if (id == QLatin1String("file")) { emit attachmentRequested(); return; }
+    if (id == QLatin1String("today") || id == QLatin1String("now")) {
+        insertPlainText(QDateTime::currentDateTime().toString(id == QLatin1String("today") ? QStringLiteral("yyyy-MM-dd") : QStringLiteral("yyyy-MM-dd HH:mm")));
+        return;
+    }
+    if (id == QLatin1String("link") || id == QLatin1String("image")) {
+        bool ok = false;
+        const QString url = QInputDialog::getText(this, id == QLatin1String("image") ? T("网络图片") : T("网页链接"), T("网址"), QLineEdit::Normal, QStringLiteral("https://"), &ok).trimmed();
+        if (!ok || !isSafeExternalUrl(url) || (id == QLatin1String("image") && !RemoteImages::isRemote(url))) return;
+        QTextCursor c = textCursor();
+        QString label = c.selectedText().replace(QChar::ParagraphSeparator, u' ');
+        if (label.isEmpty() && id == QLatin1String("link")) label = url;
+        label.replace(u'\\', QStringLiteral("\\\\")).replace(u'[', QStringLiteral("\\[")).replace(u']', QStringLiteral("\\]"));
+        const QString target = QUrl(url).toString(QUrl::FullyEncoded);
+        c.insertText((id == QLatin1String("image") ? QStringLiteral("!") : QString()) + QStringLiteral("[%1](<%2>)").arg(label, target));
+        setTextCursor(c);
+        return;
+    }
+    if (id == QLatin1String("quote")) {
+        QTextCursor c = textCursor();
+        c.beginEditBlock();
+        const int first = document()->findBlock(c.selectionStart()).blockNumber();
+        const int last = document()->findBlock(c.hasSelection() ? c.selectionEnd() - 1 : c.position()).blockNumber();
+        for (int i = first; i <= last; ++i) { QTextCursor row(document()->findBlockByNumber(i)); row.insertText(QStringLiteral("> ")); }
+        c.endEditBlock();
+        return;
+    }
+    if (id == QLatin1String("divider")) return insertBlockText(QStringLiteral("---\n"));
+    if (id == QLatin1String("table")) return insertBlockText(QStringLiteral("| A | B |\n| --- | --- |\n|  |  |\n"));
+    if (id == QLatin1String("codeblock")) {
+        QTextCursor c = textCursor();
+        const QString selected = c.selectedText().replace(QChar::ParagraphSeparator, u'\n');
+        QString fence = QStringLiteral("```");
+        while (selected.contains(fence)) fence += u'`';
+        insertBlockText(fence + u'\n' + selected + u'\n' + fence + u'\n');
+        c = textCursor();
+        c.movePosition(QTextCursor::PreviousBlock);
+        c.movePosition(QTextCursor::PreviousBlock);
+        c.movePosition(QTextCursor::EndOfBlock);
+        setTextCursor(c);
+    }
+}
 
 void MarkdownEditor::toggleFormat(const QString &mark) {
     QTextCursor c = textCursor();
@@ -699,7 +806,8 @@ void MarkdownEditor::setHeading(int level) {
     QTextCursor c = textCursor();
     c.beginEditBlock();
     const int a = document()->findBlock(c.selectionStart()).blockNumber();
-    const int b = document()->findBlock(c.selectionEnd()).blockNumber();
+    const int end = c.hasSelection() ? c.selectionEnd() - 1 : c.selectionEnd();
+    const int b = document()->findBlock(end).blockNumber();
     for (int i = a; i <= b; ++i) {
         QTextBlock blk = document()->findBlockByNumber(i);
         const QString t = blk.text();
@@ -718,7 +826,8 @@ void MarkdownEditor::toggleList(const QString &kind) {
     QTextCursor c = textCursor();
     c.beginEditBlock();
     const int a = document()->findBlock(c.selectionStart()).blockNumber();
-    const int b = document()->findBlock(c.selectionEnd()).blockNumber();
+    const int end = c.hasSelection() ? c.selectionEnd() - 1 : c.selectionEnd();
+    const int b = document()->findBlock(end).blockNumber();
     int n = 1;
     for (int i = a; i <= b; ++i) {
         QTextBlock blk = document()->findBlockByNumber(i);
@@ -741,6 +850,8 @@ bool MarkdownEditor::continueList() {
     static const QRegularExpression list(QStringLiteral(R"(^(\s*)([-*+]\s+\[[ xX]\]\s+|[-*+]\s+|(\d+)([.)])\s+|>\s?))"));
     QTextCursor c = textCursor();
     if (c.hasSelection()) return false;
+    const auto *info = static_cast<BlockInfo *>(c.block().userData());
+    if (info && (info->kind == BlockInfo::Code || info->kind == BlockInfo::Fence)) return false;
     const QString line = c.block().text();
     const auto m = list.match(line);
     if (!m.hasMatch() || c.positionInBlock() < m.capturedEnd()) return false;
@@ -786,6 +897,7 @@ void MarkdownEditor::keyPressEvent(QKeyEvent *e) {
     const auto mods = e->modifiers() & (Qt::ControlModifier | Qt::ShiftModifier | Qt::AltModifier | Qt::MetaModifier);
     const bool ctrl = mods & Qt::ControlModifier;
     if (!isReadOnly() && ctrl) {
+        if (e->key() == Qt::Key_Slash) return showInsertMenu();
         const bool shift = mods & Qt::ShiftModifier;
         const bool alt = mods & Qt::AltModifier;
         if (!shift && !alt) {
@@ -827,7 +939,8 @@ void MarkdownEditor::keyPressEvent(QKeyEvent *e) {
         if (item.match(c.block().text()).hasMatch() || c.hasSelection() || out) {
             c.beginEditBlock();
             const int a = document()->findBlock(c.selectionStart()).blockNumber();
-            const int b = document()->findBlock(c.selectionEnd()).blockNumber();
+            const int end = c.hasSelection() ? c.selectionEnd() - 1 : c.selectionEnd();
+            const int b = document()->findBlock(end).blockNumber();
             for (int i = a; i <= b; ++i) {
                 QTextBlock blk = document()->findBlockByNumber(i);
                 QTextCursor x(blk);

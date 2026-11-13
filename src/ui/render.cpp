@@ -4,6 +4,7 @@
 
 #include <QRegularExpression>
 #include <QUrl>
+#include <QTextDocumentFragment>
 #include <md4c-html.h>
 
 namespace {
@@ -135,7 +136,7 @@ bool isSafeExternalUrl(const QString &url) {
 }
 
 QString renderMarkdown(const QString &markdown, const RenderOptions &opts) {
-    const QByteArray src = md::separateTables(markdown).toUtf8();
+    const QByteArray src = md::separateTables(md::displayMarkdown(markdown)).toUtf8();
     QByteArray out;
     const unsigned flags = MD_DIALECT_GITHUB | MD_FLAG_NOHTML | MD_FLAG_WIKILINKS;
     md_html(src.constData(), MD_SIZE(src.size()), collect, &out, flags, 0);
@@ -205,7 +206,7 @@ QString renderMarkdown(const QString &markdown, const RenderOptions &opts) {
                 if (name.isEmpty() && opts.resourceName) name = escape(opts.resourceName(id));
                 result += QStringLiteral("<a href=\"ivy://res/%1\" class=\"file\">%2 %3</a>").arg(id, icon, name);
             }
-        } else if (opts.remoteImages && (url.startsWith(QLatin1String("https://")) || url.startsWith(QLatin1String("http://")))) {
+        } else if (opts.remoteImages && (QUrl(url).scheme().compare(QLatin1String("https"), Qt::CaseInsensitive) == 0 || QUrl(url).scheme().compare(QLatin1String("http"), Qt::CaseInsensitive) == 0)) {
             result += QStringLiteral("<img src=\"%1\" alt=\"%2\">").arg(m.captured(1), m.captured(2));
         } else if (isSafeExternalUrl(url)) {
             // Without remoteImages nothing is fetched; show a link.
@@ -242,21 +243,25 @@ QString renderMarkdown(const QString &markdown, const RenderOptions &opts) {
     result += html.mid(last);
     html = result;
 
-    // ==highlight== outside code.
+    // Transform text nodes only: never touch attributes or code. In
+    // particular, == in a URL must not turn into HTML inside its href.
     static const QRegularExpression mark(QStringLiteral(R"RE(==([^=\n<>][^=\n]*?)==)RE"));
-    static const QRegularExpression codeSplit(QStringLiteral(R"RE((<pre>.*?</pre>|<code>.*?</code>))RE"),
-                                              QRegularExpression::DotMatchesEverythingOption);
+    static const QRegularExpression tags(QStringLiteral(R"RE(<[^>]*>)RE"));
     result.clear();
     last = 0;
-    for (auto it = codeSplit.globalMatch(html); it.hasNext();) {
+    int codeDepth = 0;
+    for (auto it = tags.globalMatch(html); it.hasNext();) {
         const auto m = it.next();
-        QString plain = html.mid(last, m.capturedStart() - last);
-        plain.replace(mark, QStringLiteral("<span class=\"mark\">\\1</span>"));
-        result += plain + m.captured(0);
+        QString node = html.mid(last, m.capturedStart() - last);
+        if (!codeDepth) node.replace(mark, QStringLiteral("<span class=\"mark\">\\1</span>"));
+        const QString tag = m.captured(0);
+        result += node + tag;
+        if (tag.startsWith(QLatin1String("<code")) || tag == QLatin1String("<pre>")) ++codeDepth;
+        if (tag == QLatin1String("</code>") || tag == QLatin1String("</pre>")) codeDepth = std::max(0, codeDepth - 1);
         last = m.capturedEnd();
     }
     QString tail = html.mid(last);
-    tail.replace(mark, QStringLiteral("<span class=\"mark\">\\1</span>"));
+    if (!codeDepth) tail.replace(mark, QStringLiteral("<span class=\"mark\">\\1</span>"));
     result += tail;
 
     // Heading anchors so [[Title#Heading]] and the outline can scroll there.
@@ -267,7 +272,7 @@ QString renderMarkdown(const QString &markdown, const RenderOptions &opts) {
     for (auto it = heading.globalMatch(html); it.hasNext();) {
         const auto m = it.next();
         result += html.mid(last, m.capturedStart() - last);
-        result += QStringLiteral("<h%1><a name=\"%2\"></a>%3</h%1>").arg(m.captured(1), md::slug(m.captured(2)), m.captured(2));
+        result += QStringLiteral("<h%1><a name=\"%2\"></a>%3</h%1>").arg(m.captured(1), md::slug(QTextDocumentFragment::fromHtml(m.captured(2)).toPlainText()), m.captured(2));
         last = m.capturedEnd();
     }
     result += html.mid(last);

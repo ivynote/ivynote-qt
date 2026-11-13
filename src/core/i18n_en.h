@@ -9,6 +9,15 @@ struct Pair {
 };
 
 inline constexpr Pair kEnglish[] = {
+    {"插入", "Insert"},
+    {"一级标题", "Heading 1"}, {"二级标题", "Heading 2"}, {"三级标题", "Heading 3"},
+    {"引用", "Quote"}, {"代码块", "Code block"}, {"表格", "Table"}, {"分割线", "Divider"},
+    {"今天的日期", "Today's date"}, {"当前时间", "Current time"},
+    {"网页链接", "Web link"}, {"网络图片", "Web image"}, {"网址", "URL"},
+    {"在笔记中查找", "Find in note"}, {"区分大小写", "Match case"},
+    {"上一个", "Previous"}, {"下一个", "Next"},
+    {"重新加载图片", "Reload images"}, {"图片加载中…", "Loading image…"},
+    {"图片加载失败，右键可重试", "Image could not load. Right-click to retry."},
     {"「%1」的本机数据已加密，密钥保存在系统钥匙串中。", "The local data of “%1” is encrypted; the key is kept in the system keychain."},
     {"「%1」的恢复密钥：", "Recovery key for “%1”:"},
     {"1 天", "1 day"},
@@ -149,6 +158,7 @@ inline constexpr Pair kEnglish[] = {
     {"密钥格式不正确。", "That is not a valid key."},
     {"名称", "Name"},
     {"命令面板…", "Command palette…"},
+    {"编辑模式", "Editor mode"},
     {"默认编辑模式", "Default editor mode"},
     {"篇笔记已导出", "notes exported"},
     {"篇笔记已导入", "notes imported"},

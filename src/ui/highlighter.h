@@ -5,6 +5,9 @@
 #pragma once
 
 #include <QHash>
+#include <QImage>
+#include <QSharedPointer>
+#include <QTimer>
 #include <QSet>
 #include <QSize>
 #include <QSyntaxHighlighter>
@@ -20,7 +23,7 @@ struct LinkSpan {
 
 class BlockInfo : public QTextBlockUserData {
 public:
-    enum Kind { Text, Fence, Code, Heading, Quote, Rule, Image, Table };
+    enum Kind { Text, Fence, Code, Heading, Quote, Rule, Image, ImageParagraph, ReferenceDefinition, Table };
     Kind kind = Text;
     int level = 0;
     int tableRow = -1; // 0 header, 1 delimiter, 2… body
@@ -31,6 +34,7 @@ public:
     qreal hang = 0;                // hanging indent of wrapped lines (lists, quotes)
     QList<LinkSpan> links;
     QString imageId;
+    QSharedPointer<QTextDocument> imageDocument;
     QSize imageSize; // reserved display size
 };
 
@@ -64,6 +68,7 @@ public:
     QList<int> takeChanged() { QList<int> l(m_changed.begin(), m_changed.end()); m_changed.clear(); return l; }
 
     std::function<bool(const QString &title)> wikiExists;
+    std::function<QImage(const QString &id)> imageLoader;
     std::function<QSize(const QString &id)> imageSize; // natural size or invalid
     std::function<QString(const QString &id)> attachmentKind;
 
@@ -78,6 +83,8 @@ private:
     void inlineSpans(const QString &text, int from, BlockInfo *info, bool live, const QTextCharFormat &base);
     QSize displaySize(const QString &id) const;
 
+    QTimer m_referenceTimer;
+    QString m_referenceDefinitions;
     Mode m_mode = Live;
     int m_px = 16;
     int m_first = -1, m_last = -1;

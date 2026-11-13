@@ -3,12 +3,16 @@
 #include "core/markdown.h"
 #include "ui/remoteimages.h"
 #include "ui/theme.h"
+#include "ui/render.h"
+#include "core/i18n.h"
+#include <QPainter>
 
 #include <QFontMetricsF>
 #include <QRegularExpression>
 #include <QTextBlock>
 #include <QTextDocument>
 #include <cmath>
+#include <QUrl>
 
 namespace {
 
@@ -26,6 +30,36 @@ QTextCharFormat fontFormat(const QFont &f) {
     return fmt;
 }
 
+} // namespace
+
+namespace {
+// A read-only layout painted over an inactive source block. QTextDocument
+// handles inline image positioning/wrapping; the actual editor stays plain text.
+class ImageParagraphDocument : public QTextDocument {
+public:
+    std::function<QImage(const QString &)> loader;
+    int imageWidth = 320;
+protected:
+    QVariant loadResource(int type, const QUrl &url) override {
+        if (type != QTextDocument::ImageResource || !loader) return {};
+        QString key;
+        if (RemoteImages::isRemote(url.toString())) key = url.toString();
+        else if (url.scheme() == QLatin1String("ivy") && url.host() == QLatin1String("res")) key = url.path().mid(1);
+        if (key.isEmpty()) return {};
+        QImage image = loader(key);
+        if (image.isNull()) {
+            image = QImage(std::min(320, imageWidth), 120, QImage::Format_ARGB32_Premultiplied);
+            image.fill(Theme::t().sunken);
+            QPainter painter(&image);
+            painter.setPen(Theme::t().muted);
+            painter.setFont(Theme::uiFont(12));
+            painter.drawText(image.rect().adjusted(6, 6, -6, -6), Qt::AlignCenter | Qt::TextWordWrap,
+                             RemoteImages::isRemote(key) && RemoteImages::instance()->failed(key) ? T("图片加载失败，右键可重试") : T("图片加载中…"));
+        }
+        if (image.width() > imageWidth) image = image.scaledToWidth(imageWidth, Qt::SmoothTransformation);
+        return image;
+    }
+};
 } // namespace
 
 qreal MarkdownHighlighter::advance(const QTextCharFormat &f, const QString &text) const {
@@ -51,6 +85,18 @@ QTextCharFormat MarkdownHighlighter::tallChar(qreal height, qreal lineFactor) co
 
 MarkdownHighlighter::MarkdownHighlighter(QTextDocument *doc) : QSyntaxHighlighter(doc) {
     connect(Theme::instance(), &Theme::changed, this, &QSyntaxHighlighter::rehighlight);
+    m_referenceTimer.setSingleShot(true);
+    m_referenceTimer.setInterval(120);
+    connect(doc, &QTextDocument::contentsChange, this, [this](int, int removed, int added) {
+        if (removed || added) m_referenceTimer.start();
+    });
+    connect(&m_referenceTimer, &QTimer::timeout, this, [this] {
+        const QString definitions = md::imageDefinitions(document()->toPlainText());
+        if (definitions == m_referenceDefinitions) return;
+        m_referenceDefinitions = definitions;
+        // A definition can change images in completely different blocks.
+        rehighlight();
+    });
 }
 
 void MarkdownHighlighter::setMode(Mode m) {
@@ -130,8 +176,9 @@ void MarkdownHighlighter::highlightBlock(const QString &text) {
     faint.setForeground(k.faint);
 
     // Fenced code.
-    if (md::isFenceLine(text)) {
-        setCurrentBlockState(prev & 1 ? 0 : 1);
+    int fence = prev >= 6 ? prev : 0;
+    if (md::advanceFence(text, fence)) {
+        setCurrentBlockState(fence);
         info->kind = BlockInfo::Fence;
         QTextCharFormat f = fontFormat(mono);
         f.setForeground(k.faint);
@@ -143,8 +190,8 @@ void MarkdownHighlighter::highlightBlock(const QString &text) {
         }
         return;
     }
-    if (prev & 1) {
-        setCurrentBlockState(1);
+    if (fence) {
+        setCurrentBlockState(fence);
         info->kind = BlockInfo::Code;
         QTextCharFormat f = fontFormat(mono);
         f.setForeground(k.ink2);
@@ -157,9 +204,67 @@ void MarkdownHighlighter::highlightBlock(const QString &text) {
     QTextCharFormat base;
     int from = 0;
 
+    // Reference targets are metadata, not body text. Reveal them on edit.
+    if (re(R"(^ {0,3}\[[^\]\n]+\]:\s*\S)").match(text).hasMatch()) {
+        info->kind = BlockInfo::ReferenceDefinition;
+        if (live && !active) hide(0, int(text.size()));
+        else { QTextCharFormat f = fontFormat(mono); f.setForeground(k.muted); setFormat(0, int(text.size()), f); }
+        return;
+    }
+
+    const QString definitions = text.contains(QLatin1String("![")) && !text.contains(QLatin1String("](")) ? md::imageDefinitions(document()->toPlainText()) : QString();
+    // Resolve complete image syntax through md4c: empty alt, angle URLs,
+    // balanced parentheses, titles, and self-labelled legacy image links.
+    if (const md::ImageLink img = md::standaloneImage(text, definitions); !img.url.isEmpty()) {
+        const bool remote = RemoteImages::isRemote(img.url);
+        const QUrl url(img.url);
+        const QString id = remote ? img.url : url.scheme() == QLatin1String("ivy") && url.host() == QLatin1String("res") ? url.path().mid(1) : QString();
+        const QString kind = !remote && attachmentKind ? attachmentKind(id) : QString();
+        if (!id.isEmpty() && (remote || kind.isEmpty() || kind == QLatin1String("image"))) {
+            info->kind = BlockInfo::Image;
+            info->imageId = id;
+            if (live && !active) {
+                info->imageSize = displaySize(id);
+                hide(0, int(text.size()));
+                if (!text.isEmpty()) setFormat(0, 1, tallChar(info->imageSize.height() + 14));
+                return;
+            }
+        }
+    }
+
+    // Images embedded in a paragraph or wrapped in a link must be drawn as
+    // images too, rather than leaving their Markdown URL visible.
+    if (live && !active && text.contains(QLatin1String("![")) && info->kind != BlockInfo::Image) {
+        RenderOptions opts;
+        opts.remoteImages = true;
+        opts.resourceKind = attachmentKind;
+        const QString html = renderMarkdown(text + QStringLiteral("\n\n") + definitions, opts);
+        if (html.contains(QLatin1String("<img "))) {
+            auto doc = QSharedPointer<ImageParagraphDocument>::create();
+            doc->loader = imageLoader;
+            doc->imageWidth = std::max(1, m_columnWidth - 8);
+            doc->setDocumentMargin(0);
+            doc->setDefaultFont(Theme::uiFont(m_px));
+            doc->setDefaultStyleSheet(QStringLiteral("p{margin:0;color:%1;}a{color:%2;}code{background:%3;}").arg(k.ink.name(), k.ivy.name(), k.codeBg.name()));
+            // Give paragraph images their own visual line; a full-width
+            // photo must not leave one orphaned character beside it.
+            QString flow = html;
+            static const QRegularExpression imageTag(QStringLiteral(R"((<img [^>]*>))"));
+            flow.replace(imageTag, QStringLiteral("<br>\\1<br>"));
+            doc->setHtml(flow);
+            doc->setTextWidth(doc->imageWidth);
+            info->kind = BlockInfo::ImageParagraph;
+            info->imageDocument = doc;
+            info->imageSize = doc->size().toSize();
+            hide(0, int(text.size()));
+            if (!text.isEmpty()) setFormat(0, 1, tallChar(info->imageSize.height() + 14));
+            return;
+        }
+    }
+
     // Headings.
     if (auto m = re(R"(^(#{1,6})(\s+))").match(text); m.hasMatch()) {
-        info->kind = BlockInfo::Heading;
+        if (info->kind != BlockInfo::Image) info->kind = BlockInfo::Heading;
         info->level = int(m.capturedLength(1));
         static const qreal scale[] = {1.6, 1.3, 1.1, 1.0, 1.0, 1.0};
         QFont f = live ? Theme::serif(m_px * scale[info->level - 1], QFont::DemiBold) : Theme::mono(std::max(13, m_px - 2));
@@ -189,38 +294,6 @@ void MarkdownHighlighter::highlightBlock(const QString &text) {
         f.setForeground(active ? k.faint : QColor(Qt::transparent));
         setFormat(0, int(text.size()), f);
         return;
-    }
-
-    // An image alone on its line becomes the image.
-    // Remote images (https://…) are keyed by their URL; a broken one stays source.
-    if (auto m = re(R"(^\s*!\[([^\]\n]*)\]\((?:ivy://res/([A-Za-z0-9_-]{8,64})|(https?://[^)\s]+))(?:\s+"[^"\n]*")?\)\s*$)").match(text);
-        m.hasMatch()) {
-        const bool remote = m.hasCaptured(3);
-        const QString id = remote ? m.captured(3) : m.captured(2);
-        const QString kind = remote ? QString() : attachmentKind ? attachmentKind(id) : QString();
-        if (remote ? !RemoteImages::instance()->failed(id) : kind.isEmpty() || kind == QLatin1String("image")) {
-            info->kind = BlockInfo::Image;
-            info->imageId = id;
-            if (live && !active) {
-                const QSize size = displaySize(id);
-                info->imageSize = size;
-                hide(0, int(text.size()));
-                // One huge, invisible, zero-width character makes the line as
-                // tall as the image, so layout, scrolling and hit-testing all
-                // stay native.
-                QFont probe = Theme::uiFont(100);
-                const qreal ratio = QFontMetricsF(probe).height() / 100.0;
-                const qreal lineFactor = 1.75;
-                const int px = std::max(8, int((size.height() + 14) / (ratio * lineFactor)));
-                QTextCharFormat tall;
-                tall.setForeground(Qt::transparent);
-                tall.setProperty(QTextFormat::FontPixelSize, px);
-                tall.setFontLetterSpacingType(QFont::PercentageSpacing);
-                tall.setFontLetterSpacing(1);
-                setFormat(0, 1, tall);
-                return;
-            }
-        }
     }
 
     // Block quote.
@@ -465,16 +538,18 @@ void MarkdownHighlighter::inlineSpans(const QString &text, int from, BlockInfo *
     };
 
     // Inline code.
-    for (auto it = re(R"(`([^`\n]+)`)").globalMatch(text, from); it.hasNext();) {
+    for (auto it = re(R"((?<!`)(`+)(?!`)(.+?)(?<!`)\1(?!`))").globalMatch(text, from); it.hasNext();) {
         const auto m = it.next();
         const int s = int(m.capturedStart()), e = int(m.capturedEnd());
+        if (!free(s, e)) continue;
         taken.append({s, e});
+        const int ticks = int(m.capturedLength(1));
         QTextCharFormat c = fontFormat(Theme::mono(std::max(12, int(m_px * 0.85))));
         c.setForeground(k.ink);
         c.setBackground(k.codeBg.darker(Theme::dark() ? 80 : 104));
-        setFormat(s + 1, e - s - 2, c);
-        marker(s, 1);
-        marker(e - 1, 1);
+        setFormat(s + ticks, e - s - 2 * ticks, c);
+        marker(s, ticks);
+        marker(e - ticks, ticks);
     }
     // Wiki links.
     for (auto it = re(R"(\[\[([^\[\]\n]+?)\]\])").globalMatch(text, from); it.hasNext();) {

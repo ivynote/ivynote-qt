@@ -6,6 +6,7 @@
 #include <QHash>
 #include <QImage>
 #include <QUrl>
+#include <QTimer>
 #include <QTextBrowser>
 #include <functional>
 
@@ -23,11 +24,17 @@ public:
     std::function<QImage(const QString &id)> image;
 
 protected:
+    void contextMenuEvent(QContextMenuEvent *event) override;
+    void resizeEvent(QResizeEvent *event) override;
     QVariant loadResource(int type, const QUrl &name) override;
 
 private:
     void restyle();
     int maxImageWidth() const;
     int m_px = 16;
+    bool m_hasMarkdown = false;
+    QString m_markdown, m_title;
+    RenderOptions m_options;
+    QTimer m_resizeTimer;
     QHash<QString, QUrl> m_waiting; // remote images shown as placeholders
 };

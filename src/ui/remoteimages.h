@@ -14,11 +14,14 @@ class QNetworkAccessManager;
 class RemoteImages : public QObject {
     Q_OBJECT
 public:
+    // An optional borrowed manager allows isolated transports (e.g. tests).
+    explicit RemoteImages(QObject *parent = nullptr, QNetworkAccessManager *manager = nullptr);
     static RemoteImages *instance();
     static bool isRemote(const QString &url);
 
     // The image if it has arrived; otherwise null, and the fetch starts.
     QImage image(const QString &url);
+    void retryFailed();
     bool failed(const QString &url) const { return m_failed.contains(url); }
 
 signals:
@@ -26,7 +29,6 @@ signals:
     void ready(const QString &url);
 
 private:
-    explicit RemoteImages(QObject *parent = nullptr);
     void fetch(const QString &url);
     void finish(const QString &url, const QImage &img);
 
