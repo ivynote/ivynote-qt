@@ -9,6 +9,7 @@
 #include <QPainter>
 #include <QSplitter>
 #include <QLineEdit>
+#include <QToolButton>
 #include "ui/markdownview.h"
 #include "core/markdown.h"
 #include <QTextTable>
@@ -330,6 +331,117 @@ private slots:
         QCOMPARE(editor.markdown(), before);
     }
 
+    void tableCellEditingAndNavigation() {
+        MarkdownEditor editor;
+        editor.resize(800, 600);
+        const QString original = QStringLiteral("Before\n\n| A | B |\n|---|---|\n| one | two |\n\nAfter");
+        editor.setMarkdown(original);
+        editor.show();
+        editor.setTextCursor(QTextCursor(editor.document()->findBlockByNumber(2)));
+        QVERIFY(editor.editTableCell(1, 0));
+        auto *cell = editor.findChild<QLineEdit *>(QStringLiteral("tableCellEditor"));
+        QVERIFY(cell && cell->isVisible());
+        QTest::keyClicks(cell, QStringLiteral("a | b"));
+        QTest::keyClick(cell, Qt::Key_Tab);
+        QVERIFY(editor.markdown().contains(QStringLiteral("a \\| b")));
+        QVERIFY(cell->isVisible());
+        QCOMPARE(cell->text(), QStringLiteral("two"));
+        QTest::keyClick(cell, Qt::Key_Escape);
+        QVERIFY(editor.markdown().startsWith(QStringLiteral("Before\n\n")));
+        QVERIFY(editor.markdown().endsWith(QStringLiteral("\n\nAfter")));
+        editor.undo();
+        QCOMPARE(editor.markdown(), original);
+        editor.redo();
+        QVERIFY(editor.markdown().contains(QStringLiteral("a \\| b")));
+        editor.setTextCursor(QTextCursor(editor.document()->findBlockByNumber(2)));
+        QVERIFY(editor.editTableCell(1, 1));
+        QTest::keyClick(cell, Qt::Key_Tab);
+        const auto table = md::parseTable(editor.markdown().section(QStringLiteral("\n\n"), 1, 1));
+        QCOMPARE(table.rows.size(), 3);
+        QTest::keyClicks(cell, QStringLiteral("new"));
+        editor.commitPendingCell(); // save even if a close/flush happens before focus-out
+        QVERIFY(editor.markdown().contains(QStringLiteral("new")));
+    }
+
+    void closingEditorWithFocusedTableCell() {
+        auto *editor = new MarkdownEditor;
+        editor->resize(800, 600);
+        editor->setMarkdown(QStringLiteral("| A | B |\n|---|---|\n| one | two |"));
+        editor->show();
+        editor->activateWindow();
+        QVERIFY(editor->editTableCell(1, 0));
+        QPointer<QLineEdit> cell = editor->findChild<QLineEdit *>(QStringLiteral("tableCellEditor"));
+        QVERIFY(cell);
+        cell->setFocus();
+        QTest::qWait(30);
+        QTest::keyClicks(cell, QStringLiteral("saved before closing"));
+        delete editor;
+        QVERIFY(cell.isNull());
+        QCoreApplication::processEvents();
+    }
+
+    void tableTypingWritesThroughAndFlushKeepsCellOpen() {
+        NotePane pane;
+        pane.resize(1000, 700);
+        for (QWidget *child : pane.findChildren<QWidget *>(Qt::FindDirectChildrenOnly)) child->setEnabled(true);
+        pane.editor()->setReadOnly(false);
+        pane.editor()->setMarkdown(QStringLiteral("| A | B |\n|---|---|\n| old | other |"));
+        pane.show();
+        QVERIFY(pane.editor()->editTableCell(1, 0));
+        auto *cell = pane.findChild<QLineEdit *>(QStringLiteral("tableCellEditor"));
+        QVERIFY(cell);
+        QTest::keyClicks(cell, QStringLiteral("new"));
+        QCOMPARE(md::parseTable(pane.editor()->markdown()).rows[1][0], QStringLiteral("new"));
+        pane.flush();
+        QVERIFY(cell->isVisible());
+        // An unrelated remote cell change is kept when editing continues.
+        pane.editor()->applyRemote(pane.editor()->markdown().replace(QStringLiteral("other"), QStringLiteral("remote")));
+        QTest::keyClicks(cell, QStringLiteral("er"));
+        const auto table = md::parseTable(pane.editor()->markdown());
+        QCOMPARE(table.rows[1][0], QStringLiteral("newer"));
+        QCOMPARE(table.rows[1][1], QStringLiteral("remote"));
+    }
+
+    void tableStructureAndSort() {
+        MarkdownEditor editor;
+        editor.setMarkdown(QStringLiteral("| N |\n|---|\n| 10 |\n| text |\n| 2 |\n| NaN |"));
+        QVERIFY(editor.tableAction(QStringLiteral("sort-ascending")));
+        auto table = md::parseTable(editor.markdown());
+        QCOMPARE(table.rows[1][0], QStringLiteral("2"));
+        QCOMPARE(table.rows[2][0], QStringLiteral("10"));
+        QVERIFY(editor.tableAction(QStringLiteral("column-after")));
+        table = md::parseTable(editor.markdown());
+        QCOMPARE(table.align.size(), 2);
+        QVERIFY(editor.tableAction(QStringLiteral("center")));
+        QCOMPARE(md::parseTable(editor.markdown()).align[0], int(Qt::AlignHCenter));
+        editor.setReadOnly(true);
+        QVERIFY(!editor.tableAction(QStringLiteral("row-after")));
+    }
+
+    void replaceAllIsOneUndoAndDoesNotRescanReplacement() {
+        NotePane pane;
+        pane.resize(900, 650);
+        for (QWidget *child : pane.findChildren<QWidget *>(Qt::FindDirectChildrenOnly)) child->setEnabled(true);
+        pane.editor()->setReadOnly(false);
+        pane.editor()->setMarkdown(QStringLiteral("alpha Alpha alpha"));
+        pane.show();
+        pane.showReplace();
+        auto *find = pane.findChild<QLineEdit *>(QStringLiteral("noteFindText"));
+        auto *replacement = pane.findChild<QLineEdit *>(QStringLiteral("noteReplaceText"));
+        auto *all = pane.findChild<QToolButton *>(QStringLiteral("noteReplaceAll"));
+        QVERIFY(find && replacement && all);
+        find->setText(QStringLiteral("alpha"));
+        replacement->setText(QStringLiteral("alphaalpha"));
+        QTest::mouseClick(all, Qt::LeftButton);
+        QCOMPARE(pane.editor()->markdown(), QStringLiteral("alphaalpha alphaalpha alphaalpha"));
+        pane.editor()->undo();
+        QCOMPARE(pane.editor()->markdown(), QStringLiteral("alpha Alpha alpha"));
+        pane.editor()->setReadOnly(true);
+        replacement->setText(QStringLiteral("forbidden"));
+        QTest::mouseClick(all, Qt::LeftButton);
+        QCOMPARE(pane.editor()->markdown(), QStringLiteral("alpha Alpha alpha"));
+    }
+
     void findInNoteDoesNotEdit() {
         NotePane pane;
         pane.resize(900, 650);
@@ -372,6 +484,19 @@ private slots:
         QVERIFY(changed.contains(QStringLiteral("    - [ ] code")));
         QVERIFY(changed.contains(QStringLiteral("> - [x] quoted")));
         QVERIFY(md::toggleTask(body, 2).contains(QStringLiteral("  - [ ] nested")));
+    }
+
+    void tableVisualFixture() {
+        const QString shots = qEnvironmentVariable("IVY_SHOTS_DIR");
+        if (shots.isEmpty()) return;
+        MarkdownEditor editor;
+        editor.resize(850, 600);
+        editor.setMarkdown(QStringLiteral("# 表格编辑\n\n点击单元格编辑，Tab 切换，右键管理行列。\n\n| 项目 | 状态 | 数量 |\n| --- | :---: | ---: |\n| Markdown 编辑器 | 进行中 | 10 |\n| 图片展示 | 已完成 | 2 |\n\n表格后面的文字保持原样。"));
+        editor.show();
+        editor.setTextCursor(QTextCursor(editor.document()->findBlockByNumber(4)));
+        QVERIFY(editor.editTableCell(1, 1));
+        QTest::qWait(150);
+        editor.grab().save(shots + QStringLiteral("/editable-table.png"));
     }
 
     void imageVisualFixture() {
@@ -529,7 +654,7 @@ private slots:
         QCOMPARE(e.document()->begin().blockFormat().leftMargin(), hang);
     }
 
-    void liveTableActivatesWhole() {
+    void liveTableKeepsGridAtCaret() {
         MarkdownEditor e;
         e.resize(800, 600);
         e.show();
@@ -544,8 +669,8 @@ private slots:
         e.setFocus();
         QVERIFY(QTest::qWaitForWindowActive(&e));
         e.setTextCursor(QTextCursor(e.document()->findBlockByNumber(4)));
-        // The cursor on one row shows the whole table's source.
-        for (int i = 2; i <= 5; ++i) QVERIFY(static_cast<BlockInfo *>(e.document()->findBlockByNumber(i).userData())->active);
+        // A caret in a live table keeps the grid; cell editing is an overlay.
+        for (int i = 2; i <= 5; ++i) QVERIFY(!static_cast<BlockInfo *>(e.document()->findBlockByNumber(i).userData())->active);
         QVERIFY(!static_cast<BlockInfo *>(e.document()->findBlockByNumber(0).userData())->active);
     }
 

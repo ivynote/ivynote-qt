@@ -15,6 +15,25 @@
 class CoreTest : public QObject {
     Q_OBJECT
 private slots:
+    void editableTablesRoundTrip() {
+        const QString source = QStringLiteral("| Name | Value |\n| :--- | ---: |\n| a\\|b | 10 |\n| `code` | 2 |");
+        const md::Table table = md::parseTable(source);
+        QVERIFY(table.valid());
+        QCOMPARE(table.rows.size(), 3);
+        QCOMPARE(table.rows[1][0], QStringLiteral("a|b"));
+        QCOMPARE(table.align[1], int(Qt::AlignRight));
+        const auto again = md::parseTable(md::formatTable(table));
+        QCOMPARE(again.rows, table.rows);
+        QCOMPARE(again.align, table.align);
+        QVERIFY(!md::parseTable(QStringLiteral("not a table")).valid());
+        const auto path = md::parseTable(QStringLiteral(R"MD(| A |
+| --- |
+| C:\\|)MD"));
+        QVERIFY(path.valid());
+        QCOMPARE(path.rows[1].size(), 1);
+        QCOMPARE(md::parseTable(md::formatTable(path)).rows, path.rows);
+    }
+
     void hlcFormatAndOrder() {
         qint64 t = 1793503505537;
         Hlc h(QStringLiteral("desk-1"), [&] { return t; });

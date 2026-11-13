@@ -331,7 +331,7 @@ public:
             const int key = k->key();
             const bool ctrl = mods == Qt::ControlModifier;
             const bool ctrlShift = mods == (Qt::ControlModifier | Qt::ShiftModifier);
-            if ((ctrl && (key == Qt::Key_F || key == Qt::Key_K || key == Qt::Key_N || key == Qt::Key_Backslash || key == Qt::Key_Comma || key == Qt::Key_R)) ||
+            if ((ctrl && (key == Qt::Key_H || key == Qt::Key_F || key == Qt::Key_K || key == Qt::Key_N || key == Qt::Key_Backslash || key == Qt::Key_Comma || key == Qt::Key_R)) ||
                 (ctrlShift && key == Qt::Key_P)) {
                 e->ignore();
                 return true;

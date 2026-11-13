@@ -5,6 +5,10 @@
 #include "ui/remoteimages.h"
 #include "ui/theme.h"
 #include "ui/render.h"
+#include "ui/widgets.h"
+
+#include <algorithm>
+#include <cmath>
 
 #include <QAbstractItemView>
 #include <QAbstractTextDocumentLayout>
@@ -14,6 +18,8 @@
 #include <QContextMenuEvent>
 #include <QKeyEvent>
 #include <QInputDialog>
+#include <QLineEdit>
+#include <QCollator>
 #include <QDateTime>
 #include <QUrl>
 #include <QMenu>
@@ -31,6 +37,15 @@
 MarkdownEditor::MarkdownEditor(QWidget *parent)
     : QTextEdit(parent), m_hl(new MarkdownHighlighter(document())), m_completer(new QCompleter(this)),
       m_titles(new QStringListModel(this)) {
+    m_cellEdit = new QLineEdit(viewport());
+    m_cellEdit->setObjectName(QStringLiteral("tableCellEditor"));
+    m_cellEdit->hide();
+    m_cellEdit->installEventFilter(this);
+    passAppShortcuts(m_cellEdit);
+    connect(m_cellEdit, &QLineEdit::textEdited, this, [this] { saveTableCell(); });
+    connect(m_cellEdit, &QLineEdit::editingFinished, this, [this] { closeTableCell(true); });
+    connect(verticalScrollBar(), &QScrollBar::valueChanged, this, [this] { positionTableCell(); });
+    connect(horizontalScrollBar(), &QScrollBar::valueChanged, this, [this] { positionTableCell(); });
     setAcceptRichText(false);
     setFrameShape(QFrame::NoFrame);
     setTabChangesFocus(false);
@@ -116,7 +131,16 @@ MarkdownEditor::MarkdownEditor(QWidget *parent)
     setFontSize(16);
 }
 
+MarkdownEditor::~MarkdownEditor() {
+    // QWidget tears down the focused child after derived members are gone.
+    // Its focus-out/finished signals must not enter the editor at that point.
+    m_cellEdit->disconnect(this);
+    m_cellEdit->removeEventFilter(this);
+    m_cellEdit->hide();
+}
+
 void MarkdownEditor::setMarkdown(const QString &text) {
+    closeTableCell(false);
     m_loading = true;
     setUndoRedoEnabled(false);
     setPlainText(text);
@@ -181,6 +205,7 @@ void MarkdownEditor::relayout(const QList<int> &blocks, bool afterEdit) {
 
 
 void MarkdownEditor::undo() {
+    closeTableCell(true);
     // Mode/font/layout commands share Qt's stack; one user undo must
     // reach a text change even after any number of presentation changes.
     QTextDocument *d = document();
@@ -197,6 +222,7 @@ void MarkdownEditor::undo() {
 }
 
 void MarkdownEditor::redo() {
+    closeTableCell(true);
     QTextDocument *d = document();
     m_undoing = true;
     m_loading = true;
@@ -263,6 +289,7 @@ void MarkdownEditor::applyRemote(const QString &text) {
 }
 
 void MarkdownEditor::setMode(MarkdownHighlighter::Mode m) {
+    closeTableCell(true);
     if (m_hl->mode() == m) return;
     m_loading = true;
     m_hl->setMode(m);
@@ -317,6 +344,7 @@ void MarkdownEditor::resizeEvent(QResizeEvent *e) {
         m_hl->setProperty("cw", cw);
         m_hl->rehighlight();
     }
+    positionTableCell();
 }
 
 void MarkdownEditor::setWikiTitles(const QStringList &titles) { m_titles->setStringList(titles); }
@@ -346,6 +374,10 @@ void MarkdownEditor::updateActive() {
         const auto *info = b.isValid() ? static_cast<BlockInfo *>(b.userData()) : nullptr;
         return info && info->kind == BlockInfo::Table;
     };
+    if (m_hl->mode() == MarkdownHighlighter::Live && !c.hasSelection() && inTable(first)) {
+        setActiveLines(-1, -1);
+        return;
+    }
     if (inTable(first))
         while (inTable(first.previous()) && static_cast<BlockInfo *>(first.userData())->tableRow > 0) first = first.previous();
     if (inTable(last))
@@ -551,6 +583,205 @@ void MarkdownEditor::paintRendered(QTextBlock first) {
     }
 }
 
+QTextCursor MarkdownEditor::tableRange(const QTextBlock &block) const {
+    const auto *info = block.isValid() ? static_cast<BlockInfo *>(block.userData()) : nullptr;
+    if (!info || info->kind != BlockInfo::Table) return {};
+    QTextBlock first = block;
+    while (first.previous().isValid() && static_cast<BlockInfo *>(first.userData())->tableRow > 0) first = first.previous();
+    QTextBlock last = first.next();
+    while (last.next().isValid()) {
+        const auto *next = static_cast<BlockInfo *>(last.next().userData());
+        if (!next || next->kind != BlockInfo::Table || next->tableRow == 0) break;
+        last = last.next();
+    }
+    QTextCursor range(first);
+    range.setPosition(last.position() + int(last.text().size()), QTextCursor::KeepAnchor);
+    return range;
+}
+
+bool MarkdownEditor::tableCellAt(const QPoint &point, int *row, int *column, QTextBlock *header) const {
+    const QTextBlock block = cursorForPosition(point).block();
+    const auto *info = static_cast<BlockInfo *>(block.userData());
+    if (!info || info->kind != BlockInfo::Table || info->tableRow == 1) return false;
+    const auto geometry = m_hl->tableGeometry(block);
+    const QRectF rect = document()->documentLayout()->blockBoundingRect(block).translated(-horizontalScrollBar()->value(), -verticalScrollBar()->value());
+    const qreal x = point.x() - rect.left();
+    if (point.y() < rect.top() || point.y() > rect.top() + geometry.rowHeight.value(info->tableRow)) return false;
+    for (int col = 0; col < geometry.cols; ++col) {
+        if (x < geometry.x[col] || x >= geometry.x[col + 1]) continue;
+        *row = info->tableRow > 1 ? info->tableRow - 1 : 0;
+        *column = col;
+        *header = document()->findBlockByNumber(geometry.start);
+        return true;
+    }
+    return false;
+}
+
+bool MarkdownEditor::editTableCell(int row, int column) {
+    if (isReadOnly() || mode() != MarkdownHighlighter::Live) return false;
+    closeTableCell(true);
+    QTextCursor range = tableRange(textCursor().block());
+    if (range.isNull()) return false;
+    const md::Table table = md::parseTable(range.selectedText().replace(QChar::ParagraphSeparator, u'\n'));
+    if (!table.valid() || row < 0 || row >= table.rows.size() || column < 0 || column >= table.align.size()) return false;
+    m_cellAnchor = QTextCursor(document()->findBlock(range.selectionStart()));
+    m_cellAnchor.setKeepPositionOnInsert(true);
+    m_cellRow = row;
+    m_cellColumn = column;
+    m_cellSaveStarted = false;
+    m_cellSaveRevision = -1;
+    m_cellEdit->setText(table.rows[row][column]);
+    m_cellEdit->setFont(Theme::uiFont(m_px - 2));
+    setActiveLines(-1, -1);
+    m_cellEdit->show();
+    positionTableCell();
+    m_cellEdit->setFocus();
+    m_cellEdit->selectAll();
+    return true;
+}
+
+void MarkdownEditor::positionTableCell() {
+    if (m_cellEdit->isHidden() || m_cellAnchor.isNull()) return;
+    const QTextBlock header = m_cellAnchor.block();
+    const auto geometry = m_hl->tableGeometry(header);
+    const int line = header.blockNumber() + m_cellRow + (m_cellRow > 0 ? 1 : 0);
+    const QTextBlock block = document()->findBlockByNumber(line);
+    if (!block.isValid() || m_cellColumn >= geometry.cols) return;
+    const QRectF rect = document()->documentLayout()->blockBoundingRect(block).translated(-horizontalScrollBar()->value(), -verticalScrollBar()->value());
+    m_cellEdit->setGeometry(qRound(rect.left() + geometry.x[m_cellColumn] + 2), qRound(rect.top() + 2),
+                            std::max(24, qRound(geometry.x[m_cellColumn + 1] - geometry.x[m_cellColumn] - 4)),
+                            std::max(26, qRound(geometry.rowHeight.value(m_cellRow + (m_cellRow > 0 ? 1 : 0)) - 4)));
+    m_cellEdit->raise();
+}
+
+void MarkdownEditor::commitPendingCell() { saveTableCell(); }
+
+void MarkdownEditor::saveTableCell() {
+    if (m_closingCell || m_cellEdit->isHidden() || isReadOnly() || m_cellAnchor.isNull()) return;
+    QTextCursor range = tableRange(m_cellAnchor.block());
+    const QString before = range.selectedText().replace(QChar::ParagraphSeparator, u'\n');
+    md::Table table = md::parseTable(before);
+    if (!table.valid() || m_cellRow >= table.rows.size() || m_cellColumn >= table.align.size()) return;
+    const QString value = m_cellEdit->text();
+    if (table.rows[m_cellRow][m_cellColumn] == value) return;
+    table.rows[m_cellRow][m_cellColumn] = value;
+    const QString formatted = md::formatTable(table);
+    if (formatted == before) return;
+    m_closingCell = true;
+    // A cell writes through immediately, so normal local saving/sync applies.
+    // Subsequent typing in this cell remains one undo step unless another
+    // document edit intervened (e.g. a remote change).
+    if (m_cellSaveStarted && m_cellSaveRevision == document()->revision()) range.joinPreviousEditBlock();
+    else range.beginEditBlock();
+    range.insertText(formatted);
+    range.endEditBlock();
+    m_cellSaveRevision = document()->revision();
+    m_cellSaveStarted = true;
+    m_closingCell = false;
+    positionTableCell();
+    viewport()->update();
+}
+
+void MarkdownEditor::closeTableCell(bool save) {
+    if (m_closingCell || m_cellEdit->isHidden()) return;
+    if (save) saveTableCell();
+    m_closingCell = true;
+    m_cellEdit->hide();
+    if (save && !m_cellAnchor.isNull()) {
+        const int line = m_cellAnchor.blockNumber() + m_cellRow + (m_cellRow > 0 ? 1 : 0);
+        const QTextBlock block = document()->findBlockByNumber(line);
+        if (block.isValid()) setTextCursor(QTextCursor(block));
+    }
+    m_closingCell = false;
+    viewport()->update();
+}
+
+bool MarkdownEditor::eventFilter(QObject *object, QEvent *event) {
+    if (object == m_cellEdit && event->type() == QEvent::ContextMenu) {
+        auto *context = static_cast<QContextMenuEvent *>(event);
+        QMenu *menu = m_cellEdit->createStandardContextMenu();
+        QMenu *table = menu->addMenu(T("表格"));
+        const QList<QPair<QString, const char *>> actions{
+            {"row-after", "在下方插入行"}, {"row-delete", "删除当前行"},
+            {"column-after", "在右侧插入列"}, {"column-delete", "删除当前列"},
+            {"left", "左对齐"}, {"center", "居中对齐"}, {"right", "右对齐"}
+        };
+        for (const auto &[id, label] : actions) table->addAction(T(label), this, [this, id] { tableAction(id); });
+        menu->exec(context->globalPos());
+        delete menu;
+        return true;
+    }
+    if (object == m_cellEdit && event->type() == QEvent::KeyPress) {
+        auto *key = static_cast<QKeyEvent *>(event);
+        if (key->key() == Qt::Key_Escape) { closeTableCell(true); setFocus(); return true; }
+        if (key->key() == Qt::Key_Tab || key->key() == Qt::Key_Backtab || key->key() == Qt::Key_Return || key->key() == Qt::Key_Enter) {
+            int row = m_cellRow, col = m_cellColumn;
+            const bool backward = key->key() == Qt::Key_Backtab || key->modifiers().testFlag(Qt::ShiftModifier);
+            closeTableCell(true);
+            const md::Table table = md::parseTable(tableRange(m_cellAnchor.block()).selectedText().replace(QChar::ParagraphSeparator, u'\n'));
+            if (!table.valid()) { setFocus(); return true; }
+            if (key->key() == Qt::Key_Return || key->key() == Qt::Key_Enter) row += backward ? -1 : 1;
+            else { col += backward ? -1 : 1; if (col < 0) { --row; col = int(table.align.size()) - 1; } if (col >= table.align.size()) { ++row; col = 0; } }
+            if (row < 0) { setFocus(); return true; }
+            if (row >= table.rows.size()) { m_cellRow = int(table.rows.size()) - 1; tableAction(QStringLiteral("row-after")); }
+            editTableCell(row, col);
+            return true;
+        }
+    }
+    return QTextEdit::eventFilter(object, event);
+}
+
+bool MarkdownEditor::tableAction(const QString &action) {
+    if (isReadOnly()) return false;
+    const bool editing = !m_cellEdit->isHidden();
+    closeTableCell(true);
+    QTextCursor range = tableRange(editing ? m_cellAnchor.block() : textCursor().block());
+    if (range.isNull()) return false;
+    md::Table table = md::parseTable(range.selectedText().replace(QChar::ParagraphSeparator, u'\n'));
+    if (!table.valid()) return false;
+    const int row = std::clamp(m_cellRow, 0, int(table.rows.size()) - 1);
+    const int col = std::clamp(m_cellColumn, 0, int(table.align.size()) - 1);
+    if (action == QLatin1String("row-after") || action == QLatin1String("row-before")) {
+        table.rows.insert(action == QLatin1String("row-after") ? row + 1 : std::max(1, row), QStringList(table.align.size(), QString()));
+    } else if (action == QLatin1String("row-delete")) {
+        if (row == 0) return false;
+        table.rows.removeAt(row);
+    } else if (action == QLatin1String("column-before") || action == QLatin1String("column-after")) {
+        const int at = col + (action == QLatin1String("column-after") ? 1 : 0);
+        table.align.insert(at, Qt::AlignLeft);
+        for (QStringList &cells : table.rows) cells.insert(at, QString());
+    } else if (action == QLatin1String("column-delete")) {
+        if (table.align.size() == 1) return false;
+        table.align.removeAt(col);
+        for (QStringList &cells : table.rows) cells.removeAt(col);
+    } else if (action == QLatin1String("left") || action == QLatin1String("center") || action == QLatin1String("right")) {
+        table.align[col] = action == QLatin1String("left") ? Qt::AlignLeft : action == QLatin1String("right") ? Qt::AlignRight : Qt::AlignHCenter;
+    } else if (action == QLatin1String("sort-ascending") || action == QLatin1String("sort-descending")) {
+        QCollator collator; collator.setNumericMode(true);
+        const bool ascending = action == QLatin1String("sort-ascending");
+        std::stable_sort(table.rows.begin() + 1, table.rows.end(), [&](const QStringList &a, const QStringList &b) {
+            const QString left = md::plainInline(a[col]), right = md::plainInline(b[col]);
+            bool aNumber, bNumber;
+            const double av = left.toDouble(&aNumber), bv = right.toDouble(&bNumber);
+            aNumber = aNumber && std::isfinite(av);
+            bNumber = bNumber && std::isfinite(bv);
+            // Keep numeric and text values in separate groups so mixed
+            // columns still have a strict, transitive ordering.
+            if (aNumber != bNumber) return ascending ? aNumber : bNumber;
+            if (aNumber) return ascending ? av < bv : av > bv;
+            return ascending ? collator.compare(left, right) < 0 : collator.compare(left, right) > 0;
+        });
+    } else if (action != QLatin1String("format")) return false;
+    const QString formatted = md::formatTable(table);
+    if (formatted == range.selectedText().replace(QChar::ParagraphSeparator, u'\n')) return true;
+    const int start = range.selectionStart();
+    range.beginEditBlock();
+    range.insertText(formatted);
+    range.endEditBlock();
+    setTextCursor(QTextCursor(document()->findBlock(start)));
+    return true;
+}
+
 void MarkdownEditor::paintTableRow(QPainter &p, const QTextBlock &block, const QRectF &r) const {
     const Tokens &k = Theme::t();
     const auto *info = static_cast<BlockInfo *>(block.userData());
@@ -613,6 +844,16 @@ int MarkdownEditor::taskAt(const QPoint &pos, QTextBlock *blockOut) const {
 }
 
 void MarkdownEditor::mousePressEvent(QMouseEvent *e) {
+    if (e->button() == Qt::LeftButton && !isReadOnly() && mode() == MarkdownHighlighter::Live) {
+        int row, column;
+        QTextBlock header;
+        if (tableCellAt(e->pos(), &row, &column, &header)) {
+            closeTableCell(true);
+            setTextCursor(QTextCursor(header));
+            editTableCell(row, column);
+            return;
+        }
+    }
     if (e->button() == Qt::LeftButton && !isReadOnly()) {
         QTextBlock b;
         const int task = taskAt(e->pos(), &b);
@@ -665,6 +906,29 @@ void MarkdownEditor::mouseMoveEvent(QMouseEvent *e) {
 }
 
 void MarkdownEditor::contextMenuEvent(QContextMenuEvent *e) {
+    if (mode() == MarkdownHighlighter::Live && !isReadOnly()) {
+        int row, column;
+        QTextBlock header;
+        if (tableCellAt(e->pos(), &row, &column, &header)) {
+            closeTableCell(true);
+            setTextCursor(QTextCursor(header));
+            m_cellRow = row; m_cellColumn = column;
+            QMenu menu(this);
+            const QList<QPair<QString, const char *>> actions{
+                {"row-before", "在上方插入行"}, {"row-after", "在下方插入行"}, {"row-delete", "删除当前行"},
+                {"column-before", "在左侧插入列"}, {"column-after", "在右侧插入列"}, {"column-delete", "删除当前列"},
+                {"left", "左对齐"}, {"center", "居中对齐"}, {"right", "右对齐"},
+                {"sort-ascending", "升序排列"}, {"sort-descending", "降序排列"}, {"format", "整理表格源码"}
+            };
+            for (const auto &[id, label] : actions) {
+                auto *action = menu.addAction(T(label));
+                if (id == QLatin1String("row-delete")) action->setEnabled(row != 0);
+                connect(action, &QAction::triggered, this, [this, id] { tableAction(id); });
+            }
+            menu.exec(e->globalPos());
+            return;
+        }
+    }
     // The standard menu, with undo and redo routed through ours.
     QMenu *menu = createStandardContextMenu(e->pos());
     for (QAction *a : menu->actions()) {
@@ -892,6 +1156,13 @@ void MarkdownEditor::keyPressEvent(QKeyEvent *e) {
             return;
         default:
             break;
+        }
+    }
+    if (!isReadOnly() && mode() == MarkdownHighlighter::Live && e->key() == Qt::Key_Tab && !textCursor().hasSelection()) {
+        const auto *info = static_cast<BlockInfo *>(textCursor().block().userData());
+        if (info && info->kind == BlockInfo::Table) {
+            editTableCell(info->tableRow > 1 ? info->tableRow - 1 : 0, 0);
+            return;
         }
     }
     const auto mods = e->modifiers() & (Qt::ControlModifier | Qt::ShiftModifier | Qt::AltModifier | Qt::MetaModifier);

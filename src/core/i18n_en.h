@@ -9,6 +9,14 @@ struct Pair {
 };
 
 inline constexpr Pair kEnglish[] = {
+    {"查找与替换", "Find and replace"}, {"替换为", "Replace with"},
+    {"替换", "Replace"}, {"全部替换", "Replace all"},
+    {"在上方插入行", "Insert row above"}, {"在下方插入行", "Insert row below"},
+    {"删除当前行", "Delete row"}, {"在左侧插入列", "Insert column left"},
+    {"在右侧插入列", "Insert column right"}, {"删除当前列", "Delete column"},
+    {"左对齐", "Align left"}, {"居中对齐", "Align center"}, {"右对齐", "Align right"},
+    {"升序排列", "Sort ascending"}, {"降序排列", "Sort descending"},
+    {"整理表格源码", "Format table source"},
     {"插入", "Insert"},
     {"一级标题", "Heading 1"}, {"二级标题", "Heading 2"}, {"三级标题", "Heading 3"},
     {"引用", "Quote"}, {"代码块", "Code block"}, {"表格", "Table"}, {"分割线", "Divider"},

@@ -75,6 +75,14 @@ QStringList tableCells(const QString &line); // trimmed cell texts, escaped \| k
 QList<int> tableAlignments(const QString &delimiter);
 // Inline Markdown reduced to its visible text (for table cells and the like).
 QString plainInline(const QString &text);
+struct Table {
+    QList<QStringList> rows; // header first; delimiter excluded
+    QList<int> align;
+    bool valid() const { return !rows.isEmpty() && !align.isEmpty(); }
+};
+Table parseTable(const QString &source);
+QString formatTable(const Table &table);
+
 // A table that directly follows a paragraph line gets a blank line before it,
 // as GitHub renders it (md4c alone keeps it in the paragraph).
 QString separateTables(const QString &body);

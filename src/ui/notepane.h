@@ -37,6 +37,7 @@ public:
     void focusEditor();
     void focusTitle();
     void showFind();
+    void showReplace();
     void setEditorMode(EditorMode mode);
     EditorMode editorMode() const { return m_mode; }
     void setFontSize(int px);
@@ -64,6 +65,7 @@ private:
     void refreshOutline();
     void findNext(bool backward = false);
     void refreshFind();
+    void replaceMatches(bool all);
     void scheduleBody();
     void openLink(const QString &target, bool wiki);
     void addImage(const QImage &img);
@@ -86,6 +88,9 @@ private:
 
     QWidget *m_findBar;
     QLineEdit *m_findText;
+    QWidget *m_replaceRow;
+    QLineEdit *m_replaceText;
+    QToolButton *m_replaceOne, *m_replaceAll;
     QLabel *m_findCount;
     QToolButton *m_findCase;
     QWidget *m_topBar;

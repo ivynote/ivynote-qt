@@ -189,8 +189,10 @@ NotePane::NotePane(QWidget *parent) : QWidget(parent) {
     col->addWidget(m_headHost);
     m_findBar = new QWidget(this);
     m_findBar->setObjectName(QStringLiteral("noteFindBar"));
-    auto *findRow = new QHBoxLayout(m_findBar);
-    findRow->setContentsMargins(24, 4, 24, 4);
+    auto *findCol = new QVBoxLayout(m_findBar);
+    findCol->setContentsMargins(24, 4, 24, 4);
+    auto *findRow = new QHBoxLayout;
+    findCol->addLayout(findRow);
     m_findText = new QLineEdit(m_findBar);
     m_findText->setObjectName(QStringLiteral("noteFindText"));
     m_findText->setPlaceholderText(T("在笔记中查找"));
@@ -205,12 +207,40 @@ NotePane::NotePane(QWidget *parent) : QWidget(parent) {
     next->setText(QStringLiteral("↓")); next->setToolTip(T("下一个"));
     auto *closeFind = new QToolButton(m_findBar);
     closeFind->setText(QStringLiteral("×")); closeFind->setToolTip(T("关闭"));
+    auto *toggleReplace = new QToolButton(m_findBar);
+    toggleReplace->setObjectName(QStringLiteral("noteReplaceToggle"));
+    toggleReplace->setText(QStringLiteral("↳"));
+    toggleReplace->setToolTip(T("查找与替换"));
+    toggleReplace->setCheckable(true);
+    findRow->addWidget(toggleReplace);
     findRow->addWidget(m_findText, 1);
     findRow->addWidget(m_findCount);
     findRow->addWidget(m_findCase);
     findRow->addWidget(previous);
     findRow->addWidget(next);
     findRow->addWidget(closeFind);
+    m_replaceRow = new QWidget(m_findBar);
+    m_replaceRow->setObjectName(QStringLiteral("noteReplaceRow"));
+    auto *replaceRow = new QHBoxLayout(m_replaceRow);
+    replaceRow->setContentsMargins(0, 0, 0, 0);
+    m_replaceText = new QLineEdit(m_replaceRow);
+    m_replaceText->setObjectName(QStringLiteral("noteReplaceText"));
+    m_replaceText->setPlaceholderText(T("替换为"));
+    m_replaceOne = new QToolButton(m_replaceRow);
+    m_replaceOne->setText(T("替换"));
+    m_replaceOne->setObjectName(QStringLiteral("noteReplaceOne"));
+    m_replaceAll = new QToolButton(m_replaceRow);
+    m_replaceAll->setText(T("全部替换"));
+    m_replaceAll->setObjectName(QStringLiteral("noteReplaceAll"));
+    replaceRow->addWidget(m_replaceText, 1);
+    replaceRow->addWidget(m_replaceOne);
+    replaceRow->addWidget(m_replaceAll);
+    findCol->addWidget(m_replaceRow);
+    m_replaceRow->hide();
+    connect(toggleReplace, &QToolButton::toggled, m_replaceRow, &QWidget::setVisible);
+    connect(m_replaceOne, &QToolButton::clicked, this, [this] { replaceMatches(false); });
+    connect(m_replaceAll, &QToolButton::clicked, this, [this] { replaceMatches(true); });
+    connect(m_replaceText, &QLineEdit::returnPressed, this, [this] { replaceMatches(false); });
     m_findBar->hide();
     col->addWidget(m_findBar);
     connect(m_findText, &QLineEdit::textChanged, this, [this] { refreshFind(); if (!m_findText->text().isEmpty()) findNext(); });
@@ -226,6 +256,9 @@ NotePane::NotePane(QWidget *parent) : QWidget(parent) {
     auto *findShortcut = new QShortcut(QKeySequence::Find, this);
     findShortcut->setContext(Qt::WidgetWithChildrenShortcut);
     connect(findShortcut, &QShortcut::activated, this, &NotePane::showFind);
+    auto *replaceShortcut = new QShortcut(QKeySequence(QStringLiteral("Ctrl+H")), this);
+    replaceShortcut->setContext(Qt::WidgetWithChildrenShortcut);
+    connect(replaceShortcut, &QShortcut::activated, this, &NotePane::showReplace);
     for (bool back : {false, true}) {
         auto *shortcut = new QShortcut(QKeySequence(back ? QStringLiteral("Shift+F3") : QStringLiteral("F3")), this);
         shortcut->setContext(Qt::WidgetWithChildrenShortcut);
@@ -437,6 +470,8 @@ void NotePane::setNote(const QString &id) {
     m_title->setText(n ? n->title : QString());
     m_editor->setMarkdown(n ? n->body : QString());
     m_editor->setReadOnly(!n || n->trashed());
+    m_replaceOne->setEnabled(n && !n->trashed());
+    m_replaceAll->setEnabled(n && !n->trashed());
     m_title->setReadOnly(!n || n->trashed());
     m_backlinks->hide();
     refresh();
@@ -451,6 +486,7 @@ void NotePane::setNote(const QString &id) {
 }
 
 void NotePane::flush() {
+    m_editor->commitPendingCell();
     if (!m_engine || m_id.isEmpty()) return;
     m_bodyTimer.stop();
     m_titleTimer.stop();
@@ -642,6 +678,7 @@ void NotePane::refreshIndex() {
 }
 
 void NotePane::showFind() {
+    m_editor->commitPendingCell();
     m_findBar->show();
     if (m_editor->textCursor().hasSelection()) {
         const QString selected = m_editor->textCursor().selectedText();
@@ -649,6 +686,47 @@ void NotePane::showFind() {
     }
     m_findText->setFocus();
     m_findText->selectAll();
+    refreshFind();
+}
+
+void NotePane::showReplace() {
+    showFind();
+    findChild<QToolButton *>(QStringLiteral("noteReplaceToggle"))->setChecked(true);
+    m_replaceRow->show();
+    m_replaceOne->setEnabled(!m_editor->isReadOnly());
+    m_replaceAll->setEnabled(!m_editor->isReadOnly());
+}
+
+void NotePane::replaceMatches(bool all) {
+    if (m_editor->isReadOnly() || m_findText->text().isEmpty()) return;
+    m_editor->commitPendingCell();
+    const QString query = m_findText->text();
+    const QString replacement = m_replaceText->text();
+    const Qt::CaseSensitivity sensitivity = m_findCase->isChecked() ? Qt::CaseSensitive : Qt::CaseInsensitive;
+    if (!all) {
+        if (m_editor->textCursor().selectedText().compare(query, sensitivity) != 0) findNext();
+        QTextCursor match = m_editor->textCursor();
+        if (match.selectedText().compare(query, sensitivity) != 0) return;
+        match.beginEditBlock();
+        match.insertText(replacement);
+        match.endEditBlock();
+        m_editor->setTextCursor(match);
+        findNext();
+    } else {
+        QTextDocument::FindFlags flags;
+        if (sensitivity == Qt::CaseSensitive) flags |= QTextDocument::FindCaseSensitively;
+        QList<QTextCursor> matches;
+        QTextCursor cursor(m_editor->document());
+        while (true) {
+            cursor = m_editor->document()->find(query, cursor, flags);
+            if (cursor.isNull()) break;
+            matches << cursor;
+        }
+        QTextCursor transaction(m_editor->document());
+        transaction.beginEditBlock();
+        for (auto it = matches.rbegin(); it != matches.rend(); ++it) it->insertText(replacement);
+        transaction.endEditBlock();
+    }
     refreshFind();
 }
 

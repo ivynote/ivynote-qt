@@ -15,12 +15,14 @@
 
 class QCompleter;
 class QPainter;
+class QLineEdit;
 class QStringListModel;
 
 class MarkdownEditor : public QTextEdit {
     Q_OBJECT
 public:
     explicit MarkdownEditor(QWidget *parent = nullptr);
+    ~MarkdownEditor() override;
 
     void setMarkdown(const QString &text); // loads a note; resets undo
     // Undo and redo step over layout-only changes along with their edit.
@@ -41,6 +43,9 @@ public:
     void insertBlockText(const QString &markdown); // on its own line at the cursor
     void scrollToLine(int line);
     void showInsertMenu();
+    bool editTableCell(int row, int column); // table at the current cursor
+    bool tableAction(const QString &action); // row/column actions on the active cell
+    void commitPendingCell();
     void insertElement(const QString &id);
     void toggleFormat(const QString &mark);
     void setHeading(int level);
@@ -62,6 +67,7 @@ signals:
     void columnChanged();
 
 protected:
+    bool eventFilter(QObject *object, QEvent *event) override;
     void paintEvent(QPaintEvent *e) override;
     void resizeEvent(QResizeEvent *e) override;
     void keyPressEvent(QKeyEvent *e) override;
@@ -77,6 +83,17 @@ protected:
     void contextMenuEvent(QContextMenuEvent *e) override;
 
 private:
+    QTextCursor tableRange(const QTextBlock &block) const;
+    bool tableCellAt(const QPoint &point, int *row, int *column, QTextBlock *header) const;
+    void closeTableCell(bool save);
+    void saveTableCell();
+    void positionTableCell();
+    QLineEdit *m_cellEdit;
+    QTextCursor m_cellAnchor;
+    int m_cellRow = 0, m_cellColumn = 0;
+    bool m_closingCell = false;
+    bool m_cellSaveStarted = false;
+    int m_cellSaveRevision = -1;
     QImage imageFor(const QString &id) const; // attachment or remote URL
     void updateActive();
     void applyLineHeight();

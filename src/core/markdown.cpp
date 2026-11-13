@@ -332,9 +332,14 @@ QStringList splitRow(const QString &line) {
     QString t = line.trimmed();
     QStringList cells;
     QString cur;
-    bool code = false;
+    bool code = false, trailingSeparator = false;
     for (qsizetype i = 0; i < t.size(); ++i) {
         const QChar c = t[i];
+        if (c == u'\\' && i + 1 < t.size() && t[i + 1] == u'\\') {
+            cur += QStringLiteral("\\\\");
+            ++i;
+            continue;
+        }
         if (c == u'\\' && i + 1 < t.size() && t[i + 1] == u'|') {
             cur += u'|';
             ++i;
@@ -342,6 +347,7 @@ QStringList splitRow(const QString &line) {
         }
         if (c == u'`') code = !code;
         if (c == u'|' && !code) {
+            trailingSeparator = i == t.size() - 1;
             cells << cur;
             cur.clear();
             continue;
@@ -351,7 +357,7 @@ QStringList splitRow(const QString &line) {
     cells << cur;
     // Leading and trailing pipes are optional.
     if (t.startsWith(u'|') && !cells.isEmpty()) cells.removeFirst();
-    if (t.endsWith(u'|') && !t.endsWith(QLatin1String("\\|")) && !cells.isEmpty()) cells.removeLast();
+    if (trailingSeparator && !cells.isEmpty()) cells.removeLast();
     for (QString &c : cells) c = c.trimmed();
     return cells;
 }
@@ -392,6 +398,61 @@ QString plainInline(const QString &text) {
     s.replace(marks, QString());
     s.replace(em, QStringLiteral("\\1\\2"));
     return s;
+}
+
+Table parseTable(const QString &source) {
+    const QStringList lines = source.split(u'\n');
+    if (lines.size() < 2 || !isTableRow(lines[0]) || !isTableDelimiter(lines[1])) return {};
+    Table table;
+    table.align = tableAlignments(lines[1]);
+    const int cols = int(tableCells(lines[0]).size());
+    if (!cols || table.align.size() != cols) return {};
+    for (int i = 0; i < lines.size(); ++i) {
+        if (i == 1) continue;
+        if (lines[i].trimmed().isEmpty() && i == lines.size() - 1) break;
+        if (!isTableRow(lines[i])) return {};
+        QStringList row = tableCells(lines[i]);
+        while (row.size() < cols) row << QString();
+        row = row.mid(0, cols); // GFM discards cells beyond the header width
+        table.rows << row;
+    }
+    return table;
+}
+
+QString formatTable(const Table &table) {
+    if (!table.valid()) return {};
+    const int cols = int(table.align.size());
+    QList<QStringList> rows;
+    QList<int> widths(cols, 3);
+    for (const QStringList &raw : table.rows) {
+        QStringList row;
+        for (int col = 0; col < cols; ++col) {
+            QString value = raw.value(col).trimmed();
+            value.replace(u'\r', u' ').replace(u'\n', u' ');
+            // Escape cell separators, preserving preceding literal backslashes.
+            value.replace(u'|', QStringLiteral("\\|"));
+            widths[col] = std::max(widths[col], int(value.size()));
+            row << value;
+        }
+        rows << row;
+    }
+    QStringList out;
+    for (int row = 0; row < rows.size(); ++row) {
+        QStringList cells;
+        for (int col = 0; col < cols; ++col) cells << rows[row][col].leftJustified(widths[col], u' ');
+        out << QStringLiteral("| ") + cells.join(QStringLiteral(" | ")) + QStringLiteral(" |");
+        if (row == 0) {
+            QStringList separator;
+            for (int col = 0; col < cols; ++col) {
+                QString value(widths[col], u'-');
+                if (table.align[col] == Qt::AlignHCenter) value.front() = value.back() = u':';
+                else if (table.align[col] == Qt::AlignRight) value.back() = u':';
+                separator << value;
+            }
+            out << QStringLiteral("| ") + separator.join(QStringLiteral(" | ")) + QStringLiteral(" |");
+        }
+    }
+    return out.join(u'\n');
 }
 
 QString separateTables(const QString &body) {

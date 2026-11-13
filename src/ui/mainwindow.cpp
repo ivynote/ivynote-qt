@@ -345,6 +345,7 @@ void MainWindow::buildMenus() {
     edit->addAction(T("搜索…"), QKeySequence(QStringLiteral("Ctrl+K")), this, [this] { showSearch(); });
     edit->addAction(T("命令面板…"), QKeySequence(QStringLiteral("Ctrl+Shift+P")), this, [this] { showSearch(QStringLiteral(">")); });
     edit->addAction(T("在笔记中查找") + QStringLiteral("\tCtrl+F"), m_pane, &NotePane::showFind);
+    edit->addAction(T("查找与替换") + QStringLiteral("\tCtrl+H"), m_pane, &NotePane::showReplace);
     edit->addAction(T("插入") + QStringLiteral("\tCtrl+/"), m_pane->editor(), &MarkdownEditor::showInsertMenu);
     edit->addSeparator();
     fmtAction(T("粗体"), QStringLiteral("Ctrl+B"), [](MarkdownEditor *e) { e->toggleFormat(QStringLiteral("**")); });
