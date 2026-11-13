@@ -11,14 +11,17 @@ IVY_SERVER_BIN ?=
 # version/dependency flags cannot silently reuse an old CMake cache.
 APPIMAGE_BUILD_DIR ?= build-appimage
 OUT_DIR ?= dist
+TOOLS_DIR ?= $(CURDIR)/tools
+export TOOLS_DIR
 VERSION ?= $(shell sh packaging/linux/version.sh)
 APPIMAGE_PREFIX_PATH ?= $(DEPS);$(QT_ROOT_DIR)
 
-.PHONY: appimage help build debug configure run test test-integration install clean rebuild
+.PHONY: appimage-tools appimage help build debug configure run test test-integration install clean rebuild
 
 help:
 	@echo "make build              Release build in $(BUILD_DIR)/"
 	@echo "make appimage [VERSION=x.y.z]  Build, test and package into $(OUT_DIR)/"
+	@echo "make appimage-tools     Download missing AppImage packaging tools"
 	@echo "make debug              Debug build in build-debug/"
 	@echo "make run                Build and start the app"
 	@echo "make test               Build and run all tests (integration skipped without IVY_SERVER_BIN)"
@@ -62,3 +65,6 @@ appimage:
 	cmake --build "$(APPIMAGE_BUILD_DIR)"
 	QT_QPA_PLATFORM=offscreen ctest --test-dir "$(APPIMAGE_BUILD_DIR)" --output-on-failure
 	packaging/linux/build-appimage.sh "$(APPIMAGE_BUILD_DIR)" "$(VERSION)" "$(OUT_DIR)"
+
+appimage-tools:
+	bash packaging/linux/prepare-appimage-tools.sh

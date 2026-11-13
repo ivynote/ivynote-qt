@@ -4,3 +4,6 @@ build-*/
 compile_commands.json
 *.user
 CMakeLists.txt.user*
+
+tools/
+dist/

@@ -15,6 +15,12 @@ OUT_DIR=$(realpath -m "${3:-.}")
 ARCH=${ARCH:-x86_64}
 TOOLS_DIR=${TOOLS_DIR:-}
 [[ -n $TOOLS_DIR ]] && export PATH="$TOOLS_DIR:$PATH"
+for tool in linuxdeploy linuxdeploy-plugin-qt appimagetool; do
+    command -v "$tool" >/dev/null 2>&1 || {
+        echo "Missing $tool. Run 'make appimage-tools' first, or set TOOLS_DIR to your packaging tools directory." >&2
+        exit 1
+    }
+done
 # CI runners have no FUSE; the tools are AppImages themselves.
 export APPIMAGE_EXTRACT_AND_RUN=1
 # appimagetool validates the AppStream metadata with appstreamcli, which

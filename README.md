@@ -122,6 +122,7 @@ git push origin v0.2.0
 本地打 AppImage（需要 [linuxdeploy](https://github.com/linuxdeploy/linuxdeploy)、linuxdeploy-plugin-qt、[appimagetool](https://github.com/AppImage/appimagetool) 在 `PATH` 上）：
 
 ```sh
+make appimage-tools # 首次构建时下载打包工具（需要 curl）
 make appimage
 # 手动覆盖版本号：make appimage VERSION=0.2.0
 ```
