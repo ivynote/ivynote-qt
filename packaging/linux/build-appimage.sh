@@ -119,6 +119,19 @@ for f in wayland-shell-integration/libxdg-shell.so; do
     [[ -e "$APPDIR/usr/plugins/$f" ]] || { echo "missing Wayland plugin $f" >&2; exit 1; }
 done
 
+# Execute the real binary so Qt resolves qt.conf beside usr/bin/ivynote.
+# A root-level AppRun symlink can make Qt look beside AppRun instead.
+rm -f "$APPDIR/AppRun"
+cat > "$APPDIR/AppRun" <<'APP_RUN'
+#!/bin/sh
+set -eu
+APPDIR=$(CDPATH= cd -- "$(dirname -- "$0")" && pwd)
+export QT_PLUGIN_PATH="$APPDIR/usr/plugins"
+export QT_QPA_PLATFORM_PLUGIN_PATH="$APPDIR/usr/plugins/platforms"
+exec "$APPDIR/usr/bin/ivynote" "$@"
+APP_RUN
+chmod +x "$APPDIR/AppRun"
+
 mkdir -p "$OUT_DIR"
 rm -f "$OUT" "$OUT.zsync"
 args=()
