@@ -19,6 +19,7 @@ on:
       - ".github/workflows/release.yml"
       - "packaging/**"
       - "CMakeLists.txt"
+      - "Makefile"
   workflow_dispatch:
 
 permissions:
@@ -141,18 +142,6 @@ jobs:
             echo "::warning::fcitx5 plugin not built; the AppImage will only have ibus input-method support"
           fi
 
-      - name: Build
-        run: |
-          cmake -S . -B build -G Ninja -DCMAKE_BUILD_TYPE=Release \
-            -DIVY_VERSION="$VERSION" -DCMAKE_PREFIX_PATH="$DEPS;$QT_ROOT_DIR"
-          cmake --build build
-
-      - name: Test
-        env:
-          QT_QPA_PLATFORM: offscreen
-          LD_LIBRARY_PATH: ${{ env.DEPS }}/lib
-        run: ctest --test-dir build --output-on-failure
-
       # linuxdeploy-plugin-qt bundles every SQL driver it finds, and the
       # MySQL/ODBC/PostgreSQL/Mimer ones need client libraries we neither have
       # nor want. The app only uses SQLite.
@@ -174,7 +163,7 @@ jobs:
           QMAKE: ${{ env.QT_ROOT_DIR }}/bin/qmake
           LD_LIBRARY_PATH: ${{ env.DEPS }}/lib:${{ env.QT_ROOT_DIR }}/lib
           UPDATE_INFORMATION: gh-releases-zsync|${{ github.repository_owner }}|${{ github.event.repository.name }}|latest|Ivynote-*-x86_64.AppImage.zsync
-        run: packaging/linux/build-appimage.sh build "$VERSION" dist
+        run: make appimage
 
       # Start the packaged app on a virtual display; it saves a screenshot
       # of its window and quits, which proves it found all its libraries.

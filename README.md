@@ -121,9 +121,9 @@ git push origin v0.2.0
 
 本地打 AppImage（需要 [linuxdeploy](https://github.com/linuxdeploy/linuxdeploy)、linuxdeploy-plugin-qt、[appimagetool](https://github.com/AppImage/appimagetool) 在 `PATH` 上）：
 
-```bash
-make build
-packaging/linux/build-appimage.sh build 0.2.0 dist
+```sh
+make appimage
+# 手动覆盖版本号：make appimage VERSION=0.2.0
 ```
 
 ## 测试
@@ -155,3 +155,15 @@ tests         单元、引擎、真实服务端集成、UI、导入导出
 ```
 
 数据位置：Linux `~/.local/share/Ivynote/Ivynote/`，Windows `%APPDATA%\Ivynote\Ivynote\`。每个笔记库一个目录：`vault.db`（SQLite，每行一条 JSON，加密时为密文）、`files/`、`thumbs/`、`uploads/`。
+
+`make appimage` 与 Linux CI 共用配置、编译、测试和打包入口，默认使用
+`build-appimage/`，产物输出到 `dist/`；省略 `VERSION` 时使用
+`git describe --dirty --always --tags --abbrev=7` 自动生成版本号（去掉标签的 `v` 前缀，
+有未提交的已跟踪文件修改时附加 `-dirty`）；无版本标签时使用 `<CMake 项目版本>-dev.<Git 描述>`，
+无 Git 信息时回退到 CMake 项目版本。
+CI 继续使用发布流程传入的 `VERSION`，确保各平台产物和发布说明的版本一致。
+环境需先准备好 Qt、QtKeychain、系统依赖及上述打包工具；CI 中的依赖安装、
+输入法插件准备和 SQLite 驱动筛选仍属于环境准备。
+可通过 `APPIMAGE_BUILD_DIR`、`OUT_DIR`、`APPIMAGE_PREFIX_PATH` 和 `CMAKE_FLAGS`
+覆盖构建路径及参数；`DEPS`、`QT_ROOT_DIR`、`TOOLS_DIR`、`QMAKE`、
+`LD_LIBRARY_PATH` 和 `UPDATE_INFORMATION` 可与 CI 使用相同的环境变量。

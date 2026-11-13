@@ -7,10 +7,18 @@ CMAKE_FLAGS ?=
 # Server binary for the integration tests, e.g. ../ivynote/ivynote
 IVY_SERVER_BIN ?=
 
-.PHONY: help build debug configure run test test-integration install clean rebuild
+# AppImage uses a separate build tree and always configures it so changed
+# version/dependency flags cannot silently reuse an old CMake cache.
+APPIMAGE_BUILD_DIR ?= build-appimage
+OUT_DIR ?= dist
+VERSION ?= $(shell sh packaging/linux/version.sh)
+APPIMAGE_PREFIX_PATH ?= $(DEPS);$(QT_ROOT_DIR)
+
+.PHONY: appimage help build debug configure run test test-integration install clean rebuild
 
 help:
 	@echo "make build              Release build in $(BUILD_DIR)/"
+	@echo "make appimage [VERSION=x.y.z]  Build, test and package into $(OUT_DIR)/"
 	@echo "make debug              Debug build in build-debug/"
 	@echo "make run                Build and start the app"
 	@echo "make test               Build and run all tests (integration skipped without IVY_SERVER_BIN)"
@@ -47,3 +55,10 @@ clean:
 	rm -rf $(BUILD_DIR) build-debug
 
 rebuild: clean build
+
+appimage:
+	cmake -S . -B "$(APPIMAGE_BUILD_DIR)" -G "$(GENERATOR)" -DCMAKE_BUILD_TYPE=$(BUILD_TYPE) \
+		-DIVY_VERSION="$(VERSION)" -DCMAKE_PREFIX_PATH="$(APPIMAGE_PREFIX_PATH)" $(CMAKE_FLAGS)
+	cmake --build "$(APPIMAGE_BUILD_DIR)"
+	QT_QPA_PLATFORM=offscreen ctest --test-dir "$(APPIMAGE_BUILD_DIR)" --output-on-failure
+	packaging/linux/build-appimage.sh "$(APPIMAGE_BUILD_DIR)" "$(VERSION)" "$(OUT_DIR)"
