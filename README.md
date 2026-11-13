@@ -168,3 +168,9 @@ CI 继续使用发布流程传入的 `VERSION`，确保各平台产物和发布�
 可通过 `APPIMAGE_BUILD_DIR`、`OUT_DIR`、`APPIMAGE_PREFIX_PATH` 和 `CMAKE_FLAGS`
 覆盖构建路径及参数；`DEPS`、`QT_ROOT_DIR`、`TOOLS_DIR`、`QMAKE`、
 `LD_LIBRARY_PATH` 和 `UPDATE_INFORMATION` 可与 CI 使用相同的环境变量。
+
+AppImage 打包使用独立的 Qt 插件目录，排除 KDE 额外图片插件和非 SQLite 数据库驱动，
+不修改系统 Qt；保留 Qt 自带图片插件和 Wayland 支持。为兼容新版系统库的 RELR 格式，
+打包时不使用工具内置的旧版 strip。
+首次打包时 appimagetool 需要联网下载 type2 runtime；离线时可通过
+`APPIMAGE_RUNTIME_FILE=/path/to/runtime-x86_64 make appimage` 使用预先下载的文件。

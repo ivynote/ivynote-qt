@@ -26,6 +26,8 @@ export APPIMAGE_EXTRACT_AND_RUN=1
 # appimagetool validates the AppStream metadata with appstreamcli, which
 # otherwise fetches every URL in it (and fails while the repo is private).
 export AS_VALIDATE_NONET=1
+# Bundled strip may predate RELR sections used by modern distributions.
+export NO_STRIP=1
 
 APPDIR="$BUILD_DIR/AppDir"
 APP_ID=app.ivynote.Ivynote
@@ -42,7 +44,46 @@ QT_PLUGINS=$("$QMAKE" -query QT_INSTALL_PLUGINS)
 # button events on KDE Plasma (the whole window ignores clicks), and native
 # Wayland also gets input methods through text-input. Qt prefers "wayland"
 # on Wayland sessions and falls back to xcb on X11.
-export EXTRA_PLATFORM_PLUGINS="libqwayland-generic.so;libqwayland-egl.so"
+# Qt distributions use either a unified plugin or generic/EGL plugins.
+wayland_plugins=()
+for name in libqwayland.so libqwayland-generic.so libqwayland-egl.so; do
+    [[ -f "$QT_PLUGINS/platforms/$name" ]] && wayland_plugins+=("$name")
+done
+if [[ ${#wayland_plugins[@]} -eq 0 ]]; then
+    echo "No Wayland platform plugin found in $QT_PLUGINS/platforms; install the Wayland plugins for this Qt." >&2
+    exit 1
+fi
+export EXTRA_PLATFORM_PLUGINS=$(IFS=';'; echo "${wayland_plugins[*]}")
+
+# Present a private plugin tree to linuxdeploy instead of modifying system Qt.
+# KDE image handlers pull in optional codecs unrelated to this application;
+# database drivers other than SQLite similarly require extra client libraries.
+PACKAGING_QT="$BUILD_DIR/packaging-qt"
+rm -rf "$PACKAGING_QT"
+mkdir -p "$PACKAGING_QT/plugins"
+cp -as "$QT_PLUGINS"/. "$PACKAGING_QT/plugins/"
+find "$PACKAGING_QT/plugins/imageformats" -name 'kimg_*.so' -delete
+find "$PACKAGING_QT/plugins/sqldrivers" -name '*.so' ! -name 'libqsqlite.so' -delete
+REAL_QMAKE=$(command -v "$QMAKE")
+export REAL_QMAKE
+export PACKAGING_QT_PLUGINS="$PACKAGING_QT/plugins"
+cat > "$PACKAGING_QT/qmake" <<'QMAKE_WRAPPER'
+#!/usr/bin/env bash
+if [[ ${1:-} == -query && ${2:-} == QT_INSTALL_PLUGINS ]]; then
+    printf '%s\n' "$PACKAGING_QT_PLUGINS"
+elif [[ ${1:-} == -query && $# -eq 1 ]]; then
+    "$REAL_QMAKE" "$@" | while IFS= read -r line; do
+        case "$line" in
+            QT_INSTALL_PLUGINS:*) printf 'QT_INSTALL_PLUGINS:%s\n' "$PACKAGING_QT_PLUGINS" ;;
+            *) printf '%s\n' "$line" ;;
+        esac
+    done
+else
+    exec "$REAL_QMAKE" "$@"
+fi
+QMAKE_WRAPPER
+chmod +x "$PACKAGING_QT/qmake"
+export QMAKE="$PACKAGING_QT/qmake"
 
 linuxdeploy --appdir "$APPDIR" \
     --executable "$APPDIR/usr/bin/ivynote" \
@@ -71,13 +112,20 @@ done
 echo "bundled input-method plugins:"; ls "$IMDIR" || true
 
 # Without these a Wayland session falls back to XWayland, where clicks are lost.
-for f in platforms/libqwayland-generic.so wayland-shell-integration/libxdg-shell.so; do
+for name in "${wayland_plugins[@]}"; do
+    [[ -e "$APPDIR/usr/plugins/platforms/$name" ]] || { echo "missing Wayland plugin $name" >&2; exit 1; }
+done
+for f in wayland-shell-integration/libxdg-shell.so; do
     [[ -e "$APPDIR/usr/plugins/$f" ]] || { echo "missing Wayland plugin $f" >&2; exit 1; }
 done
 
 mkdir -p "$OUT_DIR"
 rm -f "$OUT" "$OUT.zsync"
 args=()
+# Allow offline packaging with a previously downloaded type2 runtime.
+if [[ -n ${APPIMAGE_RUNTIME_FILE:-} ]]; then
+    args+=(--runtime-file "$(realpath "$APPIMAGE_RUNTIME_FILE")")
+fi
 if [[ -n ${UPDATE_INFORMATION:-} ]]; then
     args+=(-u "$UPDATE_INFORMATION")
 fi
