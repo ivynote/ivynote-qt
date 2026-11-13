@@ -1,3 +1,5 @@
+#include <QRandomGenerator>
+#include <QSignalBlocker>
 #include "ui/historydialog.h"
 
 #include "ui/markdownview.h"
@@ -162,13 +164,13 @@ ShareDialog::ShareDialog(Session *session, const QString &noteId, QWidget *paren
     form->addRow(T("有效期"), m_expiry);
     auto *pwRow = new QHBoxLayout;
     m_password = new QLineEdit(this);
-    m_password->setEchoMode(QLineEdit::Password);
-    m_password->setPlaceholderText(T("不设密码"));
+    m_password->setEchoMode(QLineEdit::Normal);
+    m_password->setPlaceholderText(T("分享密码为 6–72 个字节"));
     auto *setPw = new QPushButton(T("设置"), this);
-    auto *clearPw = new QPushButton(T("移除"), this);
+    auto *copyPw = new QPushButton(T("复制密码"), this);
     pwRow->addWidget(m_password, 1);
     pwRow->addWidget(setPw);
-    pwRow->addWidget(clearPw);
+    pwRow->addWidget(copyPw);
     form->addRow(T("密码"), pwRow);
     m_info = mutedLabel(QString(), this, 12);
     form->addRow(QString(), m_info);
@@ -197,7 +199,20 @@ ShareDialog::ShareDialog(Session *session, const QString &noteId, QWidget *paren
         Toaster::show(T("链接已复制"));
     });
     connect(m_enabled, &QCheckBox::toggled, this, [this](bool on) {
-        if (!m_loading) put(on, m_expiresAt, nullptr);
+        if (m_loading) return;
+        QString pw = m_password->text();
+        if (on && !m_hasPassword && pw.isEmpty()) {
+            const QString alphabet = QStringLiteral("abcdefghjkmnpqrstuvwxyzABCDEFGHJKMNPQRSTUVWXYZ23456789");
+            for (int i = 0; i < 8; ++i)
+                pw += alphabet.at(QRandomGenerator::system()->bounded(int(alphabet.size())));
+        }
+        if (on && !m_hasPassword && (pw.toUtf8().size() < 6 || pw.toUtf8().size() > 72)) {
+            Toaster::show(T("分享密码为 6–72 个字节"), true);
+            QSignalBlocker blocker(m_enabled);
+            m_enabled->setChecked(false);
+            return;
+        }
+        put(on, m_expiresAt, on && !m_hasPassword ? &pw : nullptr);
     });
     connect(m_expiry, &QComboBox::currentIndexChanged, this, [this](int i) {
         if (m_loading) return;
@@ -207,15 +222,14 @@ ShareDialog::ShareDialog(Session *session, const QString &noteId, QWidget *paren
     });
     connect(setPw, &QPushButton::clicked, this, [this] {
         const QString pw = m_password->text();
-        if (pw.toUtf8().size() < 4 || pw.toUtf8().size() > 72) {
-            Toaster::show(T("分享密码为 4–72 个字节"), true);
+        if (pw.toUtf8().size() < 6 || pw.toUtf8().size() > 72) {
+            Toaster::show(T("分享密码为 6–72 个字节"), true);
             return;
         }
         put(m_enabled->isChecked(), m_expiresAt, &pw);
     });
-    connect(clearPw, &QPushButton::clicked, this, [this] {
-        const QString none;
-        put(m_enabled->isChecked(), m_expiresAt, &none);
+    connect(copyPw, &QPushButton::clicked, this, [this] {
+        if (!m_password->text().isEmpty()) QApplication::clipboard()->setText(m_password->text());
     });
     connect(md, &QPushButton::clicked, this, &ShareDialog::copyMarkdown);
     connect(rich, &QPushButton::clicked, this, &ShareDialog::copyRich);
@@ -233,8 +247,8 @@ void ShareDialog::apply(const QJsonObject &s) {
     m_hasPassword = s.value("hasPassword").toBool();
     m_link->setText(s.isEmpty() ? QString() : m_session->info().server + QStringLiteral("/s/") + s.value("id").toString());
     if (m_expiresAt == 0) m_expiry->setCurrentIndex(0);
-    m_password->clear();
-    m_password->setPlaceholderText(m_hasPassword ? T("已设置密码") : T("不设密码"));
+    m_password->setText(s.value("password").toString());
+    m_password->setPlaceholderText(m_hasPassword ? T("已设置密码") : T("分享密码为 6–72 个字节"));
     QString info;
     if (!s.isEmpty()) {
         const qint64 now = QDateTime::currentMSecsSinceEpoch();
