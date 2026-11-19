@@ -850,7 +850,7 @@ void NotePane::refresh() {
         // The count of a sealed body would be the ciphertext's.
         m_meta->setText(QStringLiteral("%1   %2").arg(fmt::fullTime(n->updatedAt, now), T("已加密")));
     } else {
-        const int words = n->words > 0 ? n->words : md::wordCount(n->body);
+        const int words = md::wordCount(n->body);
         m_meta->setText(QStringLiteral("%1   %2 %3").arg(fmt::fullTime(n->updatedAt, now), fmt::number(words), T("字")));
     }
     m_meta->setToolTip(T("笔记信息") + QStringLiteral("\n") + T("创建于") + u' ' + fmt::fullTime(n->createdAt, now));
