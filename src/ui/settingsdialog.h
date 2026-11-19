@@ -20,11 +20,15 @@ public:
     int fontSize() const;     // 13-22
     int editorMode() const;   // EditorMode
     bool reduceMotion() const;
+    QString defaultNoteFolder() const;
+    QString defaultNoteTitle() const;
     void setTheme(int v);
     void setLang(int v);
     void setFontSize(int v);
     void setEditorMode(int v);
     void setReduceMotion(bool v);
+    void setDefaultNoteFolder(const QString &v);
+    void setDefaultNoteTitle(const QString &v);
 
 signals:
     void changed();

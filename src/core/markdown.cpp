@@ -3,6 +3,7 @@
 #include <cmath>
 
 #include "core/models.h"
+#include "core/tasks.h"
 
 #include <QRegularExpression>
 #include <algorithm>
@@ -50,8 +51,20 @@ QStringList distinctCaptures(const QString &text, const QRegularExpression &re) 
     return out;
 }
 
-bool isCjk(char32_t c) {
-    return (c >= 0x3040 && c <= 0x30FF) || (c >= 0x3400 && c <= 0x9FFF) || (c >= 0xAC00 && c <= 0xD7AF);
+bool isCjkUnit(char32_t c) {
+    return c == 0x2014 ||
+           c == 0x2026 ||
+           (c >= 0x3001 && c <= 0x318F) ||
+           (c >= 0x31F0 && c <= 0x31FF) ||
+           (c >= 0x3400 && c <= 0x4DBF) ||
+           (c >= 0x4E00 && c <= 0x9FFF) ||
+           (c >= 0xAC00 && c <= 0xD7AF) ||
+           (c >= 0xF900 && c <= 0xFAFF) ||
+           (c >= 0xFE10 && c <= 0xFE1F) ||
+           (c >= 0xFE30 && c <= 0xFE6F) ||
+           (c >= 0xFF01 && c <= 0xFF9F) ||
+           (c >= 0xFFE0 && c <= 0xFFE6) ||
+           (c >= 0x20000 && c <= 0x323AF);
 }
 
 } // namespace
@@ -129,19 +142,71 @@ QString excerpt(const QString &mdText, int max) {
     return t;
 }
 
+namespace {
+
+QString wordCountText(const QString &mdText) {
+    static const QRegularExpression image(QStringLiteral(R"(!\[[^\]]*\]\([^)]*\))"));
+    static const QRegularExpression wikiAlias(QStringLiteral(R"(\[\[([^\]|]+)\|([^\]]+)\]\])"));
+    static const QRegularExpression wiki(QStringLiteral(R"(\[\[([^\]]+)\]\])"));
+    static const QRegularExpression link(QStringLiteral(R"(\[([^\]]*)\]\([^)]*\))"));
+    static const QRegularExpression rule(QStringLiteral(R"(^[ \t]*([-*_][ \t]*){3,}\r?$)"),
+                                         QRegularExpression::MultilineOption);
+    static const QRegularExpression tableDelim(QStringLiteral(R"(^[ \t]*\|?(?:[ \t]*:?-{3,}:?[ \t]*\|)+[ \t]*(?::?-{3,}:?[ \t]*\|?)?\r?$)"),
+                                               QRegularExpression::MultilineOption);
+    static const QRegularExpression tableRow(QStringLiteral(R"(^[ \t]*\|([^\r\n]*)\|[ \t]*\r?$)"),
+                                             QRegularExpression::MultilineOption);
+    static const QRegularExpression lead(QStringLiteral(R"(^[ \t]{0,3}(#{1,6}[ \t]+|(?:>[ \t]?)+|[-*+][ \t]+\[[ xX]\][ \t]+|[-*+][ \t]+|\d+[.)][ \t]+))"),
+                                         QRegularExpression::MultilineOption);
+    static const QRegularExpression emphasis(QStringLiteral(R"((\*\*|__|~~|==|`))"));
+    static const QRegularExpression italic(QStringLiteral(R"(\*([^\s*](?:[^*\r\n]*[^\s*])?)\*)"));
+    static const QRegularExpression html(QStringLiteral(R"(</?[A-Za-z][^>\r\n]*>)"));
+
+    QString t = mdText;
+    t.replace(fenceRe(), QStringLiteral(" "));
+    t.remove(image);
+    t.replace(wikiAlias, QStringLiteral("\\2"));
+    t.replace(wiki, QStringLiteral("\\1"));
+    t.replace(link, QStringLiteral("\\1"));
+    t.remove(rule);
+    t.remove(tableDelim);
+    {
+        QString out;
+        qsizetype last = 0;
+        for (auto it = tableRow.globalMatch(t); it.hasNext();) {
+            const auto m = it.next();
+            out.append(QStringView(t).mid(last, m.capturedStart() - last));
+            QString row = m.captured(1);
+            row.replace(u'|', u' ');
+            out.append(row);
+            last = m.capturedEnd();
+        }
+        if (last > 0) {
+            out.append(QStringView(t).mid(last));
+            t = std::move(out);
+        }
+    }
+    t.remove(lead);
+    t.remove(emphasis);
+    t.replace(italic, QStringLiteral("\\1"));
+    t.remove(html);
+    return t;
+}
+
+} // namespace
+
 int wordCount(const QString &mdText) {
-    const QString text = excerpt(mdText, -1);
+    const QString text = wordCountText(mdText);
     int count = 0;
     bool inWord = false;
     for (char32_t c : text.toUcs4()) {
-        if (isCjk(c)) {
+        if (QChar::isSpace(c) || c == 0x200B || c == 0xFEFF) {
+            inWord = false;
+        } else if (isCjkUnit(c)) {
             count++;
             inWord = false;
-        } else if (QChar::isLetterOrNumber(c)) {
-            if (!inWord) count++;
+        } else if (!inWord) {
+            count++;
             inWord = true;
-        } else {
-            inWord = false;
         }
     }
     return count;
@@ -308,8 +373,10 @@ QString toggleTask(const QString &body, int index) {
     parser.text = [](MD_TEXTTYPE, const MD_CHAR *, MD_SIZE, void *) { return 0; };
     QByteArray source = body.toUtf8();
     if (md_parse(source.constData(), MD_SIZE(source.size()), &parser, &tasks) != 0 || tasks.offset < 0 || tasks.offset >= source.size()) return body;
-    source[tasks.offset] = source[tasks.offset] == ' ' ? 'x' : ' ';
-    return QString::fromUtf8(source);
+    int lineNo = 0;
+    for (qsizetype i = 0; i < tasks.offset; ++i)
+        if (source[i] == '\n') ++lineNo;
+    return tasks::toggleTaskLine(body, lineNo);
 }
 
 QString linkContext(const QString &body, const QString &title, int max) {

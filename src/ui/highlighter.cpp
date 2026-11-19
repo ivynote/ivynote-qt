@@ -1,12 +1,14 @@
 #include "ui/highlighter.h"
 
 #include "core/markdown.h"
+#include "core/tasks.h"
 #include "ui/remoteimages.h"
 #include "ui/theme.h"
 #include "ui/render.h"
 #include "core/i18n.h"
 #include <QPainter>
 
+#include <QDate>
 #include <QFontMetricsF>
 #include <QRegularExpression>
 #include <QTextBlock>
@@ -606,6 +608,62 @@ void MarkdownHighlighter::inlineSpans(const QString &text, int from, BlockInfo *
             f.setFontUnderline(true);
             f.setUnderlineColor(Theme::alpha(k.ivy, 0.45));
         });
+    }
+    // Task metadata markers (📅 due, 🔁 repeat, ✅ done) on task lines.
+    if (tasks::isTaskLine(text)) {
+        const auto parsed = tasks::parseTaskLine(text);
+        const bool taskDone = parsed && parsed->done;
+        const QDate today = QDate::currentDate();
+        for (auto it = re(R"(📅️?\s*(\d{4}-\d{2}-\d{2})(?:[ T](\d{1,2}:\d{2}))?)").globalMatch(text, from); it.hasNext();) {
+            const auto m = it.next();
+            const int s = int(m.capturedStart()), e = int(m.capturedEnd());
+            if (!free(s, e)) continue;
+            taken.append({s, e});
+            info->taskMarkers.append({s, e, TaskMarkerSpan::Due});
+            const QDate d = QDate::fromString(m.captured(1), Qt::ISODate);
+            QColor fg = k.muted;
+            QColor bg = Theme::alpha(k.line, 0.55);
+            if (!taskDone && d.isValid()) {
+                if (d < today) {
+                    fg = k.danger;
+                    bg = Theme::alpha(k.danger, 0.12);
+                } else if (d == today) {
+                    fg = k.ivy;
+                    bg = Theme::alpha(k.ivy, 0.14);
+                }
+            }
+            merge(s, e - s, [&](QTextCharFormat &f) {
+                f.setForeground(fg);
+                f.setBackground(bg);
+                f.setFontStrikeOut(false);
+                if (live) f.setProperty(QTextFormat::FontPixelSize, std::max(12, m_px - 2));
+            });
+        }
+        for (auto it = re(R"(🔁️?\s*([^📅✅⏳🛫➕⏫🔼🔽🔺⏬\n]+?)(?=\s*(?:📅|✅|⏳|🛫|➕|⏫|🔼|🔽|🔺|⏬|$)))").globalMatch(text, from); it.hasNext();) {
+            const auto m = it.next();
+            const int s = int(m.capturedStart()), e = int(m.capturedEnd());
+            if (!free(s, e)) continue;
+            taken.append({s, e});
+            info->taskMarkers.append({s, e, TaskMarkerSpan::Repeat});
+            merge(s, e - s, [&](QTextCharFormat &f) {
+                f.setForeground(taskDone ? k.muted : k.ivy);
+                f.setBackground(Theme::alpha(taskDone ? k.line : k.ivy, 0.10));
+                f.setFontStrikeOut(false);
+                if (live) f.setProperty(QTextFormat::FontPixelSize, std::max(12, m_px - 2));
+            });
+        }
+        for (auto it = re(R"(✅️?\s*(\d{4}-\d{2}-\d{2}))").globalMatch(text, from); it.hasNext();) {
+            const auto m = it.next();
+            const int s = int(m.capturedStart()), e = int(m.capturedEnd());
+            if (!free(s, e)) continue;
+            taken.append({s, e});
+            info->taskMarkers.append({s, e, TaskMarkerSpan::Done});
+            merge(s, e - s, [&](QTextCharFormat &f) {
+                f.setForeground(k.faint);
+                f.setFontStrikeOut(false);
+                if (live) f.setProperty(QTextFormat::FontPixelSize, std::max(12, m_px - 2));
+            });
+        }
     }
     // Emphasis.
     struct Rule {

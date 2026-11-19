@@ -19,9 +19,14 @@ class MarkdownView : public QTextBrowser {
 public:
     explicit MarkdownView(QWidget *parent = nullptr);
     void setBaseSize(int px);
+    void setColumnWidth(int maxWidth); // 0 = fill viewport (split/history); >0 = centered column (read mode)
+    QRect textColumn() const;
     // Renders and shows the Markdown; keeps the scroll position.
     void setMarkdown(const QString &markdown, RenderOptions opts, const QString &title = QString());
     std::function<QImage(const QString &id)> image;
+
+signals:
+    void columnChanged();
 
 protected:
     void contextMenuEvent(QContextMenuEvent *event) override;
@@ -30,8 +35,10 @@ protected:
 
 private:
     void restyle();
+    void updateMargins();
     int maxImageWidth() const;
     int m_px = 16;
+    int m_maxColumn = 0;
     bool m_hasMarkdown = false;
     QString m_markdown, m_title;
     QStringList m_diagrams;

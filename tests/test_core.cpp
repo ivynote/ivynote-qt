@@ -1,9 +1,14 @@
-#include "core/hlc.h"
 #include "core/agenda.h"
+#include "core/diff.h"
+#include "core/format.h"
+#include "core/hlc.h"
 #include "core/ids.h"
+#include "core/insertitems.h"
 #include "core/markdown.h"
 #include "core/models.h"
+#include "core/notelock.h"
 #include "core/search.h"
+#include "core/tasks.h"
 #include "core/tree.h"
 #include "storage/crypto.h"
 #include "storage/localstore.h"
@@ -93,7 +98,33 @@ private slots:
         QCOMPARE(md::excerpt(QStringLiteral("# Head\n\n**bold** [link](http://x) ![img](a.png) [[Wiki|Alias]]")),
                  QStringLiteral("Head bold link Alias"));
         QCOMPARE(md::wordCount(QStringLiteral("你好世界 hello world")), 6);
+        QCOMPARE(md::wordCount(QStringLiteral("Hello, world!")), 2);
+        QCOMPARE(md::wordCount(QStringLiteral("It's a don’t-miss “event”.")), 4);
+        QCOMPARE(md::wordCount(QStringLiteral("你好，世界！")), 6);
+        QCOMPARE(md::wordCount(QStringLiteral("使用Word软件")), 5);
+        QCOMPARE(md::wordCount(QStringLiteral("他说：“你好！”")), 8);
+        QCOMPARE(md::wordCount(QStringLiteral("你好——世界……")), 8);
+        QCOMPARE(md::wordCount(QStringLiteral("# 标题\n\n**加粗** 和 *斜体*\n\n---\n\n| 列一 | 列二 |\n| --- | --- |\n| 值一 | 值二 |")), 15);
         QCOMPARE(md::wordCount(QStringLiteral("```\ncode here\n```\none")), 1);
+        QCOMPARE(md::wordCount(QStringLiteral(
+            "东方\n"
+            "人在世上，往往会碰上\n"
+            "夜\t谈\t\n"
+            "\"晦气\"或“幸运”。自然，谁都喜欢“幸运”而不要“晦气”。但“幸运”降落到谁头\n"
+            "城隍抓“球”\t上会凭机遇，并非刻意追求\t\"可遇而不可求\".下面的故\t所能得,这就是人们常说的\t\n"
+            "事就充分证明了这个道理。\n"
+            "福建\t苏文恭\t\n"
+            "有个孩子，出生时右额角上就长着一个红红的肉瘤子。随着他年龄的增长，肉瘤子也一天天长大。到他八岁时，肉瘤子已有小皮球那么大了。\n"
+            "如果人人额上都长肉瘤子，那就没什么问题了。偏偏其他人没有，就他有，这就显得“出格”，“出格”就遭人嫌。于是，一家人都看不起他，父母亲也讨厌他。他在\n"
+            "你就别余\t半点温暖。\t家里成了“臭猪头”，得不到\t\n"
+            "一天晚饭后，无缘无故的母亲又指着儿子的肉瘤子大骂了起来，而且骂了个没完没了。这使孩子觉得非常伤心，就偷偷地离家出走\n"
+            "成功\n"
+            "去哪里呢?他不知道，只是沿着小道漫无目的地往\n"
+            "W\n"
+            "前走。走着走着，来到了城\n"
+            "也是有感情的\t也很累，他就在庙门口坐下\t\n"
+            "隍庙前。这时，天已漆黑，人\n"
+            "图膜")), 396);
     }
 
     void noteStatistics() {
@@ -245,6 +276,172 @@ private slots:
         QCOMPARE(e.toChange().value("baseRev").toInt(), 3);
         e.isDelete = true;
         QVERIFY(!e.toChange().contains("fields"));
+    }
+
+    void noteTitleTemplate() {
+        const QDateTime dt(QDate(2026, 5, 6), QTime(9, 5, 3)); // 2026-05-06 is Wednesday
+        QCOMPARE(fmt::formatNoteTitle(QString(), dt, true), QString());
+        QCOMPARE(fmt::formatNoteTitle(QStringLiteral("YYYY-MM-DD HH:mm:ss"), dt, true), QStringLiteral("2026-05-06 09:05:03"));
+        QCOMPARE(fmt::formatNoteTitle(QStringLiteral("YY/MM/DD-随记"), dt, true), QStringLiteral("26/05/06-随记"));
+        QCOMPARE(fmt::formatNoteTitle(QStringLiteral("YYYY年MM月DD日 ddd"), dt, true), QStringLiteral("2026年05月06日 周三"));
+        QCOMPARE(fmt::formatNoteTitle(QStringLiteral("YYYY-MM-DD ddd"), dt, false), QStringLiteral("2026-05-06 Wed"));
+    }
+
+    void diffAndConflictCounterparts() {
+        QVERIFY(diff::isConflictNote(QStringLiteral("周报 (冲突副本 2026-05-01)")));
+        QVERIFY(diff::isConflictNote(QStringLiteral("Report (conflict copy 2026-05-01)")));
+        QVERIFY(!diff::isConflictNote(QStringLiteral("周报")));
+        QCOMPARE(diff::conflictBaseTitle(QStringLiteral("周报 (冲突副本 2026-05-01)")), QStringLiteral("周报"));
+
+        Note orig, copy, trashedCopy;
+        orig.id = QStringLiteral("orig1111");
+        orig.title = QStringLiteral("周报");
+        orig.body = QStringLiteral("line1\nhello world\nline3");
+        copy.id = QStringLiteral("copy2222");
+        copy.title = QStringLiteral("周报 (冲突副本 2026-05-01)");
+        copy.body = QStringLiteral("line1\nhello ivynote\nline3\nline4");
+        trashedCopy = copy;
+        trashedCopy.id = QStringLiteral("trash333");
+        trashedCopy.trashedAt = 100;
+
+        const QHash<QString, Note> all{{orig.id, orig}, {copy.id, copy}, {trashedCopy.id, trashedCopy}};
+        const auto fromOrig = diff::findConflictCounterparts(orig, all);
+        QCOMPARE(fromOrig.size(), 1);
+        QCOMPARE(fromOrig.first()->id, copy.id);
+        const auto fromCopy = diff::findConflictCounterparts(copy, all);
+        QCOMPARE(fromCopy.size(), 1);
+        QCOMPARE(fromCopy.first()->id, orig.id);
+
+        const auto same = diff::compute(orig.body, orig.body);
+        QVERIFY(same.identical);
+        QCOMPARE(same.added, 0);
+        QCOMPARE(same.removed, 0);
+
+        const auto res = diff::compute(orig.body, copy.body);
+        QVERIFY(!res.identical);
+        QCOMPARE(res.removed, 1);
+        QCOMPARE(res.added, 2);
+        QCOMPARE(res.unchanged, 2);
+        // Paired modification has intraline spans.
+        bool sawPairedSpans = false;
+        for (const auto &row : res.rows) {
+            if (row.left && row.right && row.left->kind == diff::Kind::Del && row.right->kind == diff::Kind::Add) {
+                if (!row.left->spans.isEmpty() && !row.right->spans.isEmpty()) sawPairedSpans = true;
+            }
+        }
+        QVERIFY(sawPairedSpans);
+    }
+
+    void slashItemsMatchChineseEnglishAndPinyin() {
+        QCOMPARE(insertitems::all().size(), 24);
+        QCOMPARE(insertitems::match(QString()).size(), 24);
+        QCOMPARE(insertitems::match(QStringLiteral("表格")).first().id, QStringLiteral("table"));
+        QCOMPARE(insertitems::match(QStringLiteral("biaoge")).first().id, QStringLiteral("table"));
+        QCOMPARE(insertitems::match(QStringLiteral("bg")).first().id, QStringLiteral("table"));
+        QCOMPARE(insertitems::match(QStringLiteral("mermaid")).first().id, QStringLiteral("mermaid"));
+        QCOMPARE(insertitems::match(QStringLiteral("h2")).first().id, QStringLiteral("h2"));
+        QCOMPARE(insertitems::match(QStringLiteral("daiban")).first().id, QStringLiteral("todo"));
+        QVERIFY(insertitems::match(QStringLiteral("zzzznonexistent")).isEmpty());
+    }
+
+    void advancedTasksRecurrenceAndNaturalDates() {
+        const auto daily = tasks::parseRepeat(QStringLiteral("every day"));
+        QVERIFY(daily.has_value());
+        QCOMPARE(tasks::describeRepeat(*daily, true), QStringLiteral("每天"));
+        QCOMPARE(tasks::describeRepeat(*daily, false), QStringLiteral("Every day"));
+
+        const auto biweekly = tasks::parseRepeat(QStringLiteral("every 2 weeks"));
+        QVERIFY(biweekly.has_value());
+        QCOMPARE(tasks::nextDate(QDate(2026, 5, 1), *biweekly), QDate(2026, 5, 15));
+
+        const auto monthly = tasks::parseRepeat(QStringLiteral("every month"));
+        QVERIFY(monthly.has_value());
+        QCOMPARE(tasks::nextDate(QDate(2026, 1, 31), *monthly), QDate(2026, 2, 28));
+
+        const auto weekday = tasks::parseRepeat(QStringLiteral("every weekday"));
+        QVERIFY(weekday.has_value());
+        // 2026-05-01 is Friday -> next weekday is Monday 2026-05-04
+        QCOMPARE(tasks::nextDate(QDate(2026, 5, 1), *weekday), QDate(2026, 5, 4));
+
+        // Plain task toggle does not add ✅
+        QCOMPARE(tasks::toggleTaskLine(QStringLiteral("- [ ] buy milk"), 0, QDate(2026, 5, 1)),
+                 QStringLiteral("- [x] buy milk"));
+        // Dated task toggle adds ✅ and uncheck removes ✅
+        const QString doneDated = tasks::toggleTaskLine(QStringLiteral("- [ ] report 📅 2026-05-01"), 0, QDate(2026, 5, 1));
+        QCOMPARE(doneDated, QStringLiteral("- [x] report 📅 2026-05-01 ✅ 2026-05-01"));
+        QCOMPARE(tasks::toggleTaskLine(doneDated, 0, QDate(2026, 5, 1)),
+                 QStringLiteral("- [ ] report 📅 2026-05-01"));
+        // Recurring task spawns next occurrence immediately above
+        const QString recur = tasks::toggleTaskLine(QStringLiteral("- [ ] standup 📅 2026-05-01 09:00 🔁 every weekday"), 0, QDate(2026, 5, 1));
+        QCOMPARE(recur, QStringLiteral("- [ ] standup 📅 2026-05-04 09:00 🔁 every weekday\n"
+                                       "- [x] standup 📅 2026-05-01 09:00 🔁 every weekday ✅ 2026-05-01"));
+
+        // setTaskDue
+        const QString withDue = tasks::setTaskDue(QStringLiteral("- [ ] pay rent"), tasks::Due{QDate(2026, 6, 1), {}}, QStringLiteral("every month"));
+        QCOMPARE(withDue, QStringLiteral("- [ ] pay rent 📅 2026-06-01 🔁 every month"));
+        QCOMPARE(tasks::setTaskDue(withDue, std::nullopt, QString()), QStringLiteral("- [ ] pay rent"));
+
+        // Natural-language @ date parsing
+        const QDateTime now(QDate(2026, 5, 6), QTime(10, 0)); // Wed May 6, 2026 10:00
+        const auto tmrMorning = tasks::parseWhen(QStringLiteral("明天 9点"), now);
+        QVERIFY(tmrMorning.has_value());
+        QCOMPARE(tmrMorning->date, QDate(2026, 5, 7));
+        QCOMPARE(tmrMorning->time, QTime(9, 0));
+
+        const auto friPm = tasks::parseWhen(QStringLiteral("周五下午3点半"), now);
+        QVERIFY(friPm.has_value());
+        QCOMPARE(friPm->date, QDate(2026, 5, 8));
+        QCOMPARE(friPm->time, QTime(15, 30));
+
+        const auto in10m = tasks::parseWhen(QStringLiteral("10分钟后"), now);
+        QVERIFY(in10m.has_value());
+        QCOMPARE(in10m->date, QDate(2026, 5, 6));
+        QCOMPARE(in10m->time, QTime(10, 10));
+
+        const auto enTmr = tasks::parseWhen(QStringLiteral("tomorrow 14:30"), now);
+        QVERIFY(enTmr.has_value());
+        QCOMPARE(enTmr->date, QDate(2026, 5, 7));
+        QCOMPARE(enTmr->time, QTime(14, 30));
+    }
+
+    void agendaTreeBucketsAndCounts() {
+        const QDateTime now(QDate(2026, 5, 6), QTime(10, 0));
+        Note n;
+        n.id = QStringLiteral("n1");
+        n.title = QStringLiteral("Plan");
+        n.body = QStringLiteral(
+            "- [ ] overdue task 📅 2026-05-05\n"
+            "- [ ] today task 📅 2026-05-06 14:00\n"
+            "- [x] done today 📅 2026-05-06 ✅ 2026-05-06\n"
+            "- [ ] tomorrow task 📅 2026-05-07\n"
+            "- [ ] this week 📅 2026-05-10\n"
+            "- [ ] next month 📅 2026-06-15\n");
+
+        Note enc;
+        enc.id = QStringLiteral("n2");
+        enc.title = QStringLiteral("Secret");
+        enc.body = QStringLiteral("```ivy-encrypted\nv: 1\n```");
+
+        const QHash<QString, Note> notes{{n.id, n}, {enc.id, enc}};
+        const AgendaTree treeOpen = buildAgendaTree(notes, false, now, true);
+        QCOMPARE(treeOpen.totalOpen, 5);
+        QCOMPARE(treeOpen.overdueCount, 1);
+        QCOMPARE(treeOpen.todayCount, 1);
+        QCOMPARE(treeOpen.encryptedCount, 1);
+        QCOMPARE(treeOpen.branches.size(), 5);
+        QCOMPARE(treeOpen.branches[0].kind, AgendaBranch::Overdue);
+        QVERIFY(treeOpen.branches[0].openByDefault());
+        QCOMPARE(treeOpen.branches[1].kind, AgendaBranch::Today);
+        QCOMPARE(treeOpen.branches[1].items.size(), 1);
+        QCOMPARE(treeOpen.branches[2].kind, AgendaBranch::Tomorrow);
+        QCOMPARE(treeOpen.branches[3].kind, AgendaBranch::Day);
+        QVERIFY(!treeOpen.branches[3].openByDefault());
+        QCOMPARE(treeOpen.branches[4].kind, AgendaBranch::Month);
+        QVERIFY(!treeOpen.branches[4].openByDefault());
+
+        const AgendaTree treeWithDone = buildAgendaTree(notes, true, now, true);
+        QCOMPARE(treeWithDone.totalOpen, 5);
+        QCOMPARE(treeWithDone.branches[1].items.size(), 2); // today open + done today
     }
 };
 

@@ -21,6 +21,13 @@ struct LinkSpan {
     bool wiki = false;
 };
 
+struct TaskMarkerSpan {
+    enum Kind { Due, Repeat, Done };
+    int start = 0; // within the block
+    int end = 0;
+    Kind kind = Due;
+};
+
 class BlockInfo : public QTextBlockUserData {
 public:
     enum Kind { Text, Fence, Code, Heading, Quote, Rule, Image, ImageParagraph, ReferenceDefinition, Table };
@@ -33,6 +40,7 @@ public:
     QList<int> bullets;            // position of the list marker
     qreal hang = 0;                // hanging indent of wrapped lines (lists, quotes)
     QList<LinkSpan> links;
+    QList<TaskMarkerSpan> taskMarkers;
     QString imageId;
     QSharedPointer<QTextDocument> imageDocument;
     QSize imageSize; // reserved display size

@@ -1,5 +1,6 @@
 #include "ui/notepane.h"
 
+#include "core/diff.h"
 #include "core/format.h"
 #include "core/i18n.h"
 #include "core/markdown.h"
@@ -141,10 +142,28 @@ NotePane::NotePane(QWidget *parent) : QWidget(parent) {
     auto *top = new QHBoxLayout(m_topBar);
     top->setContentsMargins(0, 0, 0, 0);
     top->setSpacing(2);
-    auto *insertButton = new IconButton(QStringLiteral("plus"), T("插入") + QStringLiteral(" (Ctrl+/)"), m_topBar);
-    insertButton->setObjectName(QStringLiteral("insertButton"));
-    connect(insertButton, &QToolButton::clicked, this, [this] { m_editor->showInsertMenu(); });
-    top->addWidget(insertButton);
+    m_insertButton = new IconButton(QStringLiteral("plus"), T("插入") + QStringLiteral(" (Ctrl+/)"), m_topBar);
+    m_insertButton->setObjectName(QStringLiteral("insertButton"));
+    connect(m_insertButton, &QToolButton::clicked, this, [this] { m_editor->showInsertMenu(); });
+    top->addWidget(m_insertButton);
+
+    m_dueButton = new IconButton(QStringLiteral("calendar"), T("设置日期与重复") + QStringLiteral(" (Ctrl+Shift+D)"), m_topBar);
+    m_dueButton->setObjectName(QStringLiteral("dueButton"));
+    connect(m_dueButton, &QToolButton::clicked, this, [this] { m_editor->openDuePicker(); });
+    top->addWidget(m_dueButton);
+
+    m_readButton = new IconButton(QStringLiteral("book"), T("阅读模式") + QStringLiteral(" (Ctrl+Shift+E)"), m_topBar);
+    m_readButton->setObjectName(QStringLiteral("readButton"));
+    m_readButton->setCheckable(true);
+    connect(m_readButton, &QToolButton::clicked, this, &NotePane::toggleReading);
+    top->addWidget(m_readButton);
+
+    m_diffButton = new IconButton(QStringLiteral("diff"), T("对比差异 (Diff)"), m_topBar);
+    m_diffButton->setObjectName(QStringLiteral("diffButton"));
+    connect(m_diffButton, &QToolButton::clicked, this, [this] {
+        if (!m_id.isEmpty()) emit diffRequested(m_id, m_conflictTargetId);
+    });
+    top->addWidget(m_diffButton);
 
     m_shareButton = new IconButton(QStringLiteral("share"), T("分享"), m_topBar);
     m_outlineButton = new IconButton(QStringLiteral("outline"), T("大纲"), m_topBar);
@@ -162,7 +181,7 @@ NotePane::NotePane(QWidget *parent) : QWidget(parent) {
     // Trash banner.
     m_banner = new QWidget(this);
     auto *bannerRow = new QHBoxLayout(m_banner);
-    bannerRow->setContentsMargins(24, 8, 172, 8); // clear of the floating actions
+    bannerRow->setContentsMargins(24, 8, 260, 8); // clear of the floating actions
     auto *bannerText = new QLabel(T("这篇笔记在回收站中，只读。"), m_banner);
     bannerRow->addWidget(bannerText, 1);
     auto *restore = new PillButton(T("恢复"), PillButton::Secondary, m_banner);
@@ -184,6 +203,22 @@ NotePane::NotePane(QWidget *parent) : QWidget(parent) {
     m_banner->setAutoFillBackground(true);
     m_banner->hide();
     col->addWidget(m_banner);
+
+    // Sync conflict banner.
+    m_conflictBanner = new QWidget(this);
+    m_conflictBanner->setObjectName(QStringLiteral("conflictBanner"));
+    auto *conflictRow = new QHBoxLayout(m_conflictBanner);
+    conflictRow->setContentsMargins(24, 8, 260, 8);
+    m_conflictLabel = new QLabel(T("这是一份同步冲突副本，建议与原笔记对比后合并。"), m_conflictBanner);
+    conflictRow->addWidget(m_conflictLabel, 1);
+    auto *diffAction = new PillButton(T("对比差异 (Diff)"), PillButton::Secondary, m_conflictBanner);
+    conflictRow->addWidget(diffAction);
+    connect(diffAction, &QToolButton::clicked, this, [this] {
+        if (!m_id.isEmpty()) emit diffRequested(m_id, m_conflictTargetId);
+    });
+    m_conflictBanner->setAutoFillBackground(true);
+    m_conflictBanner->hide();
+    col->addWidget(m_conflictBanner);
 
     // Title and meta, on the same column as the text.
     m_headHost = new QWidget(this);
@@ -286,7 +321,12 @@ NotePane::NotePane(QWidget *parent) : QWidget(parent) {
     connect(m_findCase, &QToolButton::toggled, this, [this] { refreshFind(); });
     connect(previous, &QToolButton::clicked, this, [this] { findNext(true); });
     connect(next, &QToolButton::clicked, this, [this] { findNext(); });
-    auto closeSearch = [this] { m_findBar->hide(); m_editor->setExtraSelections({}); focusEditor(); };
+    auto closeSearch = [this] {
+        m_findBar->hide();
+        m_editor->setExtraSelections({});
+        m_preview->setExtraSelections({});
+        focusEditor();
+    };
     connect(closeFind, &QToolButton::clicked, this, closeSearch);
     auto *escapeFind = new QShortcut(QKeySequence(Qt::Key_Escape), m_findBar);
     escapeFind->setContext(Qt::WidgetWithChildrenShortcut);
@@ -314,6 +354,7 @@ NotePane::NotePane(QWidget *parent) : QWidget(parent) {
     m_editor = new MarkdownEditor(m_split);
     passAppShortcuts(m_editor);
     m_preview = new MarkdownView(m_split);
+    passAppShortcuts(m_preview);
     m_split->addWidget(m_editor);
     m_split->addWidget(m_preview);
     m_preview->hide();
@@ -402,7 +443,12 @@ NotePane::NotePane(QWidget *parent) : QWidget(parent) {
     connect(m_backlinks, &QListWidget::itemClicked, this, [this](QListWidgetItem *it) { emit openNote(it->data(Qt::UserRole).toString()); });
     connect(m_outline, &QListWidget::itemClicked, this, [this](QListWidgetItem *it) {
         const int line = it->data(Qt::UserRole).toInt();
-        if (m_mode == EditorMode::Split) m_preview->scrollToAnchor(it->data(Qt::UserRole + 1).toString());
+        const QString slug = it->data(Qt::UserRole + 1).toString();
+        if (m_reading) {
+            m_preview->scrollToAnchor(slug);
+            return;
+        }
+        if (m_mode == EditorMode::Split) m_preview->scrollToAnchor(slug);
         m_editor->scrollToLine(line);
     });
 
@@ -423,6 +469,7 @@ NotePane::NotePane(QWidget *parent) : QWidget(parent) {
     connect(&m_indexTimer, &QTimer::timeout, this, &NotePane::refreshIndex);
     connect(&m_savedTimer, &QTimer::timeout, this, [this] { sink(m_savedLabel, 400); });
     connect(m_editor, &MarkdownEditor::columnChanged, this, &NotePane::alignHead);
+    connect(m_preview, &MarkdownView::columnChanged, this, &NotePane::alignHead);
     // Split view: each side follows the other.
     connect(m_editor->verticalScrollBar(), &QScrollBar::valueChanged, this, [this] { syncScroll(true); });
     connect(m_preview->verticalScrollBar(), &QScrollBar::valueChanged, this, [this] { syncScroll(false); });
@@ -438,11 +485,12 @@ NotePane::NotePane(QWidget *parent) : QWidget(parent) {
         refreshFind();
         m_bodyDirty = true;
         m_bodyTimer.start();
-        if (m_mode == EditorMode::Split) m_previewTimer.start();
+        if (m_mode == EditorMode::Split || m_reading) m_previewTimer.start();
     });
     // Reading and moving around count as use too.
     connect(m_editor, &QTextEdit::cursorPositionChanged, this, [this] { if (m_sealed) notelock::touch(m_lockKey); });
     connect(m_editor->verticalScrollBar(), &QScrollBar::valueChanged, this, [this] { if (m_sealed) notelock::touch(m_lockKey); });
+    connect(m_preview->verticalScrollBar(), &QScrollBar::valueChanged, this, [this] { if (m_sealed) notelock::touch(m_lockKey); });
     connect(m_title, &QLineEdit::textEdited, this, [this] {
         m_titleDirty = true;
         m_titleTimer.start();
@@ -450,6 +498,7 @@ NotePane::NotePane(QWidget *parent) : QWidget(parent) {
     connect(m_title, &QLineEdit::returnPressed, this, [this] {
         // Enter in the title goes to the start of the text.
         flush();
+        if (m_reading) return;
         QTextCursor c = m_editor->textCursor();
         c.movePosition(QTextCursor::Start);
         m_editor->setTextCursor(c);
@@ -463,11 +512,15 @@ NotePane::NotePane(QWidget *parent) : QWidget(parent) {
         if (url.scheme() == QStringLiteral("ivy-diagram")) return;
         const QString s = url.toString();
         if (s.startsWith(QLatin1String("ivy-task:"))) {
-            if (m_engine && m_engine->note(m_id) && !m_editor->isReadOnly()) {
+            if (!m_reading && m_engine && m_engine->note(m_id) && !m_editor->isReadOnly()) {
                 flush();
                 const QString body = md::toggleTask(m_editor->markdown(), s.mid(9).toInt());
-                m_editor->applyRemote(body);
-                flush();
+                if (body != m_editor->markdown()) {
+                    m_editor->applyRemote(body);
+                    m_bodyDirty = true;
+                    flush();
+                    refreshPreview();
+                }
             }
             return;
         }
@@ -485,6 +538,7 @@ NotePane::NotePane(QWidget *parent) : QWidget(parent) {
         bp.setColor(QPalette::Window, k.warnSoft);
         bp.setColor(QPalette::WindowText, k.warnInk);
         m_banner->setPalette(bp);
+        m_conflictBanner->setPalette(bp);
         QPalette tp = m_title->palette();
         tp.setColor(QPalette::Base, k.surface);
         tp.setColor(QPalette::Text, k.ink);
@@ -531,7 +585,7 @@ void NotePane::setSession(Session *session) {
     connect(m_engine, &SyncEngine::stateChanged, this, &NotePane::refresh);
     connect(session, &Session::attachmentReady, this, [this](const QString &id) {
         m_editor->refreshAttachment(id);
-        if (m_mode == EditorMode::Split) m_previewTimer.start();
+        if (m_mode == EditorMode::Split || m_reading) m_previewTimer.start();
     });
     QPointer<Session> s(session);
     m_editor->image = [s](const QString &id) -> QImage {
@@ -558,6 +612,7 @@ void NotePane::setNote(const QString &id) {
     flush();
     m_findBar->hide();
     m_editor->setExtraSelections({});
+    m_preview->setExtraSelections({});
     m_id = id;
     m_bodyDirty = m_titleDirty = false;
     const Note *n = m_engine && !id.isEmpty() ? m_engine->note(id) : nullptr;
@@ -567,14 +622,12 @@ void NotePane::setNote(const QString &id) {
     m_title->setText(n ? n->title : QString());
     loadBody(n ? n->body : QString());
     m_editor->setReadOnly(!n || n->trashed() || m_locked);
-    m_replaceOne->setEnabled(n && !n->trashed() && !m_locked);
-    m_replaceAll->setEnabled(n && !n->trashed() && !m_locked);
-    m_title->setReadOnly(!n || n->trashed());
     m_backlinks->hide();
+    applyViewState();
     refresh();
     refreshIndex();
     refreshOutline();
-    if (m_mode == EditorMode::Split) refreshPreview();
+    if (m_mode == EditorMode::Split || m_reading) refreshPreview();
     if (has) {
         // Note to note: a quick cross-fade, not a cut.
         rise(m_headHost, 180);
@@ -648,7 +701,7 @@ void NotePane::loadBody(const QString &body) {
 void NotePane::showLockPanel(bool locked, const QString &hint) {
     m_lockPanel->setVisible(locked);
     m_body->setVisible(!locked);
-    if (auto *insert = findChild<QToolButton *>(QStringLiteral("insertButton"))) insert->setEnabled(!locked);
+    applyViewState();
     if (!locked) return;
     m_findBar->hide();
     m_lockHint->setText(hint.isEmpty() ? QString() : T("密码提示：") + hint);
@@ -665,11 +718,18 @@ void NotePane::reloadFromEngine() {
     if (!n) return;
     loadBody(n->body);
     m_editor->setReadOnly(n->trashed() || m_locked);
-    m_replaceOne->setEnabled(!n->trashed() && !m_locked);
-    m_replaceAll->setEnabled(!n->trashed() && !m_locked);
+    applyViewState();
     refresh();
     refreshOutline();
-    if (m_mode == EditorMode::Split) refreshPreview();
+    if (m_mode == EditorMode::Split || m_reading) refreshPreview();
+}
+
+void NotePane::syncBodyFromEngine() {
+    if (!m_engine || m_id.isEmpty() || m_bodyDirty) return;
+    if (const Note *n = m_engine->note(m_id)) {
+        onRemoteBody(n->body);
+        refreshOutline();
+    }
 }
 
 void NotePane::onRemoteBody(const QString &body) {
@@ -679,13 +739,19 @@ void NotePane::onRemoteBody(const QString &body) {
     // protected or unprotected there).
     const bool encrypted = notelock::isEncrypted(body);
     if (!encrypted && !m_sealed && !m_locked) {
-        if (m_editor->markdown() != body) m_editor->applyRemote(body);
+        if (m_editor->markdown() != body) {
+            m_editor->applyRemote(body);
+            if (m_mode == EditorMode::Split || m_reading) refreshPreview();
+        }
         return;
     }
     if (encrypted && m_sealed) {
         QString plain;
         if (notelock::open(body, m_lockKey, &plain) == notelock::Status::Ok) {
-            if (m_editor->markdown() != plain) m_editor->applyRemote(plain);
+            if (m_editor->markdown() != plain) {
+                m_editor->applyRemote(plain);
+                if (m_mode == EditorMode::Split || m_reading) refreshPreview();
+            }
             return;
         }
     }
@@ -836,10 +902,26 @@ void NotePane::refresh() {
     }
     m_pendingDot->setPixmap(dot);
     m_banner->setVisible(n && n->trashed());
+    m_conflictTargetId.clear();
     if (!n) {
+        m_conflictBanner->hide();
         m_meta->clear();
         m_tagsRow->clear();
         return;
+    }
+    const bool showConflict = !n->trashed() && !m_locked;
+    if (showConflict && m_engine) {
+        const auto counterparts = diff::findConflictCounterparts(*n, m_engine->notes());
+        if (!counterparts.isEmpty()) m_conflictTargetId = counterparts.first()->id;
+        const bool isCopy = diff::isConflictNote(n->title);
+        const bool hasConflict = isCopy || !counterparts.isEmpty();
+        m_conflictBanner->setVisible(hasConflict);
+        if (hasConflict) {
+            m_conflictLabel->setText(isCopy ? T("这是一份同步冲突副本，建议与原笔记对比后合并。")
+                                            : T("发现该笔记存在同步冲突副本，建议对比差异。"));
+        }
+    } else {
+        m_conflictBanner->hide();
     }
     // Keep the title in step with other devices unless it is being typed.
     if (!m_titleDirty && !m_title->hasFocus() && m_title->text() != n->title) m_title->setText(n->title);
@@ -850,7 +932,7 @@ void NotePane::refresh() {
         // The count of a sealed body would be the ciphertext's.
         m_meta->setText(QStringLiteral("%1   %2").arg(fmt::fullTime(n->updatedAt, now), T("已加密")));
     } else {
-        const int words = n->words > 0 ? n->words : md::wordCount(n->body);
+        const int words = md::wordCount(n->body);
         m_meta->setText(QStringLiteral("%1   %2 %3").arg(fmt::fullTime(n->updatedAt, now), fmt::number(words), T("字")));
     }
     m_meta->setToolTip(T("笔记信息") + QStringLiteral("\n") + T("创建于") + u' ' + fmt::fullTime(n->createdAt, now));
@@ -956,12 +1038,53 @@ void NotePane::refreshIndex() {
     if (linking.isEmpty()) m_backlinks->hide();
 }
 
+QTextEdit *NotePane::activeTextView() const {
+    return m_reading ? static_cast<QTextEdit *>(m_preview) : static_cast<QTextEdit *>(m_editor);
+}
+
+void NotePane::applyViewState() {
+    const Note *n = m_engine && !m_id.isEmpty() ? m_engine->note(m_id) : nullptr;
+    const bool has = n != nullptr;
+    const bool trashed = n && n->trashed();
+    const bool editable = has && !trashed && !m_locked && !m_reading;
+
+    m_title->setReadOnly(!editable);
+    m_insertButton->setVisible(editable);
+    m_dueButton->setVisible(editable);
+    m_readButton->setVisible(has && !m_locked);
+    m_readButton->setChecked(m_reading);
+    m_readButton->setIconName(m_reading ? QStringLiteral("edit") : QStringLiteral("book"));
+    m_readButton->setToolTip(m_reading ? T("退出阅读模式") + QStringLiteral(" (Ctrl+Shift+E)")
+                                       : T("阅读模式") + QStringLiteral(" (Ctrl+Shift+E)"));
+    m_diffButton->setVisible(has && !m_locked);
+    m_replaceOne->setEnabled(editable);
+    m_replaceAll->setEnabled(editable);
+    if (!editable && m_replaceRow->isVisible()) {
+        if (auto *t = findChild<QToolButton *>(QStringLiteral("noteReplaceToggle"))) t->setChecked(false);
+        m_replaceRow->hide();
+    }
+
+    if (m_reading) {
+        m_editor->hide();
+        m_preview->setColumnWidth(680);
+        m_preview->show();
+    } else {
+        m_editor->show();
+        m_preview->setColumnWidth(0);
+        m_preview->setVisible(m_mode == EditorMode::Split);
+        m_editor->setColumnWidth(m_mode == EditorMode::Split ? 560 : 680);
+    }
+    placeTopBar();
+    alignHead();
+}
+
 void NotePane::showFind() {
     if (m_locked) return;
-    m_editor->commitPendingCell();
+    if (!m_reading) m_editor->commitPendingCell();
     m_findBar->show();
-    if (m_editor->textCursor().hasSelection()) {
-        const QString selected = m_editor->textCursor().selectedText();
+    QTextEdit *view = activeTextView();
+    if (view->textCursor().hasSelection()) {
+        const QString selected = view->textCursor().selectedText();
         if (!selected.contains(QChar::ParagraphSeparator)) m_findText->setText(selected);
     }
     m_findText->setFocus();
@@ -971,14 +1094,15 @@ void NotePane::showFind() {
 
 void NotePane::showReplace() {
     showFind();
+    if (m_reading || m_editor->isReadOnly()) return;
     findChild<QToolButton *>(QStringLiteral("noteReplaceToggle"))->setChecked(true);
     m_replaceRow->show();
-    m_replaceOne->setEnabled(!m_editor->isReadOnly());
-    m_replaceAll->setEnabled(!m_editor->isReadOnly());
+    m_replaceOne->setEnabled(!m_editor->isReadOnly() && !m_reading);
+    m_replaceAll->setEnabled(!m_editor->isReadOnly() && !m_reading);
 }
 
 void NotePane::replaceMatches(bool all) {
-    if (m_editor->isReadOnly() || m_findText->text().isEmpty()) return;
+    if (m_reading || m_editor->isReadOnly() || m_findText->text().isEmpty()) return;
     m_editor->commitPendingCell();
     const QString query = m_findText->text();
     const QString replacement = m_replaceText->text();
@@ -1012,16 +1136,17 @@ void NotePane::replaceMatches(bool all) {
 
 void NotePane::refreshFind() {
     if (!m_findBar->isVisible()) return;
+    QTextEdit *view = activeTextView();
     const QString query = m_findText->text();
     QList<QTextEdit::ExtraSelection> marks;
     QTextDocument::FindFlags flags;
     if (m_findCase->isChecked()) flags |= QTextDocument::FindCaseSensitively;
-    QTextCursor c(m_editor->document());
+    QTextCursor c(view->document());
     int count = 0;
     int current = 0;
-    const QTextCursor selected = m_editor->textCursor();
+    const QTextCursor selected = view->textCursor();
     while (!query.isEmpty()) {
-        c = m_editor->document()->find(query, c, flags);
+        c = view->document()->find(query, c, flags);
         if (c.isNull()) break;
         ++count;
         const bool isCurrent = selected.hasSelection() && c.selectionStart() == selected.selectionStart() && c.selectionEnd() == selected.selectionEnd();
@@ -1039,22 +1164,23 @@ void NotePane::refreshFind() {
     m_findCount->setText(query.isEmpty() ? QString()
                          : current ? QStringLiteral("%1 / %2").arg(current).arg(count)
                                    : QString::number(count));
-    m_editor->setExtraSelections(marks);
+    view->setExtraSelections(marks);
 }
 
 void NotePane::findNext(bool backward) {
     if (m_findText->text().isEmpty()) return;
+    QTextEdit *view = activeTextView();
     QTextDocument::FindFlags flags;
     if (backward) flags |= QTextDocument::FindBackward;
     if (m_findCase->isChecked()) flags |= QTextDocument::FindCaseSensitively;
-    QTextCursor found = m_editor->document()->find(m_findText->text(), m_editor->textCursor(), flags);
+    QTextCursor found = view->document()->find(m_findText->text(), view->textCursor(), flags);
     if (found.isNull()) {
-        QTextCursor edge(m_editor->document());
+        QTextCursor edge(view->document());
         if (backward) edge.movePosition(QTextCursor::End);
-        found = m_editor->document()->find(m_findText->text(), edge, flags);
+        found = view->document()->find(m_findText->text(), edge, flags);
     }
     if (found.isNull()) return;
-    m_editor->setTextCursor(found);
+    view->setTextCursor(found);
     centerMatch();
     refreshFind();
 }
@@ -1063,11 +1189,12 @@ void NotePane::findNext(bool backward) {
 // middle part: a match that is in view stays put, one at the edge, or far
 // away, is moved to where it reads comfortably.
 void NotePane::centerMatch() {
-    const QRect r = m_editor->cursorRect();
-    const int height = m_editor->viewport()->height();
+    QTextEdit *view = activeTextView();
+    const QRect r = view->cursorRect();
+    const int height = view->viewport()->height();
     const int y = r.center().y();
     if (y >= height * 0.35 && y <= height * 0.65) return;
-    QScrollBar *bar = m_editor->verticalScrollBar();
+    QScrollBar *bar = view->verticalScrollBar();
     bar->setValue(bar->value() + y - height / 2);
 }
 
@@ -1087,17 +1214,19 @@ void NotePane::refreshOutline() {
 }
 
 void NotePane::refreshPreview() {
-    if (m_mode != EditorMode::Split || !m_session) return;
+    if (m_mode != EditorMode::Split && !m_reading) return;
     RenderOptions opts;
     opts.resolveTitle = [this](const QString &t) { return resolveTitle(t); };
-    opts.resourceKind = [this](const QString &id) { return m_engine->attachmentKind(id); };
-    opts.resourceName = [this](const QString &id) { return m_engine->attachmentName(id); };
-    opts.interactiveTasks = !m_editor->isReadOnly();
+    if (m_engine) {
+        opts.resourceKind = [this](const QString &id) { return m_engine->attachmentKind(id); };
+        opts.resourceName = [this](const QString &id) { return m_engine->attachmentName(id); };
+    }
+    opts.interactiveTasks = !m_reading && !m_editor->isReadOnly();
     m_syncing = true;
     m_preview->setMarkdown(m_editor->markdown(), opts);
     m_syncing = false;
     m_scrollMap.clear();
-    syncScroll(true);
+    if (!m_reading && m_mode == EditorMode::Split) syncScroll(true);
 }
 
 void NotePane::placeTopBar() {
@@ -1113,10 +1242,10 @@ void NotePane::resizeEvent(QResizeEvent *e) {
 }
 
 void NotePane::alignHead() {
-    // The head spans the editor's text column, wherever the editor sits
-    // (narrower in the split view, beside the outline).
-    const QRect col = m_editor->textColumn();
-    const QPoint at = m_editor->mapTo(this, col.topLeft());
+    // The head spans the active pane's text column (centered in Live/Source/Read,
+    // narrower in Split view, beside the outline).
+    const QRect col = m_reading ? m_preview->textColumn() : m_editor->textColumn();
+    const QPoint at = m_reading ? m_preview->mapTo(this, col.topLeft()) : m_editor->mapTo(this, col.topLeft());
     const int left = std::max(0, at.x());
     // Leave room for the floating actions when the column runs close to the edge.
     const int right = std::max({0, m_headHost->width() - left - col.width(), m_topBar->width() + 16});
@@ -1192,7 +1321,7 @@ void NotePane::buildScrollMap() {
 }
 
 void NotePane::syncScroll(bool fromEditor) {
-    if (m_syncing || m_mode != EditorMode::Split || !m_preview->isVisible()) return;
+    if (m_syncing || m_reading || m_mode != EditorMode::Split || !m_preview->isVisible()) return;
     if (m_scrollMap.isEmpty()) buildScrollMap();
     QScrollBar *from = fromEditor ? m_editor->verticalScrollBar() : m_preview->verticalScrollBar();
     QScrollBar *to = fromEditor ? m_preview->verticalScrollBar() : m_editor->verticalScrollBar();
@@ -1215,18 +1344,41 @@ void NotePane::syncScroll(bool fromEditor) {
 
 void NotePane::setEditorMode(EditorMode mode) {
     flush();
+    const bool wasReading = m_reading;
+    m_reading = false;
     m_mode = mode;
     m_editor->setMode(mode == EditorMode::Live ? MarkdownHighlighter::Live : MarkdownHighlighter::Source);
-    const bool wasSplit = m_preview->isVisible();
-    m_preview->setVisible(mode == EditorMode::Split);
-    m_editor->setColumnWidth(mode == EditorMode::Split ? 560 : 680);
+    const bool wasSplit = !wasReading && m_preview->isVisible();
+    applyViewState();
     if (mode == EditorMode::Split) {
         if (!wasSplit) m_split->setSizes({1, 1});
         refreshPreview();
         if (!wasSplit) rise(m_preview, 220);
     }
     if (!m_id.isEmpty()) rise(m_editor, 160);
+    if (wasReading) emit readingChanged(false);
     emit editorModeChanged(mode);
+}
+
+void NotePane::setReading(bool reading) {
+    if (m_reading == reading) return;
+    flush();
+    m_editor->setExtraSelections({});
+    m_preview->setExtraSelections({});
+    m_reading = reading;
+    applyViewState();
+    if (m_reading) {
+        refreshPreview();
+        if (!m_id.isEmpty()) rise(m_preview, 160);
+    } else {
+        if (m_mode == EditorMode::Split) {
+            m_split->setSizes({1, 1});
+            refreshPreview();
+        }
+        if (!m_id.isEmpty()) rise(m_editor, 160);
+    }
+    if (m_findBar->isVisible()) refreshFind();
+    emit readingChanged(m_reading);
 }
 
 void NotePane::setFontSize(int px) {
@@ -1252,7 +1404,10 @@ void NotePane::toggleOutline() {
     }
 }
 
-void NotePane::focusEditor() { m_editor->setFocus(); }
+void NotePane::focusEditor() {
+    if (m_reading) m_preview->setFocus();
+    else m_editor->setFocus();
+}
 void NotePane::focusTitle() { m_title->setFocus(); }
 
 void NotePane::openLink(const QString &target, bool wiki) {
@@ -1274,11 +1429,15 @@ void NotePane::openLink(const QString &target, bool wiki) {
         emit openNote(id);
         if (!w.heading.isEmpty()) {
             const QString slug = md::slug(w.heading);
-            for (const md::Heading &h : md::outline(m_editor->markdown()))
-                if (md::slug(h.text) == slug) {
-                    m_editor->scrollToLine(h.line);
-                    break;
-                }
+            if (m_reading) {
+                m_preview->scrollToAnchor(slug);
+            } else {
+                for (const md::Heading &h : md::outline(m_editor->markdown()))
+                    if (md::slug(h.text) == slug) {
+                        m_editor->scrollToLine(h.line);
+                        break;
+                    }
+            }
         }
         return;
     }
@@ -1299,8 +1458,12 @@ void NotePane::openLink(const QString &target, bool wiki) {
     }
     if (target.startsWith(u'#')) {
         const QString slug = target.mid(1);
-        for (const md::Heading &h : md::outline(m_editor->markdown()))
-            if (md::slug(h.text) == slug) m_editor->scrollToLine(h.line);
+        if (m_reading) {
+            m_preview->scrollToAnchor(slug);
+        } else {
+            for (const md::Heading &h : md::outline(m_editor->markdown()))
+                if (md::slug(h.text) == slug) m_editor->scrollToLine(h.line);
+        }
     }
     // Anything else (javascript:, file:, …) is ignored on purpose.
 }
@@ -1388,6 +1551,12 @@ void NotePane::showMoreMenu() {
     QMenu menu(this);
     const QString id = m_id;
     menu.addAction(icons::themed("info"), T("笔记信息"), this, &NotePane::showInfo);
+    if (!m_locked) {
+        QAction *readAct = menu.addAction(icons::themed(m_reading ? "edit" : "book"), T("阅读模式"), this, &NotePane::toggleReading);
+        readAct->setCheckable(true);
+        readAct->setChecked(m_reading);
+        menu.addAction(icons::themed("diff"), T("对比差异 (Diff)"), this, [this, id] { emit diffRequested(id, m_conflictTargetId); });
+    }
     // The three editor modes are rarely switched, so they live here.
     QMenu *modes = menu.addMenu(icons::themed("eye"), T("编辑模式"));
     auto *modeGroup = new QActionGroup(modes);
@@ -1395,7 +1564,7 @@ void NotePane::showMoreMenu() {
     for (const auto &entry : entries) {
         QAction *a = modes->addAction(T(entry.label));
         a->setCheckable(true);
-        a->setChecked(m_mode == entry.mode);
+        a->setChecked(!m_reading && m_mode == entry.mode);
         modeGroup->addAction(a);
         connect(a, &QAction::triggered, this, [this, mode = entry.mode] {
             setEditorMode(mode);

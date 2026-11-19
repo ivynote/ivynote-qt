@@ -2,10 +2,14 @@
 // media library), their shared header, and the sync indicator in the status bar.
 #pragma once
 
+#include "core/tasks.h"
+
 #include <QPointer>
+#include <QSet>
 #include <QTimer>
 #include <QToolButton>
 #include <QWidget>
+#include <optional>
 
 class Session;
 class SyncEngine;
@@ -34,17 +38,33 @@ public:
     explicit AgendaPanel(QWidget *parent = nullptr);
     void setSession(Session *session);
     void refresh();
+    void setShowDone(bool show);
+    bool showDone() const { return m_showDone; }
 
 signals:
     void taskActivated(const QString &noteId, int line);
+    void taskToggled(const QString &noteId, int line, const QString &rawLine);
+    void taskDueChanged(const QString &noteId, int line, const QString &rawLine,
+                        const std::optional<tasks::Due> &due, const QString &repeat);
+    void badgeChanged(int count, bool hasOverdue);
 
 private:
+    void toggleBranch(const QString &key);
+    void showTaskMenu(const QPoint &pos);
+    void loadState();
+    void saveState() const;
+
     QPointer<Session> m_session;
     PanelHeader *m_header;
+    QToolButton *m_doneToggle;
+    QLabel *m_summary;
     QListWidget *m_list;
     QLabel *m_empty;
+    QLabel *m_encryptedHint;
     QStackedLayout *m_pages;
     QTimer m_refresh;
+    bool m_showDone = false;
+    QSet<QString> m_toggledBranches; // overrides Branch::openByDefault()
 };
 
 class MediaPanel : public QWidget {

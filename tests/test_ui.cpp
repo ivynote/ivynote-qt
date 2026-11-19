@@ -28,13 +28,19 @@
 #include <QTemporaryDir>
 #include <QTabBar>
 #include <QStackedWidget>
+#include "ui/diffdialog.h"
+#include "ui/panels.h"
 #include "ui/render.h"
+#include "ui/taskpicker.h"
 #include "ui/theme.h"
+#include "vault/session.h"
 
 #include <QApplication>
 #include <QClipboard>
+#include <QListWidget>
 #include <QMimeData>
 #include <QTextBlock>
+#include <QTextBrowser>
 #include <QtTest>
 
 namespace {
@@ -726,6 +732,196 @@ private slots:
         cancelBtn->click();
         QCoreApplication::processEvents();
         QVERIFY(!host.findChild<QObject *>(QStringLiteral("updateCheckSession"), Qt::FindDirectChildrenOnly));
+    }
+
+    void slashCommandMenuAndPinyin() {
+        MarkdownEditor editor;
+        editor.resize(700, 500);
+        editor.show();
+        editor.setMarkdown(QString());
+        QTest::keyClicks(&editor, QStringLiteral("/bg"));
+        QVERIFY(editor.inlinePopupVisible());
+        const QStringList ids = editor.inlinePopupItemIds();
+        QVERIFY(!ids.isEmpty());
+        QCOMPARE(ids.first(), QStringLiteral("table"));
+        QTest::keyClick(&editor, Qt::Key_Return);
+        QVERIFY(!editor.inlinePopupVisible());
+        QVERIFY(editor.markdown().contains(QStringLiteral("| ")));
+        QVERIFY(!editor.markdown().contains(QStringLiteral("/bg")));
+
+        // Suppressed inside fenced code blocks.
+        editor.setMarkdown(QStringLiteral("```md\n\n```"));
+        editor.setTextCursor(QTextCursor(editor.document()->findBlockByNumber(1)));
+        QTest::keyClicks(&editor, QStringLiteral("/bg"));
+        QVERIFY(!editor.inlinePopupVisible());
+
+        // showInsertMenu auto-inserts '/' and Escape reverts it.
+        editor.setMarkdown(QStringLiteral("hello"));
+        editor.moveCursor(QTextCursor::End);
+        editor.showInsertMenu();
+        QVERIFY(editor.inlinePopupVisible());
+        QTest::keyClick(&editor, Qt::Key_Escape);
+        QVERIFY(!editor.inlinePopupVisible());
+        QCOMPARE(editor.markdown(), QStringLiteral("hello"));
+    }
+
+    void atDateCompletionAndTaskRendering() {
+        MarkdownEditor editor;
+        editor.resize(700, 500);
+        editor.show();
+        editor.setMarkdown(QStringLiteral("- [ ] 周报 "));
+        editor.moveCursor(QTextCursor::End);
+        QInputMethodEvent ime;
+        ime.setCommitString(QStringLiteral("@明天 9点"));
+        QApplication::sendEvent(&editor, &ime);
+        QVERIFY(editor.inlinePopupVisible());
+        QTest::keyClick(&editor, Qt::Key_Return);
+        QVERIFY(!editor.inlinePopupVisible());
+        const QString expectedDate = QDate::currentDate().addDays(1).toString(Qt::ISODate);
+        QCOMPARE(editor.markdown(), QStringLiteral("- [ ] 周报 📅 %1 09:00").arg(expectedDate));
+
+        // Styled task chips in rendered HTML.
+        RenderOptions o;
+        o.forView = true;
+        const QString html = renderMarkdown(
+            QStringLiteral("- [ ] standup 📅 %1 09:00 🔁 every day\n- [x] done 📅 2026-01-01 ✅ 2026-01-01").arg(expectedDate), o);
+        QVERIFY(html.contains(QLatin1String("task-due")));
+        QVERIFY(html.contains(QLatin1String("task-repeat")));
+        QVERIFY(html.contains(QLatin1String("task-done")));
+    }
+
+    void readModeKeepsUndoAndSupportsFind() {
+        NotePane pane;
+        pane.resize(900, 650);
+        for (QWidget *child : pane.findChildren<QWidget *>(Qt::FindDirectChildrenOnly)) child->setEnabled(true);
+        pane.editor()->setReadOnly(false);
+        pane.editor()->setMarkdown(QStringLiteral("alpha Beta"));
+        pane.editor()->moveCursor(QTextCursor::End);
+        QTest::keyClicks(pane.editor(), QStringLiteral(" alpha"));
+        QVERIFY(pane.editor()->document()->isUndoAvailable());
+        pane.show();
+
+        QSignalSpy spy(&pane, &NotePane::readingChanged);
+        pane.setReading(true);
+        QVERIFY(pane.isReading());
+        QCOMPARE(spy.count(), 1);
+        QVERIFY(pane.preview()->isVisible());
+        QVERIFY(pane.editor()->isHidden());
+
+        // Find works in Read mode against MarkdownView without modifying source.
+        pane.showFind();
+        auto *input = pane.findChild<QLineEdit *>(QStringLiteral("noteFindText"));
+        QVERIFY(input);
+        input->setText(QStringLiteral("alpha"));
+        QCOMPARE(pane.preview()->textCursor().selectedText(), QStringLiteral("alpha"));
+        QCOMPARE(pane.preview()->extraSelections().size(), 2);
+
+        // Exiting Read mode restores editor with intact undo stack.
+        pane.setReading(false);
+        QVERIFY(!pane.isReading());
+        QVERIFY(pane.editor()->isVisible());
+        QVERIFY(pane.editor()->document()->isUndoAvailable());
+        pane.editor()->undo();
+        QCOMPARE(pane.editor()->markdown(), QStringLiteral("alpha Beta"));
+    }
+
+    void diffDialogCompareAndAppend() {
+        QTemporaryDir dir;
+        vaults::setDataRoot(dir.path());
+        VaultInfo info;
+        info.name = QStringLiteral("DiffTest");
+        info.kind = VaultInfo::Local;
+        QString msg;
+        QVERIFY(vaults::create(info, &msg));
+        Session::OpenError err = Session::OpenError::None;
+        std::unique_ptr<Session> session(Session::open(info, {}, &err, &msg));
+        QVERIFY(session != nullptr);
+
+        const Note base = session->engine()->createNote({.title = QStringLiteral("周报"), .body = QStringLiteral("line1\nold text\nline3")});
+        const Note copy = session->engine()->createNote({.title = QStringLiteral("周报 (冲突副本 2026-05-01)"), .body = QStringLiteral("line1\nnew text\nline3")});
+
+        NoteDiffDialog dlg(session.get(), base.id, QString());
+        dlg.show();
+        QCoreApplication::processEvents();
+        // Auto-picks the conflict counterpart and renders diff HTML.
+        auto *browser = dlg.findChild<QTextBrowser *>();
+        QVERIFY(browser && browser->isVisible());
+        const QString html = browser->toHtml();
+        QVERIFY(html.contains(QStringLiteral("old")));
+        QVERIFY(html.contains(QStringLiteral("new")));
+
+        // Append right content into base note.
+        QPushButton *appendBtn = nullptr;
+        for (QPushButton *b : dlg.findChildren<QPushButton *>()) {
+            if (b->text() == T("将右侧追加到当前")) {
+                appendBtn = b;
+                break;
+            }
+        }
+        QVERIFY(appendBtn && appendBtn->isEnabled());
+        appendBtn->click();
+        QCoreApplication::processEvents();
+        const Note *updated = session->engine()->note(base.id);
+        QVERIFY(updated);
+        QVERIFY(updated->body.contains(QStringLiteral("old text")));
+        QVERIFY(updated->body.contains(QStringLiteral("new text")));
+        Q_UNUSED(copy);
+        session->close();
+    }
+
+    void agendaPanelTreeToggleAndBadge() {
+        QTemporaryDir dir;
+        vaults::setDataRoot(dir.path());
+        VaultInfo info;
+        info.name = QStringLiteral("AgendaTest");
+        info.kind = VaultInfo::Local;
+        QString msg;
+        QVERIFY(vaults::create(info, &msg));
+        Session::OpenError err = Session::OpenError::None;
+        std::unique_ptr<Session> session(Session::open(info, {}, &err, &msg));
+        QVERIFY(session != nullptr);
+
+        const QString yesterday = QDate::currentDate().addDays(-1).toString(Qt::ISODate);
+        const QString today = QDate::currentDate().toString(Qt::ISODate);
+        const Note n = session->engine()->createNote({
+            .title = QStringLiteral("Tasks"),
+            .body = QStringLiteral("- [ ] overdue item 📅 %1\n- [ ] today item 📅 %2\n- [x] finished today 📅 %2 ✅ %2\n").arg(yesterday, today),
+        });
+        session->engine()->createNote({
+            .title = QStringLiteral("Locked"),
+            .body = QStringLiteral("```ivy-encrypted\nv: 1\n```"),
+        });
+
+        AgendaPanel panel;
+        panel.setShowDone(false);
+        panel.resize(320, 500);
+        panel.show();
+        QSignalSpy badgeSpy(&panel, &AgendaPanel::badgeChanged);
+        QSignalSpy toggleSpy(&panel, &AgendaPanel::taskToggled);
+
+        panel.setSession(session.get());
+        QVERIFY(badgeSpy.count() >= 1);
+        QCOMPARE(badgeSpy.last().at(0).toInt(), 2);     // 1 overdue + 1 today
+        QCOMPARE(badgeSpy.last().at(1).toBool(), true); // hasOverdue
+
+        auto *list = panel.findChild<QListWidget *>();
+        QVERIFY(list);
+        const int rowsBefore = list->count();
+        // Branches Overdue + Today are open by default: 2 headers + 2 open tasks = 4 rows.
+        QCOMPARE(rowsBefore, 4);
+
+        // Clicking the checkbox zone on the first task row (row 1) emits taskToggled.
+        const QRect itemRect = list->visualItemRect(list->item(1));
+        QTest::mousePress(list->viewport(), Qt::LeftButton, Qt::NoModifier, QPoint(itemRect.left() + 18, itemRect.center().y()));
+        QCOMPARE(toggleSpy.count(), 1);
+        QCOMPARE(toggleSpy.first().at(0).toString(), n.id);
+        QCOMPARE(toggleSpy.first().at(1).toInt(), 0);
+
+        // Enabling Show Done reveals the completed-today task (5 rows total).
+        panel.setShowDone(true);
+        QCOMPARE(list->count(), 5);
+        panel.setShowDone(false);
+        session->close();
     }
 };
 

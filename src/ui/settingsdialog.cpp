@@ -16,6 +16,7 @@
 
 #include <QCheckBox>
 #include <QComboBox>
+#include <QDateTime>
 #include <QDesktopServices>
 #include <QDialogButtonBox>
 #include <QFormLayout>
@@ -30,8 +31,10 @@
 #include <QSettings>
 #include <QSpinBox>
 #include <QTabWidget>
+#include <QTimer>
 #include <QUrl>
 #include <QVBoxLayout>
+#include <algorithm>
 
 // --- prefs ---
 
@@ -45,12 +48,16 @@ int Prefs::lang() const { return QSettings().value(QStringLiteral("ui/lang"), in
 int Prefs::fontSize() const { return std::clamp(QSettings().value(QStringLiteral("ui/fontSize"), 16).toInt(), 13, 22); }
 int Prefs::editorMode() const { return std::clamp(QSettings().value(QStringLiteral("ui/editorMode"), 0).toInt(), 0, 2); }
 bool Prefs::reduceMotion() const { return QSettings().value(QStringLiteral("ui/reduceMotion"), false).toBool(); }
+QString Prefs::defaultNoteFolder() const { return QSettings().value(QStringLiteral("ui/defaultNoteFolder"), QString()).toString(); }
+QString Prefs::defaultNoteTitle() const { return QSettings().value(QStringLiteral("ui/defaultNoteTitle"), QString()).toString(); }
 
 void Prefs::setTheme(int v) { QSettings().setValue(QStringLiteral("ui/theme"), v); emit changed(); }
 void Prefs::setLang(int v) { QSettings().setValue(QStringLiteral("ui/lang"), v); emit changed(); }
 void Prefs::setFontSize(int v) { QSettings().setValue(QStringLiteral("ui/fontSize"), std::clamp(v, 13, 22)); emit changed(); }
 void Prefs::setEditorMode(int v) { QSettings().setValue(QStringLiteral("ui/editorMode"), v); emit changed(); }
 void Prefs::setReduceMotion(bool v) { QSettings().setValue(QStringLiteral("ui/reduceMotion"), v); emit changed(); }
+void Prefs::setDefaultNoteFolder(const QString &v) { QSettings().setValue(QStringLiteral("ui/defaultNoteFolder"), v); emit changed(); }
+void Prefs::setDefaultNoteTitle(const QString &v) { QSettings().setValue(QStringLiteral("ui/defaultNoteTitle"), v); emit changed(); }
 
 namespace {
 
@@ -62,19 +69,39 @@ QLabel *note(const QString &text, QWidget *parent) {
 
 const char *kModes[] = {"live", "source", "split"};
 
-// Cross-device preferences: only these two keys, as the web client does.
+// Cross-device preferences, aligned with web/Tauri /me/prefs schema.
 void pushPrefs(Session *s) {
     if (!s || !s->isRemote() || !s->signedIn()) return;
+    Prefs *p = Prefs::instance();
     s->api()->putJson(QStringLiteral("/me/prefs"),
-                      QJsonObject{{"editorMode", QLatin1String(kModes[Prefs::instance()->editorMode()])}, {"fontSize", Prefs::instance()->fontSize()}},
+                      QJsonObject{{"editorMode", QLatin1String(kModes[p->editorMode()])},
+                                  {"fontSize", p->fontSize()},
+                                  {"defaultNoteFolder", p->defaultNoteFolder()},
+                                  {"defaultNoteTitle", p->defaultNoteTitle()}},
                       s, [](const ApiReply &) {});
+}
+
+void collectFolderOptions(const QHash<QString, Folder> &folders, const QString &parentId, int depth, QComboBox *box) {
+    QList<Folder> children;
+    for (const Folder &f : folders) {
+        if (!f.deleted && f.parentId == parentId) children << f;
+    }
+    std::sort(children.begin(), children.end(), [](const Folder &a, const Folder &b) {
+        const int cmp = a.name.compare(b.name, Qt::CaseInsensitive);
+        return cmp != 0 ? cmp < 0 : a.id < b.id;
+    });
+    const QString indent(depth, QChar(0x3000));
+    for (const Folder &f : children) {
+        box->addItem(indent + f.name, f.id);
+        collectFolderOptions(folders, f.id, depth + 1, box);
+    }
 }
 
 } // namespace
 
 SettingsDialog::SettingsDialog(Session *session, QWidget *parent) : QDialog(parent), m_session(session) {
     setWindowTitle(T("设置"));
-    setMinimumSize(560, 520);
+    setMinimumSize(580, 580);
     auto *col = new QVBoxLayout(this);
     m_tabs = new QTabWidget(this);
     m_tabs->addTab(generalTab(), T("通用"));
@@ -96,9 +123,11 @@ void SettingsDialog::showAboutTab() { m_tabs->setCurrentWidget(m_about); }
 
 QWidget *SettingsDialog::generalTab() {
     auto *w = new QWidget;
-    auto *form = new QFormLayout(w);
-    form->setContentsMargins(20, 20, 20, 20);
-    form->setVerticalSpacing(14);
+    auto *outer = new QVBoxLayout(w);
+    outer->setContentsMargins(20, 18, 20, 18);
+    outer->setSpacing(14);
+    auto *form = new QFormLayout;
+    form->setVerticalSpacing(12);
     Prefs *p = Prefs::instance();
 
     auto *theme = new QComboBox(w);
@@ -142,7 +171,78 @@ QWidget *SettingsDialog::generalTab() {
     motion->setChecked(p->reduceMotion());
     connect(motion, &QCheckBox::toggled, p, &Prefs::setReduceMotion);
     form->addRow(QString(), motion);
-    if (m_session && m_session->isRemote()) form->addRow(QString(), note(T("字号和编辑模式会同步到这个账户的其他设备。"), w));
+    outer->addLayout(form);
+
+    // Default New Note folder & title template.
+    auto *tplGroup = new QGroupBox(T("新建笔记默认设置"), w);
+    auto *tplForm = new QFormLayout(tplGroup);
+    tplForm->setVerticalSpacing(10);
+
+    auto *folderBox = new QComboBox(tplGroup);
+    folderBox->setObjectName(QStringLiteral("defaultNoteFolderBox"));
+    folderBox->addItem(T("跟随当前位置"), QString());
+    folderBox->addItem(T("未归档"), QStringLiteral("__inbox__"));
+    if (m_session && m_session->engine()) {
+        collectFolderOptions(m_session->engine()->folders(), QString(), 0, folderBox);
+    }
+    const int folderIdx = folderBox->findData(p->defaultNoteFolder());
+    folderBox->setCurrentIndex(folderIdx >= 0 ? folderIdx : 0);
+    connect(folderBox, &QComboBox::currentIndexChanged, this, [this, p, folderBox](int idx) {
+        p->setDefaultNoteFolder(folderBox->itemData(idx).toString());
+        pushPrefs(m_session);
+    });
+    tplForm->addRow(T("默认文件夹"), folderBox);
+
+    auto *tplEdit = new QLineEdit(p->defaultNoteTitle(), tplGroup);
+    tplEdit->setObjectName(QStringLiteral("defaultNoteTitleEdit"));
+    tplEdit->setFont(Theme::mono(13));
+    tplEdit->setMaxLength(200);
+    tplEdit->setPlaceholderText(T("留空则新建空白标题，支持 YYYY-MM-DD HH:mm 等"));
+    tplForm->addRow(T("默认标题模板"), tplEdit);
+
+    auto *presetsRow = new QHBoxLayout;
+    presetsRow->setSpacing(6);
+    const QList<QPair<QString, QString>> presets{
+        {QStringLiteral("YYYY-MM-DD"), QStringLiteral("YYYY-MM-DD")},
+        {QStringLiteral("YYYY-MM-DD HH:mm"), QStringLiteral("YYYY-MM-DD HH:mm")},
+        {QStringLiteral("YYYY-MM-DD-随记"), QStringLiteral("YYYY-MM-DD-随记")},
+        {QStringLiteral("YYYY年MM月DD日 ddd"), QStringLiteral("YYYY年MM月DD日 ddd")},
+        {T("清空"), QString()},
+    };
+    for (const auto &[label, val] : presets) {
+        auto *btn = new QPushButton(label, tplGroup);
+        btn->setFlat(false);
+        btn->setFont(Theme::uiFont(11.5));
+        connect(btn, &QPushButton::clicked, tplEdit, [tplEdit, val] { tplEdit->setText(val); });
+        presetsRow->addWidget(btn);
+    }
+    presetsRow->addStretch(1);
+    tplForm->addRow(QString(), presetsRow);
+
+    auto *preview = mutedLabel(QString(), tplGroup, 12.5);
+    preview->setObjectName(QStringLiteral("defaultNoteTitlePreview"));
+    auto updatePreview = [preview](const QString &tpl) {
+        const QString formatted = fmt::formatNoteTitle(tpl, QDateTime::currentDateTime(), i18n::isZh());
+        preview->setText(formatted.isEmpty() ? T("预览：无标题（空白）") : T("预览：") + formatted);
+    };
+    updatePreview(tplEdit->text());
+    tplForm->addRow(QString(), preview);
+    tplForm->addRow(QString(), note(T("可用占位符：YYYY（年）、YY（短年）、MM（月）、DD（日）、HH（时）、mm（分）、ss（秒）、ddd（星期）。"), tplGroup));
+
+    auto *pushTimer = new QTimer(this);
+    pushTimer->setSingleShot(true);
+    pushTimer->setInterval(400);
+    connect(pushTimer, &QTimer::timeout, this, [this] { pushPrefs(m_session); });
+    connect(tplEdit, &QLineEdit::textChanged, this, [p, updatePreview, pushTimer](const QString &text) {
+        p->setDefaultNoteTitle(text);
+        updatePreview(text);
+        pushTimer->start();
+    });
+    outer->addWidget(tplGroup);
+
+    if (m_session && m_session->isRemote())
+        outer->addWidget(note(T("字号、编辑模式与新建笔记模板会同步到这个账户的其他设备。"), w));
+    outer->addStretch(1);
     return w;
 }
 

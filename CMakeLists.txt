@@ -40,6 +40,9 @@ add_library(ivycore STATIC
     src/core/i18n.cpp
     src/core/format.cpp
     src/core/notelock.cpp
+    src/core/tasks.cpp
+    src/core/diff.cpp
+    src/core/insertitems.cpp
     src/core/agenda.cpp
     src/storage/crypto.cpp
     src/storage/secrets.cpp
@@ -76,6 +79,8 @@ add_library(ivyui STATIC
     src/ui/notepane.cpp
     src/ui/palette.cpp
     src/ui/dialogs.cpp
+    src/ui/diffdialog.cpp
+    src/ui/taskpicker.cpp
     src/ui/vaultdialog.cpp
     src/ui/officialsites.cpp
     src/ui/serverpanels.cpp

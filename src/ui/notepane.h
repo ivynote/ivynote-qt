@@ -17,6 +17,7 @@ class QLabel;
 class QLineEdit;
 class QListWidget;
 class QSplitter;
+class QTextEdit;
 class MarkdownView;
 class QToolButton;
 class QHBoxLayout;
@@ -36,12 +37,16 @@ public:
     void setNote(const QString &id);
     QString noteId() const { return m_id; }
     void flush(); // hands unsaved text to the engine
+    void syncBodyFromEngine();
     void focusEditor();
     void focusTitle();
     void showFind();
     void showReplace();
     void setEditorMode(EditorMode mode);
     EditorMode editorMode() const { return m_mode; }
+    void setReading(bool reading);
+    void toggleReading() { setReading(!m_reading); }
+    bool isReading() const { return m_reading; }
     void setFontSize(int px);
     void toggleOutline();
     void insertFiles(const QStringList &paths);
@@ -49,6 +54,7 @@ public:
     void pickTags();
     void showInfo();
     MarkdownEditor *editor() const { return m_editor; }
+    MarkdownView *preview() const { return m_preview; }
     bool isLocked() const { return m_locked; }       // protected and not unlocked
     bool isProtected() const { return m_locked || m_sealed; }
     void lockNow() { relock(); }
@@ -58,7 +64,9 @@ signals:
     void moveRequested(const QString &id);
     void historyRequested(const QString &id);
     void shareRequested(const QString &id);
+    void diffRequested(const QString &noteId, const QString &otherId = QString());
     void editorModeChanged(EditorMode mode);
+    void readingChanged(bool reading);
     void duplicateRequested(const QString &id);
 
 protected:
@@ -66,6 +74,8 @@ protected:
 
 private:
     void placeTopBar();
+    void applyViewState();
+    QTextEdit *activeTextView() const;
     void refresh();          // meta, breadcrumb, banner from the engine
     void refreshIndex();     // titles for links and completion; backlinks
     void refreshPreview();
@@ -98,7 +108,9 @@ private:
     QPointer<Session> m_session;
     SyncEngine *m_engine = nullptr;
     QString m_id;
+    QString m_conflictTargetId;
     EditorMode m_mode = EditorMode::Live;
+    bool m_reading = false;
     bool m_outlineOpen = false;
     bool m_bodyDirty = false;
     bool m_titleDirty = false;
@@ -114,8 +126,10 @@ private:
     QWidget *m_topBar;
     QLabel *m_pendingDot;
     QLabel *m_savedLabel;
-    IconButton *m_shareButton, *m_outlineButton, *m_moreButton;
+    IconButton *m_insertButton, *m_dueButton, *m_readButton, *m_diffButton, *m_shareButton, *m_outlineButton, *m_moreButton;
     QWidget *m_banner;
+    QWidget *m_conflictBanner;
+    QLabel *m_conflictLabel;
     QWidget *m_headHost;
     QWidget *m_head;
     QWidget *m_body;
