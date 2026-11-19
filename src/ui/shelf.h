@@ -142,10 +142,7 @@ signals:
     void newNote(const QString &folderId);
     void moveNotes(const QStringList &ids);
     void searchRequested();
-    void collapseRequested();
     void vaultMenuRequested(const QPoint &global);
-    void settingsRequested();
-    void syncStatusClicked();
     void emptyTrashRequested();
 
 private:
@@ -159,7 +156,6 @@ private:
     void batchMenu(const QStringList &ids, bool trash, const QPoint &global);
     void renameRow(int row);
     void newFolder(const QString &parentId);
-    void updateStatus();
     void updateHeader();
     void saveState();
     void loadState();
@@ -169,14 +165,11 @@ private:
     ShelfModel *m_model;
     ShelfView *m_view;
     QToolButton *m_vaultButton;
-    IconButton *m_searchButton, *m_newButton, *m_collapseButton, *m_settingsButton;
-    QLabel *m_statusDot;
-    class QPushButton *m_status;
+    IconButton *m_searchButton, *m_newButton;
     QSet<QString> m_expanded;
     QHash<QString, int> m_limits;
     SortBy m_sort = SortBy::Updated;
     QString m_current;
     QTimer m_rebuildTimer;
-    QTimer m_clock;
     QVariantAnimation m_motion;
 };

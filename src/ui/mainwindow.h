@@ -7,12 +7,17 @@
 
 class Session;
 class Shelf;
+class AgendaPanel;
+class MediaPanel;
+class SyncIndicator;
 class NotePane;
 class Divider;
 class QStackedWidget;
 class QAction;
 class QActionGroup;
 class QMenu;
+class QTabBar;
+class QToolBar;
 
 class MainWindow : public QMainWindow {
     Q_OBJECT
@@ -54,12 +59,25 @@ private:
     void runJob(class TransferJob *job, const QString &title);
     void syncPrefsFromServer();
     void updateTitle();
+    enum Page { NotesPage, AgendaPage, MediaPage };
+    void showPage(Page page, bool focus = true);
+    void syncRail();
+    void openTask(const QString &noteId, int line);
+    void refreshNoteTabs();
 
     QPointer<Session> m_session;
     Divider *m_split;
+    QStackedWidget *m_side;
     Shelf *m_shelf;
+    AgendaPanel *m_agenda;
+    MediaPanel *m_media;
+    SyncIndicator *m_sync;
+    QToolBar *m_rail = nullptr;
+    QList<QAction *> m_railPages;
+    Page m_page = NotesPage;
     QStackedWidget *m_stack;
     NotePane *m_pane;
+    QTabBar *m_tabs;
     QWidget *m_empty;
     QString m_draftId; // a note made with "new note"; dropped if left empty
     bool m_shelfCollapsed = false;

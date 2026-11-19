@@ -1,6 +1,10 @@
 #include "ui/mainwindow.h"
 
 #include "core/i18n.h"
+#include "core/agenda.h"
+#include <QDateTimeEdit>
+#include <QDialogButtonBox>
+#include <QTextBlock>
 #include "core/models.h"
 #include "sync/api.h"
 #include "sync/engine.h"
@@ -10,7 +14,10 @@
 #include "ui/icons.h"
 #include "ui/notepane.h"
 #include "ui/palette.h"
+#include "ui/panels.h"
 #include "ui/settingsdialog.h"
+#include "ui/serverpanels.h"
+#include "ui/updater.h"
 #include "ui/shelf.h"
 #include "ui/theme.h"
 #include "ui/toast.h"
@@ -28,6 +35,10 @@
 #include <QInputDialog>
 #include <QJsonObject>
 #include <QLabel>
+#include <QListWidget>
+#include <QSignalBlocker>
+#include <QTabBar>
+#include <QToolBar>
 #include <QMenuBar>
 #include <QMessageBox>
 #include <QProgressDialog>
@@ -43,6 +54,7 @@
 #include <QShortcut>
 #include <QSplitter>
 #include <QStackedWidget>
+#include <QStatusBar>
 #include <QVBoxLayout>
 
 namespace {
@@ -103,7 +115,15 @@ MainWindow::MainWindow() {
 
     m_split = new Divider(Qt::Horizontal, this);
     m_split->setChildrenCollapsible(false);
-    m_shelf = new Shelf(m_split);
+    // The sidebar holds one of three pages, chosen on the rail at the left edge.
+    m_side = new QStackedWidget(m_split);
+    m_side->setMinimumWidth(220);
+    m_shelf = new Shelf(m_side);
+    m_agenda = new AgendaPanel(m_side);
+    m_media = new MediaPanel(m_side);
+    m_side->addWidget(m_shelf);
+    m_side->addWidget(m_agenda);
+    m_side->addWidget(m_media);
     auto *paper = new Paper(m_split);
     auto *paperCol = new QVBoxLayout(paper);
     paperCol->setContentsMargins(0, 0, 0, 0);
@@ -112,32 +132,53 @@ MainWindow::MainWindow() {
     m_empty = emptyState(m_stack);
     m_stack->addWidget(m_empty);
     m_stack->addWidget(m_pane);
+    m_tabs = new QTabBar(paper);
+    m_tabs->setDocumentMode(true);
+    m_tabs->setMovable(true);
+    m_tabs->setExpanding(false);
+    m_tabs->setTabsClosable(true);
+    m_tabs->setDrawBase(false);
+    m_tabs->setElideMode(Qt::ElideRight);
+    m_tabs->hide();
+    paperCol->addWidget(m_tabs);
     paperCol->addWidget(m_stack);
-    m_split->addWidget(m_shelf);
+    connect(m_tabs, &QTabBar::currentChanged, this, [this](int index) {
+        openNote(m_tabs->tabData(index).toString());
+    });
+    connect(m_tabs, &QTabBar::tabCloseRequested, this, [this](int index) {
+        const bool active = m_tabs->currentIndex() == index;
+        const QSignalBlocker blocker(m_tabs);
+        m_tabs->removeTab(index);
+        m_tabs->setVisible(m_tabs->count() > 1);
+        if (active) openNote(m_tabs->tabData(m_tabs->currentIndex()).toString());
+    });
+    m_split->addWidget(m_side);
     m_split->addWidget(paper);
     m_split->setStretchFactor(1, 1);
     m_split->setSizes({296, 880});
     setCentralWidget(m_split);
     Toaster::install(this);
 
-    connect(m_shelf, &Shelf::openNote, this, &MainWindow::openNote);
-    connect(m_shelf, &Shelf::newNote, this, &MainWindow::newNote);
-    connect(m_shelf, &Shelf::moveNotes, this, &MainWindow::moveNotes);
-    connect(m_shelf, &Shelf::searchRequested, this, [this] { showSearch(); });
-    connect(m_shelf, &Shelf::collapseRequested, this, &MainWindow::toggleShelf);
-    connect(m_shelf, &Shelf::vaultMenuRequested, this, &MainWindow::showVaultMenu);
-    connect(m_shelf, &Shelf::settingsRequested, this, [this] { showSettings(); });
-    connect(m_shelf, &Shelf::emptyTrashRequested, this, &MainWindow::emptyTrash);
-    connect(m_shelf, &Shelf::syncStatusClicked, this, [this] {
+    statusBar()->setSizeGripEnabled(false);
+    m_sync = new SyncIndicator(this);
+    statusBar()->addWidget(m_sync);
+    connect(m_sync, &QToolButton::clicked, this, [this] {
         if (!m_session || !m_session->isRemote()) return;
         if (!m_session->signedIn() || m_session->engine()->paused()) return signIn();
         m_session->wake();
     });
+    connect(m_agenda, &AgendaPanel::taskActivated, this, &MainWindow::openTask);
+
+    connect(m_shelf, &Shelf::openNote, this, &MainWindow::openNote);
+    connect(m_shelf, &Shelf::newNote, this, &MainWindow::newNote);
+    connect(m_shelf, &Shelf::moveNotes, this, &MainWindow::moveNotes);
+    connect(m_shelf, &Shelf::searchRequested, this, [this] { showSearch(); });
+    connect(m_shelf, &Shelf::vaultMenuRequested, this, &MainWindow::showVaultMenu);
+    connect(m_shelf, &Shelf::emptyTrashRequested, this, &MainWindow::emptyTrash);
     connect(m_pane, &NotePane::openNote, this, &MainWindow::openNote);
     connect(m_pane, &NotePane::moveRequested, this, &MainWindow::moveNote);
     connect(m_pane, &NotePane::duplicateRequested, this, &MainWindow::duplicateNote);
-    connect(m_pane, &NotePane::expandShelfRequested, this, &MainWindow::toggleShelf);
-    connect(m_pane, &NotePane::revealFolder, this, [this](const QString &) { m_shelf->focusTree(); });
+    connect(m_pane, &NotePane::revealFolder, this, [this](const QString &) { showPage(NotesPage); });
     connect(m_pane, &NotePane::historyRequested, this, [this](const QString &id) {
         if (!m_session) return;
         m_pane->flush();
@@ -146,6 +187,10 @@ MainWindow::MainWindow() {
     });
     connect(m_pane, &NotePane::shareRequested, this, [this](const QString &id) {
         if (!m_session || !m_session->isRemote()) return;
+        if (const Note *n = m_session->engine()->note(id); n && notelock::isEncrypted(n->body)) {
+            Toaster::show(T("加密的笔记不能公开分享。"), true);
+            return;
+        }
         m_pane->flush();
         m_session->engine()->sync();
         ShareDialog dlg(m_session, id, this);
@@ -171,12 +216,17 @@ MainWindow::MainWindow() {
     restoreGeometry(s.value(QStringLiteral("window/geometry")).toByteArray());
     const QList<int> sizes = {s.value(QStringLiteral("window/shelf"), 296).toInt(), 900};
     m_split->setSizes(sizes);
+    showPage(Page(std::clamp(s.value(QStringLiteral("window/page"), 0).toInt(), 0, 2)), false);
     if (s.value(QStringLiteral("window/shelfCollapsed"), false).toBool()) toggleShelf();
 }
 
 MainWindow::~MainWindow() { closeVault(); }
 
 void MainWindow::start() {
+    QTimer::singleShot(1500, this, [this] { updater::check(this, false); });
+    auto *updates = new QTimer(this);
+    connect(updates, &QTimer::timeout, this, [this] { updater::check(this, false); });
+    updates->start(6 * 60 * 60 * 1000);
     QString id = vaults::lastOpened();
     if (vaults::find(id).id.isEmpty()) id = vaults::list().isEmpty() ? QString() : vaults::list().first().id;
     if (id.isEmpty()) {
@@ -226,6 +276,9 @@ bool MainWindow::openVault(const QString &id) {
     m_session = s;
     vaults::setLastOpened(id);
     m_shelf->setSession(s);
+    m_agenda->setSession(s);
+    m_media->setSession(s);
+    m_sync->setSession(s);
     m_pane->setSession(s);
     m_pane->setEditorMode(EditorMode(Prefs::instance()->editorMode()));
     m_pane->setFontSize(Prefs::instance()->fontSize());
@@ -248,6 +301,27 @@ bool MainWindow::openVault(const QString &id) {
     connect(s, &Session::userChanged, this, &MainWindow::updateTitle);
     if (s->unreadableRecords() > 0)
         Toaster::show(T("有部分本机记录无法读取，已跳过"), true);
+    connect(s->engine(), &SyncEngine::dataChanged, this, [this] {
+        refreshNoteTabs();
+        const auto id = m_pane->noteId();
+        const auto *note = m_session->engine()->note(id);
+        if (!id.isEmpty() && (!note || note->deleted))
+            openNote(m_tabs->tabData(m_tabs->currentIndex()).toString());
+    });
+    auto *reminders = new QTimer(s);
+    connect(reminders, &QTimer::timeout, s, [this, s, previous = QDateTime::currentDateTime()]() mutable {
+        if (m_session != s) return;
+        const auto now = QDateTime::currentDateTime();
+        const auto from = previous;
+        previous = now;
+        for (const auto &task : agendaTasks(s->engine()->notes())) {
+            if (task.due <= from || task.due > now) continue;
+            Toaster::show(task.title + QStringLiteral(" · ") + task.text, false, T("查看"), [this, vault = s->info().id, id = task.noteId] {
+                if (m_session && m_session->info().id == vault) openNote(id);
+            });
+        }
+    });
+    reminders->start(30000);
     s->start();
     syncPrefsFromServer();
     rebuildVaultMenu();
@@ -273,7 +347,15 @@ void MainWindow::closeVault() {
     m_pane->flush();
     dropEmptyDraft(QString());
     m_shelf->setSession(nullptr);
+    m_agenda->setSession(nullptr);
+    m_media->setSession(nullptr);
+    m_sync->setSession(nullptr);
     m_pane->setSession(nullptr);
+    {
+        const QSignalBlocker blocker(m_tabs);
+        while (m_tabs->count()) m_tabs->removeTab(0);
+        m_tabs->hide();
+    }
     Session *s = m_session;
     m_session = nullptr;
     s->close();
@@ -324,8 +406,20 @@ void MainWindow::buildMenus() {
     m_vaultMenu = file->addMenu(T("切换笔记库"));
     file->addAction(T("新建或接入笔记库…"), this, [this] { addVault(); });
     file->addSeparator();
-    file->addAction(T("导入 Markdown…"), this, &MainWindow::importMarkdown);
-    file->addAction(T("从其他笔记库导入…"), this, &MainWindow::importVault);
+    QMenu *import = file->addMenu(T("导入"));
+    const auto addImport = [this, import](const QString &label, transfer::MarkdownSource source) {
+        import->addAction(label, this, [this, label, source] {
+            if (!m_session) return;
+            const QString folder = QFileDialog::getExistingDirectory(this, label);
+            if (folder.isEmpty()) return;
+            runJob(transfer::importMarkdown(m_session, {folder}, QString(), this, source), T("正在导入…"));
+        });
+    };
+    import->addAction(T("导入 Markdown…"), this, &MainWindow::importMarkdown);
+    addImport(T("导入 Joplin Markdown 文件夹…"), transfer::MarkdownSource::Joplin);
+    addImport(T("导入 Obsidian 笔记库…"), transfer::MarkdownSource::Obsidian);
+    import->addSeparator();
+    import->addAction(T("从其他笔记库导入…"), this, &MainWindow::importVault);
     file->addAction(T("导出为 Markdown…"), this, &MainWindow::exportMarkdown);
     file->addSeparator();
     file->addAction(T("设置…"), QKeySequence(QStringLiteral("Ctrl+,")), this, [this] { showSettings(); });
@@ -382,7 +476,6 @@ void MainWindow::buildMenus() {
         });
     }
     view->addSeparator();
-    view->addAction(T("收起书架"), QKeySequence(QStringLiteral("Ctrl+\\")), this, &MainWindow::toggleShelf);
     QAction *outline = view->addAction(T("大纲"), this, [this] { m_pane->toggleOutline(); });
     m_noteActions << outline;
     view->addSeparator();
@@ -430,13 +523,107 @@ void MainWindow::buildMenus() {
         m_session->engine()->updateNote(id, p);
     });
     note->addSeparator();
-    QAction *syncNow = note->addAction(T("立即同步"), this, [this] {
+    m_noteActions << note->addAction(T("插入定时任务"), this, [this] {
+        if (!m_session || m_pane->noteId().isEmpty() || m_pane->editor()->isReadOnly()) return;
+        QDialog dialog(this);
+        dialog.setWindowTitle(T("插入定时任务"));
+        QVBoxLayout layout(&dialog);
+        QLineEdit task;
+        QDateTimeEdit due(QDateTime::currentDateTime().addSecs(3600));
+        due.setCalendarPopup(true);
+        due.setDisplayFormat(QStringLiteral("yyyy-MM-dd HH:mm"));
+        QDialogButtonBox buttons(QDialogButtonBox::Ok | QDialogButtonBox::Cancel);
+        layout.addWidget(&task);
+        layout.addWidget(&due);
+        layout.addWidget(&buttons);
+        connect(&buttons, &QDialogButtonBox::accepted, &dialog, &QDialog::accept);
+        connect(&buttons, &QDialogButtonBox::rejected, &dialog, &QDialog::reject);
+        if (dialog.exec() == QDialog::Accepted && !task.text().trimmed().isEmpty() && !m_pane->editor()->isReadOnly()) {
+            auto cursor = m_pane->editor()->textCursor();
+            cursor.movePosition(QTextCursor::EndOfBlock);
+            if (!cursor.block().text().isEmpty()) cursor.insertBlock();
+            cursor.insertText(QStringLiteral("- [ ] %1 📅 %2").arg(task.text().trimmed(), due.dateTime().toString(QStringLiteral("yyyy-MM-dd HH:mm"))));
+            m_pane->editor()->setTextCursor(cursor);
+        }
+    });
+
+    // The rail at the left edge: where you are, not what you can do. Actions
+    // live in the menus; clicking the page you are on folds the sidebar.
+    m_rail = new QToolBar(T("导航栏"), this);
+    m_rail->setObjectName(QStringLiteral("navigationDock"));
+    m_rail->setOrientation(Qt::Vertical);
+    m_rail->setMovable(false);
+    m_rail->setFloatable(false);
+    m_rail->setToolButtonStyle(Qt::ToolButtonIconOnly);
+    m_rail->setIconSize(QSize(20, 20));
+    m_rail->setContextMenuPolicy(Qt::PreventContextMenu);
+    addToolBar(Qt::LeftToolBarArea, m_rail);
+    const struct { const char *icon; const char *label; Page page; } pages[] = {
+        {"note", "笔记", NotesPage}, {"calendar", "日程", AgendaPage}, {"image", "媒体库", MediaPage}};
+    int number = 1;
+    for (const auto &entry : pages) {
+        auto *a = m_rail->addAction(T(entry.label));
+        a->setCheckable(true);
+        a->setShortcut(QKeySequence(QStringLiteral("Ctrl+%1").arg(number)));
+        a->setToolTip(T(entry.label) + QStringLiteral(" (Ctrl+%1)").arg(number++));
+        a->setData(QString::fromLatin1(entry.icon));
+        connect(a, &QAction::triggered, this, [this, page = entry.page] {
+            if (!m_shelfCollapsed && m_page == page) toggleShelf();
+            else showPage(page, false);
+        });
+        m_railPages << a;
+        view->insertAction(outline, a);
+    }
+    view->insertSeparator(outline);
+    QAction *fold = new QAction(T("收起书架"), view);
+    fold->setShortcut(QKeySequence(QStringLiteral("Ctrl+\\")));
+    connect(fold, &QAction::triggered, this, &MainWindow::toggleShelf);
+    view->insertAction(outline, fold);
+    auto *spacer = new QWidget(m_rail);
+    spacer->setSizePolicy(QSizePolicy::Preferred, QSizePolicy::Expanding);
+    m_rail->addWidget(spacer);
+    QAction *settings = m_rail->addAction(T("设置"), this, [this] { showSettings(); });
+    settings->setToolTip(T("设置") + QStringLiteral(" (Ctrl+,)"));
+    settings->setData(QStringLiteral("settings"));
+    const auto railIcons = [this, settings] {
+        const Tokens &k = Theme::t();
+        for (QAction *a : m_railPages + QList<QAction *>{settings}) {
+            const QString name = a->data().toString();
+            QIcon icon;
+            for (int size : {16, 20, 24, 32}) {
+                const qreal dpr = devicePixelRatioF();
+                icon.addPixmap(icons::pixmap(name, k.muted, size, dpr), QIcon::Normal, QIcon::Off);
+                icon.addPixmap(icons::pixmap(name, k.ink, size, dpr), QIcon::Active, QIcon::Off);
+                icon.addPixmap(icons::pixmap(name, k.ivy, size, dpr), QIcon::Normal, QIcon::On);
+                icon.addPixmap(icons::pixmap(name, k.ivy, size, dpr), QIcon::Active, QIcon::On);
+            }
+            a->setIcon(icon);
+        }
+    };
+    railIcons();
+    connect(Theme::instance(), &Theme::changed, this, railIcons);
+
+    // Everything that needs a server account.
+    QMenu *server = bar->addMenu(T("服务器(&S)"));
+    m_remoteActions << server->menuAction();
+    QAction *syncNow = server->addAction(T("立即同步"), this, [this] {
         if (m_session) m_session->wake();
     });
     syncNow->setShortcut(QKeySequence(QStringLiteral("Ctrl+R")));
     m_remoteActions << syncNow;
+    server->addSeparator();
+    const auto remotePanel = [this, server](const QString &name, void (*open)(QWidget *, Session *)) {
+        server->addAction(name, this, [this, open] {
+            if (!m_session || !m_session->isRemote()) return;
+            if (!m_session->signedIn()) signIn();
+            if (m_session && m_session->signedIn()) open(this, m_session);
+        });
+    };
+    remotePanel(T("日历订阅"), serverpanels::calendar);
+    remotePanel(T("发布到博客"), serverpanels::publish);
 
     QMenu *help = bar->addMenu(T("帮助(&H)"));
+    help->addAction(T("检查更新"), this, [this] { updater::check(this, true); });
     help->addAction(T("关于常青笔记"), this, [this] { showSettings(AboutPage); });
 }
 
@@ -505,7 +692,8 @@ void MainWindow::signIn() {
 
 void MainWindow::openNote(const QString &id) {
     if (!m_session) return;
-    const bool has = !id.isEmpty() && m_session->engine()->note(id);
+    const Note *note = m_session->engine()->note(id);
+    const bool has = note && !note->deleted;
     if (m_pane->noteId() != id || !has) m_pane->setNote(has ? id : QString());
     QWidget *page = has ? static_cast<QWidget *>(m_pane) : m_empty;
     if (m_stack->currentWidget() != page) {
@@ -516,7 +704,62 @@ void MainWindow::openNote(const QString &id) {
     dropEmptyDraft(has ? id : QString());
     m_shelf->setCurrentNote(has ? id : QString());
     for (QAction *a : std::as_const(m_noteActions)) a->setEnabled(has);
-    if (has) QSettings().setValue(noteKey(m_session), id);
+    if (has) {
+        const QSignalBlocker blocker(m_tabs);
+        int index = 0;
+        while (index < m_tabs->count() && m_tabs->tabData(index).toString() != id) ++index;
+        if (index == m_tabs->count()) {
+            index = m_tabs->addTab(QString());
+            m_tabs->setTabData(index, id);
+        }
+        m_tabs->setCurrentIndex(index);
+        QSettings().setValue(noteKey(m_session), id);
+    }
+    refreshNoteTabs();
+}
+
+void MainWindow::refreshNoteTabs() {
+    if (!m_session) return;
+    const QSignalBlocker blocker(m_tabs);
+    for (int index = m_tabs->count() - 1; index >= 0; --index) {
+        const auto *note = m_session->engine()->note(m_tabs->tabData(index).toString());
+        if (!note || note->deleted) {
+            m_tabs->removeTab(index);
+            continue;
+        }
+        const QString title = note->title.trimmed().isEmpty() ? T("无标题") : note->title;
+        QString label = title;
+        m_tabs->setTabText(index, label.replace(u'&', QStringLiteral("&&")));
+        m_tabs->setTabToolTip(index, title);
+    }
+    m_tabs->setVisible(m_tabs->count() > 1);
+}
+
+void MainWindow::openTask(const QString &noteId, int line) {
+    if (!m_session) return;
+    m_pane->flush();
+    openNote(noteId);
+    const auto block = m_pane->editor()->document()->findBlockByNumber(line);
+    if (block.isValid()) {
+        m_pane->editor()->setTextCursor(QTextCursor(block));
+        m_pane->focusEditor();
+    }
+}
+
+// --- sidebar ---
+
+void MainWindow::showPage(Page page, bool focus) {
+    m_page = page;
+    m_side->setCurrentIndex(int(page));
+    QSettings().setValue(QStringLiteral("window/page"), int(page));
+    if (m_shelfCollapsed) toggleShelf();
+    else syncRail();
+    if (focus && page == NotesPage) m_shelf->focusTree();
+}
+
+void MainWindow::syncRail() {
+    for (int i = 0; i < m_railPages.size(); ++i)
+        m_railPages[i]->setChecked(!m_shelfCollapsed && m_page == Page(i));
 }
 
 void MainWindow::dropEmptyDraft(const QString &next) {
@@ -601,6 +844,8 @@ void MainWindow::showSearch(const QString &initial) {
              if (ok && !name.isEmpty() && m_session) m_session->engine()->createFolder(name.left(100));
          }},
         {T("收起或展开书架"), QStringLiteral("Ctrl+\\"), QStringLiteral("sidebar"), [this] { toggleShelf(); }},
+        {T("日程"), QStringLiteral("Ctrl+2"), QStringLiteral("calendar"), [this] { showPage(AgendaPage, false); }},
+        {T("媒体库"), QStringLiteral("Ctrl+3"), QStringLiteral("image"), [this] { showPage(MediaPage, false); }},
         {T("即时渲染"), QString(), QStringLiteral("eye"), [] { Prefs::instance()->setEditorMode(0); }},
         {T("源码"), QString(), QStringLiteral("code"), [] { Prefs::instance()->setEditorMode(1); }},
         {T("双栏"), QString(), QStringLiteral("split"), [] { Prefs::instance()->setEditorMode(2); }},
@@ -648,32 +893,32 @@ void MainWindow::showSettings(SettingsPage page) {
 void MainWindow::toggleShelf() {
     m_shelfCollapsed = !m_shelfCollapsed;
     QSettings().setValue(QStringLiteral("window/shelfCollapsed"), m_shelfCollapsed);
-    m_pane->setShelfCollapsed(m_shelfCollapsed);
+    syncRail();
     if (Theme::reducedMotion()) {
-        m_shelf->setVisible(!m_shelfCollapsed);
+        m_side->setVisible(!m_shelfCollapsed);
         return;
     }
     const int width = std::max(220, QSettings().value(QStringLiteral("window/shelf"), 296).toInt());
     if (!m_shelfCollapsed) {
-        m_shelf->setMaximumWidth(0);
-        m_shelf->show();
+        m_side->setMaximumWidth(0);
+        m_side->show();
     }
-    auto *a = new QPropertyAnimation(m_shelf, "maximumWidth", this);
+    auto *a = new QPropertyAnimation(m_side, "maximumWidth", this);
     a->setDuration(220);
     a->setEasingCurve(Theme::easeOut());
-    a->setStartValue(m_shelfCollapsed ? m_shelf->width() : 0);
+    a->setStartValue(m_shelfCollapsed ? m_side->width() : 0);
     a->setEndValue(m_shelfCollapsed ? 0 : width);
     connect(a, &QPropertyAnimation::finished, this, [this] {
-        m_shelf->setMaximumWidth(QWIDGETSIZE_MAX);
-        m_shelf->setVisible(!m_shelfCollapsed);
+        m_side->setMaximumWidth(QWIDGETSIZE_MAX);
+        m_side->setVisible(!m_shelfCollapsed);
         if (!m_shelfCollapsed) m_split->setSizes({QSettings().value(QStringLiteral("window/shelf"), 296).toInt(), m_split->width()});
     });
     if (m_shelfCollapsed) {
-        QSettings().setValue(QStringLiteral("window/shelf"), m_shelf->width());
-        m_shelf->setMinimumWidth(0);
+        QSettings().setValue(QStringLiteral("window/shelf"), m_side->width());
+        m_side->setMinimumWidth(0);
     }
     a->start(QAbstractAnimation::DeleteWhenStopped);
-    if (!m_shelfCollapsed) QTimer::singleShot(240, this, [this] { m_shelf->setMinimumWidth(220); });
+    if (!m_shelfCollapsed) QTimer::singleShot(240, this, [this] { m_side->setMinimumWidth(220); });
 }
 
 // --- import and export ---
@@ -799,7 +1044,7 @@ void MainWindow::removeVault() {
 void MainWindow::closeEvent(QCloseEvent *e) {
     QSettings s;
     s.setValue(QStringLiteral("window/geometry"), saveGeometry());
-    if (!m_shelfCollapsed) s.setValue(QStringLiteral("window/shelf"), m_shelf->width());
+    if (!m_shelfCollapsed) s.setValue(QStringLiteral("window/shelf"), m_side->width());
     if (m_session) {
         m_pane->flush();
         m_session->engine()->persistNow();

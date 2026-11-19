@@ -101,6 +101,33 @@ private slots:
         QCOMPARE(path[2]->name, QStringLiteral("Sub"));
     }
 
+    void specializedMarkdownImports() {
+        QTemporaryDir dir;
+        QVERIFY(QDir(dir.path()).mkdir("_resources"));
+        const auto write = [&](const QString &name, const QByteArray &data) {
+            QFile file(dir.filePath(name));
+            return file.open(QIODevice::WriteOnly) && file.write(data) == data.size();
+        };
+        QVERIFY(write("A.md", "---\ntitle: Different\n---\n[[B|other]] ![[pic.png]] #tag\n`[[B]]`"));
+        QVERIFY(write("B.md", "note"));
+        QVERIFY(write("_resources/pic.png", "image"));
+        std::unique_ptr<Session> dst(makeVault("Obsidian", false));
+        QVERIFY(run(transfer::importMarkdown(dst.get(), {dir.path()}, {}, dst.get(), transfer::MarkdownSource::Obsidian)));
+        const auto *a = byTitle(dst->engine(), "A");
+        const auto *b = byTitle(dst->engine(), "B");
+        QVERIFY(a && b);
+        QVERIFY(a->body.contains(QStringLiteral("[other](ivy://note/%1)").arg(b->id)));
+        QVERIFY(a->body.contains(QStringLiteral("![pic.png](ivy://res/")));
+        QVERIFY(a->body.contains(QStringLiteral("`[[B]]`")));
+        QCOMPARE(a->tags.size(), 1);
+        QVERIFY(write("_resources/example.md", "not a note"));
+        QVERIFY(write("A.md", "![](./_resources/pic.png)"));
+        std::unique_ptr<Session> joplin(makeVault("Joplin", false));
+        QVERIFY(run(transfer::importMarkdown(joplin.get(), {dir.path()}, {}, joplin.get(), transfer::MarkdownSource::Joplin)));
+        QCOMPARE(joplin->engine()->notes().size(), 2);
+        QCOMPARE(joplin->engine()->attachments().size(), 1);
+    }
+
     void importVaultCopiesEverything() {
         std::unique_ptr<Session> local(makeVault("Local notes", true));
         SyncEngine *e = local->engine();

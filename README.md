@@ -43,9 +43,10 @@ Linux 与 Windows 的原生客户端，基于 Qt 6 Widgets。本地优先：打�
 - 代码围栏区分标记与长度，多反引号行内代码保持字面内容；代码块内不会误续写列表。预览中的待办按 Markdown 解析顺序勾选，支持引用与嵌套列表。
 - 双栏中的图片随预览宽度重新适配；代码和表格跟随字号，表格保留列对齐，主题切换刷新预览。
 - 回车续写列表/待办，Tab 缩进；粘贴/拖入图片和文件即上传；粘贴一律为纯文本。
-- 快捷键：`Ctrl+K` 搜索、`Ctrl+Shift+P` 命令面板、`Ctrl+N` 新建、`Ctrl+\` 收起书架、`Ctrl+B/I/E`、`Ctrl+Shift+X/K`、`Ctrl+Alt+1/2/3`、`Ctrl+Shift+7/8/9`、`Ctrl+R` 立即同步。
+- 快捷键：`Ctrl+K` 搜索、`Ctrl+Shift+P` 命令面板、`Ctrl+N` 新建、`Ctrl+\` 收起侧栏、`Ctrl+1/2/3` 切换笔记/日程/媒体库、`Ctrl+B/I/E`、`Ctrl+Shift+X/K`、`Ctrl+Alt+1/2/3`、`Ctrl+Shift+7/8/9`、`Ctrl+R` 立即同步。
 
 **组织与其他**
+- 窗口布局：左缘导航条（笔记、日程、媒体库、设置）切换侧栏页面，再点当前页收起侧栏；右侧是标签页（多于一个时才显示）和笔记；底部状态栏显示同步状态。
 - 书架树：置顶、笔记本（嵌套、计数含子笔记本）、根笔记、标签、回收站；排序；拖拽移动笔记和笔记本（悬停 650 ms 展开）；右键菜单；每分支 100 篇分页。
 - 标签（颜色、改名、删除）、回收站（撤销、恢复、永久删除、清空）、复制笔记、移动、大纲、反向链接、字数。
 - 本地全文搜索（中文、多词 AND，命中高亮）。
@@ -53,7 +54,7 @@ Linux 与 Windows 的原生客户端，基于 Qt 6 Widgets。本地优先：打�
 - 导入 Markdown 文件/文件夹（YAML 头、子文件夹成笔记本、本地图片自动上传、笔记间链接重连）；导出为 Markdown 文件夹（含附件与相对链接）。
 - 浅色/深色/跟随系统，字号 13–22，中文/English，减少动态效果；字号和编辑模式与网页版跨设备同步。
 
-未做（按指南属 P1/P2，可后补）：媒体库页面、AI 问答、关系图、API 令牌与备份配置（设置中引导到网页版）、视频/音频内嵌播放（目前用系统播放器打开）。
+未做（按指南属 P1/P2，可后补）：AI 问答、关系图、API 令牌与备份配置（设置中引导到网页版）、视频/音频内嵌播放（目前用系统播放器打开）。
 
 ## 安装
 
@@ -68,15 +69,15 @@ Linux 与 Windows 的原生客户端，基于 Qt 6 Widgets。本地优先：打�
 
 ## 构建
 
-依赖：Qt ≥ 6.8（Core、Gui、Widgets、Network、Sql、Svg、Concurrent，测试另需 Test）、[QtKeychain](https://github.com/frankosterfeld/qtkeychain)（Qt 6 版）、libsodium、md4c、CMake ≥ 3.21。
+依赖：Qt ≥ 6.8（Core、Gui、Widgets、Network、Sql、Svg、Concurrent、WebEngineWidgets，测试另需 Test）、[QtKeychain](https://github.com/frankosterfeld/qtkeychain)（Qt 6 版）、libsodium、md4c、CMake ≥ 3.21。
 
 ### Linux
 
 ```bash
 # Arch
-sudo pacman -S qt6-base qt6-svg qtkeychain-qt6 libsodium md4c cmake ninja
+sudo pacman -S qt6-base qt6-svg qt6-webengine qtkeychain-qt6 libsodium md4c cmake ninja
 # Debian/Ubuntu
-sudo apt install qt6-base-dev qt6-svg-dev qtkeychain-qt6-dev libsodium-dev libmd4c-dev libmd4c-html0-dev cmake ninja-build
+sudo apt install qt6-base-dev qt6-svg-dev qt6-webengine-dev qtkeychain-qt6-dev libsodium-dev libmd4c-dev libmd4c-html0-dev cmake ninja-build
 ```
 
 ```bash
@@ -96,7 +97,7 @@ make install PREFIX=$HOME/.local
 ### Windows（MSVC + vcpkg）
 
 ```powershell
-vcpkg install qtbase qtsvg qtkeychain-qt6 libsodium md4c --triplet x64-windows
+vcpkg install qtbase qtsvg qtwebengine qtkeychain-qt6 libsodium md4c --triplet x64-windows
 cmake -S . -B build -G Ninja -DCMAKE_BUILD_TYPE=Release -DCMAKE_TOOLCHAIN_FILE=$env:VCPKG_ROOT/scripts/buildsystems/vcpkg.cmake
 cmake --build build
 windeployqt build\ivynote.exe
@@ -151,7 +152,7 @@ src/core      模型与 JSON、HLC、ID、Markdown 工具、搜索、书架树�
 src/storage   本机加密（libsodium）、钥匙串、SQLite 存储
 src/sync      HTTP 客户端、传输层、同步引擎、SSE
 src/vault     笔记库登记、会话（打开的笔记库）、文件存储、导入导出
-src/ui        主题、图标、书架、编辑器与即时渲染、笔记页、命令面板、各对话框
+src/ui        主题、图标、书架、日程与媒体库面板、编辑器与即时渲染、笔记页、命令面板、各对话框
 tests         单元、引擎、真实服务端集成、UI、导入导出
 ```
 

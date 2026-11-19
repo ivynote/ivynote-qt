@@ -14,6 +14,8 @@
 #include <QAbstractTextDocumentLayout>
 #include <QApplication>
 #include <QCompleter>
+#include <QClipboard>
+#include <QTextDocumentFragment>
 #include <QFileInfo>
 #include <QContextMenuEvent>
 #include <QKeyEvent>
@@ -850,6 +852,29 @@ void MarkdownEditor::mousePressEvent(QMouseEvent *e) {
         if (tableCellAt(e->pos(), &row, &column, &header)) {
             closeTableCell(true);
             setTextCursor(QTextCursor(header));
+            if ((e->modifiers() & Qt::ShiftModifier) && !m_cellAnchor.isNull() && m_cellAnchor.block() == header) {
+                const auto range = tableRange(header);
+                const auto table = md::parseTable(range.selectedText().replace(QChar::ParagraphSeparator, u'\n'));
+                if (!table.valid()) return;
+                long double sum = 0;
+                int count = 0;
+                for (int r = std::max(0, std::min(row, m_cellRow)); r <= std::min(int(table.rows.size()) - 1, std::max(row, m_cellRow)); ++r) {
+                    for (int c = std::max(0, std::min(column, m_cellColumn)); c <= std::min(int(table.rows[r].size()) - 1, std::max(column, m_cellColumn)); ++c) {
+                        bool ok = false;
+                        const double value = table.rows[r][c].trimmed().toDouble(&ok);
+                        if (ok && std::isfinite(value)) { sum += value; ++count; }
+                    }
+                }
+                if (count) {
+                    const QString total = QLocale().toString(double(sum), 'g', 15);
+                    const QString mean = QLocale().toString(double(sum / count), 'g', 15);
+                    QMenu menu(this);
+                    menu.addAction(T("复制求和结果（%1）").arg(total), this, [total] { QApplication::clipboard()->setText(total); });
+                    menu.addAction(T("复制平均值（%1）").arg(mean), this, [mean] { QApplication::clipboard()->setText(mean); });
+                    menu.exec(e->globalPosition().toPoint());
+                }
+                return;
+            }
             editTableCell(row, column);
             return;
         }
@@ -941,6 +966,15 @@ void MarkdownEditor::contextMenuEvent(QContextMenuEvent *e) {
         }
     }
     menu->addSeparator();
+    auto *copyRich = menu->addAction(T("复制为富文本"), this, [this] {
+        const auto selection = textCursor().selection();
+        const QString html = renderMarkdown(selection.toPlainText());
+        auto *mime = new QMimeData;
+        mime->setHtml(html);
+        mime->setText(QTextDocumentFragment::fromHtml(html).toPlainText());
+        QApplication::clipboard()->setMimeData(mime);
+    });
+    copyRich->setEnabled(textCursor().hasSelection());
     menu->addAction(T("重新加载图片"), RemoteImages::instance(), &RemoteImages::retryFailed);
     menu->exec(e->globalPos());
     delete menu;

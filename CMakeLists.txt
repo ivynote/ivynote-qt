@@ -21,7 +21,7 @@ set(IVY_VERSION_MAJOR ${CMAKE_MATCH_1})
 set(IVY_VERSION_MINOR ${CMAKE_MATCH_2})
 set(IVY_VERSION_PATCH ${CMAKE_MATCH_3})
 
-find_package(Qt6 6.8 REQUIRED COMPONENTS Core Gui Widgets Network Sql Svg Concurrent)
+find_package(Qt6 6.8 REQUIRED COMPONENTS Core Gui Widgets Network Sql Svg Concurrent WebEngineWidgets)
 find_package(Qt6Keychain REQUIRED)
 find_package(PkgConfig REQUIRED)
 pkg_check_modules(SODIUM REQUIRED IMPORTED_TARGET libsodium)
@@ -39,6 +39,8 @@ add_library(ivycore STATIC
     src/core/tree.cpp
     src/core/i18n.cpp
     src/core/format.cpp
+    src/core/notelock.cpp
+    src/core/agenda.cpp
     src/storage/crypto.cpp
     src/storage/secrets.cpp
     src/storage/localstore.cpp
@@ -65,6 +67,7 @@ add_library(ivyui STATIC
     src/ui/widgets.cpp
     src/ui/toast.cpp
     src/ui/shelf.cpp
+    src/ui/panels.cpp
     src/ui/editor.cpp
     src/ui/highlighter.cpp
     src/ui/markdownview.cpp
@@ -73,11 +76,14 @@ add_library(ivyui STATIC
     src/ui/palette.cpp
     src/ui/dialogs.cpp
     src/ui/vaultdialog.cpp
+    src/ui/officialsites.cpp
+    src/ui/serverpanels.cpp
+    src/ui/updater.cpp
     src/ui/settingsdialog.cpp
     src/ui/historydialog.cpp
     src/ui/mainwindow.cpp
 )
-target_link_libraries(ivyui PUBLIC ivycore Qt6::Widgets Qt6::Svg)
+target_link_libraries(ivyui PUBLIC ivycore Qt6::Widgets Qt6::Svg Qt6::WebEngineWidgets)
 
 if(IVY_BUILD_APP)
 qt_add_executable(ivynote WIN32
@@ -105,7 +111,7 @@ endif()
 if(IVY_BUILD_TESTS)
     enable_testing()
     find_package(Qt6 REQUIRED COMPONENTS Test)
-    foreach(t core engine integration ui transfer)
+    foreach(t core engine integration ui transfer notelock)
         add_executable(test_${t} tests/test_${t}.cpp)
         target_link_libraries(test_${t} PRIVATE ivyui Qt6::Test)
         add_test(NAME ${t} COMMAND test_${t})

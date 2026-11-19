@@ -24,4 +24,8 @@ QByteArray askRecoveryKey(QWidget *parent, const QString &vaultName, bool wrongB
 // A Yes/No question with a destructive Yes.
 bool confirm(QWidget *parent, const QString &title, const QString &text, const QString &yes);
 
+// Asks for the password (and an optional hint) that protects a note, after
+// explaining what protection means (guide 8.4). False when canceled.
+bool askNotePassword(QWidget *parent, bool changing, QString *password, QString *hint);
+
 } // namespace dialogs

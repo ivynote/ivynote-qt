@@ -2,6 +2,7 @@
 
 #include "core/i18n.h"
 #include "core/models.h"
+#include "core/notelock.h"
 #include "core/tree.h"
 #include "storage/crypto.h"
 #include "sync/engine.h"
@@ -10,6 +11,7 @@
 #include "ui/toast.h"
 
 #include <QApplication>
+#include <QCheckBox>
 #include <QClipboard>
 #include <QDialog>
 #include <QDialogButtonBox>
@@ -273,6 +275,63 @@ bool confirm(QWidget *parent, const QString &title, const QString &text, const Q
     box.setDefaultButton(qobject_cast<QPushButton *>(box.buttons().last()));
     box.exec();
     return box.clickedButton() == ok;
+}
+
+bool askNotePassword(QWidget *parent, bool changing, QString *password, QString *hint) {
+    QDialog dlg(parent);
+    dlg.setWindowTitle(changing ? T("修改笔记密码") : T("给笔记设置密码"));
+    dlg.setMinimumWidth(420);
+    auto *col = new QVBoxLayout(&dlg);
+    auto *intro = new QLabel(&dlg);
+    intro->setWordWrap(true);
+    intro->setText(T("加密后，正文只在你的设备上解密，服务器看不到内容。请注意：\n"
+                     "• 标题和附件不会加密\n"
+                     "• 这篇笔记已有的历史版本会被删除，公开分享会关闭\n"
+                     "• 忘记密码无法恢复，笔记内容将永远无法打开"));
+    col->addWidget(intro);
+    auto *pw = new QLineEdit(&dlg);
+    pw->setEchoMode(QLineEdit::Password);
+    pw->setPlaceholderText(T("密码（至少 %1 个字符）").arg(notelock::kMinPassword));
+    auto *again = new QLineEdit(&dlg);
+    again->setEchoMode(QLineEdit::Password);
+    again->setPlaceholderText(T("再输一遍"));
+    auto *hintField = new QLineEdit(&dlg);
+    hintField->setMaxLength(100);
+    hintField->setPlaceholderText(T("密码提示（可选，不要写密码本身）"));
+    col->addWidget(pw);
+    col->addWidget(again);
+    col->addWidget(hintField);
+    auto *ack = new QCheckBox(T("我已了解，忘记密码无法恢复"), &dlg);
+    col->addWidget(ack);
+    auto *error = new QLabel(&dlg);
+    QPalette pal = error->palette();
+    pal.setColor(QPalette::WindowText, Theme::t().danger);
+    error->setPalette(pal);
+    error->hide();
+    col->addWidget(error);
+    auto *buttons = new QDialogButtonBox(QDialogButtonBox::Ok | QDialogButtonBox::Cancel, &dlg);
+    QPushButton *ok = buttons->button(QDialogButtonBox::Ok);
+    ok->setText(changing ? T("修改密码") : T("加密笔记"));
+    ok->setEnabled(false);
+    buttons->button(QDialogButtonBox::Cancel)->setText(T("取消"));
+    col->addWidget(buttons);
+    auto check = [&] {
+        QString problem;
+        if (!pw->text().isEmpty() && pw->text().size() < notelock::kMinPassword) problem = T("密码太短。");
+        else if (!again->text().isEmpty() && pw->text() != again->text()) problem = T("两次输入的密码不一致。");
+        error->setText(problem);
+        error->setVisible(!problem.isEmpty());
+        ok->setEnabled(problem.isEmpty() && pw->text().size() >= notelock::kMinPassword && pw->text() == again->text() && ack->isChecked());
+    };
+    QObject::connect(pw, &QLineEdit::textChanged, &dlg, check);
+    QObject::connect(again, &QLineEdit::textChanged, &dlg, check);
+    QObject::connect(ack, &QCheckBox::toggled, &dlg, check);
+    QObject::connect(buttons, &QDialogButtonBox::accepted, &dlg, [&] { if (ok->isEnabled()) dlg.accept(); });
+    QObject::connect(buttons, &QDialogButtonBox::rejected, &dlg, &QDialog::reject);
+    if (dlg.exec() != QDialog::Accepted) return false;
+    *password = pw->text();
+    *hint = hintField->text().trimmed();
+    return true;
 }
 
 } // namespace dialogs

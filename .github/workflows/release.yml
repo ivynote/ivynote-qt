@@ -95,6 +95,7 @@ jobs:
           version: ${{ env.QT_VERSION }}
           host: linux
           target: desktop
+          modules: qtwebengine qtwebchannel qtpositioning
           arch: linux_gcc_64
           cache: true
 
@@ -219,6 +220,7 @@ jobs:
           version: ${{ env.QT_VERSION }}
           host: windows
           target: desktop
+          modules: qtwebengine qtwebchannel qtpositioning
           arch: win64_msvc2022_64
           cache: true
 

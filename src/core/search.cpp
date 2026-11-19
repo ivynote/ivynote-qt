@@ -2,6 +2,7 @@
 
 #include "core/markdown.h"
 #include "core/models.h"
+#include "core/notelock.h"
 
 #include <QRegularExpression>
 #include <algorithm>
@@ -45,7 +46,9 @@ QList<SearchHit> searchNotes(const QList<const Note *> &notes, const QString &qu
     for (const Note *n : notes) {
         if (n->trashed() || n->deleted) continue;
         const QString title = n->title.toLower();
-        const QString body = n->body.toLower();
+        // A protected note's body is ciphertext: search matches its title only.
+        const bool sealed = notelock::isEncrypted(n->body);
+        const QString body = sealed ? QString() : n->body.toLower();
         double score = 0;
         bool ok = true;
         for (const QString &t : terms) {
@@ -63,7 +66,7 @@ QList<SearchHit> searchNotes(const QList<const Note *> &notes, const QString &qu
         SearchHit hit;
         hit.note = n;
         hit.score = score;
-        snippetFor(n->body, terms, hit);
+        if (!sealed) snippetFor(n->body, terms, hit);
         hits << hit;
     }
     std::sort(hits.begin(), hits.end(), [](const SearchHit &a, const SearchHit &b) {

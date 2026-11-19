@@ -2,6 +2,7 @@
 // editor in one of three modes, outline and backlinks.
 #pragma once
 
+#include "core/notelock.h"
 #include "ui/highlighter.h"
 
 #include <QHash>
@@ -21,6 +22,7 @@ class QToolButton;
 class QHBoxLayout;
 class QStackedWidget;
 class IconButton;
+class PillButton;
 class FlowRow;
 
 enum class EditorMode { Live, Source, Split };
@@ -41,12 +43,14 @@ public:
     void setEditorMode(EditorMode mode);
     EditorMode editorMode() const { return m_mode; }
     void setFontSize(int px);
-    void setShelfCollapsed(bool collapsed);
     void toggleOutline();
     void insertFiles(const QStringList &paths);
     void pickFiles();
     void pickTags();
     MarkdownEditor *editor() const { return m_editor; }
+    bool isLocked() const { return m_locked; }       // protected and not unlocked
+    bool isProtected() const { return m_locked || m_sealed; }
+    void lockNow() { relock(); }
 
 signals:
     void openNote(const QString &id);
@@ -54,7 +58,6 @@ signals:
     void moveRequested(const QString &id);
     void historyRequested(const QString &id);
     void shareRequested(const QString &id);
-    void expandShelfRequested();
     void editorModeChanged(EditorMode mode);
     void duplicateRequested(const QString &id);
 
@@ -76,11 +79,21 @@ private:
     void syncScroll(bool fromEditor); // split view: the other side follows
     void buildScrollMap();
 
+    // Password-protected notes (guide 8.4): the editor shows plaintext only
+    // while unlocked; the engine only ever gets the sealed body.
+    void loadBody(const QString &body);   // plain text, unlocked text or the lock panel
+    void showLockPanel(bool locked, const QString &hint = {});
+    void tryUnlock();
+    void relock();                        // forget the key, show the lock panel
+    void protectNote(bool change);
+    void removeProtection();
+    void reloadFromEngine();
+    void onRemoteBody(const QString &body);
+
     QPointer<Session> m_session;
     SyncEngine *m_engine = nullptr;
     QString m_id;
     EditorMode m_mode = EditorMode::Live;
-    bool m_shelfCollapsed = false;
     bool m_outlineOpen = false;
     bool m_bodyDirty = false;
     bool m_titleDirty = false;
@@ -94,7 +107,6 @@ private:
     QLabel *m_findCount;
     QToolButton *m_findCase;
     QWidget *m_topBar;
-    IconButton *m_expandShelf;
     QHBoxLayout *m_crumbs;
     QLabel *m_pendingDot;
     QLabel *m_savedLabel;
@@ -112,8 +124,18 @@ private:
     QListWidget *m_outline;
     QToolButton *m_backlinksButton;
     QListWidget *m_backlinks;
-    QTimer m_bodyTimer, m_titleTimer, m_previewTimer, m_indexTimer, m_savedTimer;
+    QTimer m_bodyTimer, m_titleTimer, m_previewTimer, m_indexTimer, m_savedTimer, m_lockTimer;
     int m_uploading = 0;
     bool m_syncing = false;
     QList<QPair<qreal, qreal>> m_scrollMap; // editor y -> preview y, both increasing
+
+    bool m_sealed = false;    // an unlocked protected note: saves are sealed with m_lockKey
+    bool m_locked = false;    // a protected note without a key: the lock panel is up
+    bool m_unlocking = false; // key derivation in flight
+    bool m_protecting = false;
+    notelock::Key m_lockKey;
+    QWidget *m_lockPanel;
+    QLabel *m_lockIcon, *m_lockHint, *m_lockError;
+    QLineEdit *m_lockPassword;
+    PillButton *m_lockButton;
 };

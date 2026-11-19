@@ -1,5 +1,8 @@
 <RCC>
     <qresource prefix="/">
+        <file>mermaid/view.html</file>
+        <file>mermaid/view.js</file>
+        <file>mermaid/mermaid.min.js</file>
         <file>icons/app.svg</file>
         <file>icons/app-512.png</file>
     </qresource>

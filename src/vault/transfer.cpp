@@ -270,8 +270,8 @@ protected:
 
 class MarkdownImport : public ImportBase {
 public:
-    MarkdownImport(Session *s, QStringList paths, QString target, QObject *parent)
-        : ImportBase(s, parent), m_paths(std::move(paths)), m_target(std::move(target)) {}
+    MarkdownImport(Session *s, QStringList paths, QString target, QObject *parent, transfer::MarkdownSource source)
+        : ImportBase(s, parent), m_paths(std::move(paths)), m_target(std::move(target)), m_source(source) {}
 
     void start() override {
         struct Source {
@@ -279,15 +279,23 @@ public:
             QString relDir; // relative to the chosen folder, "" at its top
         };
         QList<Source> sources;
+        QHash<QString, QStringList> vaultFiles;
+        const bool obsidian = m_source == transfer::MarkdownSource::Obsidian;
+        const bool specialized = m_source != transfer::MarkdownSource::Generic;
         for (const QString &p : m_paths) {
             const QFileInfo fi(p);
             if (fi.isDir()) {
-                QDirIterator it(p, {QStringLiteral("*.md"), QStringLiteral("*.markdown"), QStringLiteral("*.txt")}, QDir::Files, QDirIterator::Subdirectories);
+                QDirIterator it(p, QDir::Files | QDir::NoSymLinks, QDirIterator::Subdirectories);
                 while (it.hasNext()) {
                     const QString f = it.next();
+                    const QFileInfo file(f);
+                    if (obsidian) vaultFiles[file.fileName().toCaseFolded()].append(file.absoluteFilePath());
+                    const auto ext = file.suffix().toLower();
+                    if (ext != QLatin1String("md") && ext != QLatin1String("markdown") && (specialized || ext != QLatin1String("txt"))) continue;
                     QString rel = QDir(p).relativeFilePath(QFileInfo(f).absolutePath());
                     if (rel == QLatin1String(".")) rel.clear();
                     if (rel.startsWith(QLatin1String("_attachments")) || rel.contains(QLatin1String("/."))) continue;
+                    if (m_source == transfer::MarkdownSource::Joplin && (rel == QStringLiteral("_resources") || rel.startsWith(QStringLiteral("_resources/")))) continue;
                     // The chosen folder itself becomes a notebook.
                     rel = rel.isEmpty() ? fi.fileName() : fi.fileName() + u'/' + rel;
                     sources << Source{f, rel};
@@ -312,11 +320,53 @@ public:
             p.init.title = fi.completeBaseName();
             p.init.createdAt = fi.birthTime().isValid() ? fi.birthTime().toMSecsSinceEpoch() : fi.lastModified().toMSecsSinceEpoch();
             parseFrontMatter(text, p);
+            if (obsidian || (m_source == transfer::MarkdownSource::Joplin && !p.init.title.startsWith(fi.completeBaseName())))
+                p.init.title = fi.completeBaseName().left(300);
+            QString scan = text;
+            if (specialized) {
+                static const QRegularExpression code(QStringLiteral(R"md((?:^|\n)[ \t]*(`{3,}|~{3,})[^\n]*\n[\s\S]*?(?:\n[ \t]*\1[^\n]*|$)|(`+)[^`\n]*\2)md"));
+                for (auto it = code.globalMatch(text); it.hasNext();) {
+                    const auto match = it.next();
+                    scan.replace(match.capturedStart(), match.capturedLength(), QString(match.capturedLength(), u' '));
+                }
+            }
+            if (obsidian) {
+                static const QRegularExpression tag(QStringLiteral(R"((?:^|\s)#([\p{L}\p{N}_/-]+))"));
+                for (auto it = tag.globalMatch(scan); it.hasNext();) p.tagNames << it.next().captured(1);
+                static const QRegularExpression wiki(QStringLiteral(R"((!?)\[\[([^\]#|\n]+)(#[^\]|\n]*)?(?:\|([^\]\n]+))?\]\])"));
+                QString rewritten, rewrittenScan;
+                qsizetype offset = 0;
+                for (auto it = wiki.globalMatch(scan); it.hasNext();) {
+                    const auto match = it.next();
+                    const QString dest = match.captured(2).trimmed();
+                    auto hits = vaultFiles.value(QFileInfo(dest).fileName().toCaseFolded());
+                    if (hits.isEmpty()) hits = vaultFiles.value(QFileInfo(dest).fileName().toCaseFolded() + QStringLiteral(".md"));
+                    std::sort(hits.begin(), hits.end());
+                    QString resolved;
+                    for (const auto &candidate : hits) {
+                        if (dest.contains(u'/') && !candidate.endsWith(u'/' + dest, Qt::CaseInsensitive) &&
+                            !candidate.endsWith(u'/' + dest + QStringLiteral(".md"), Qt::CaseInsensitive)) continue;
+                        if (resolved.isEmpty() || QFileInfo(candidate).absolutePath() == fi.absolutePath()) resolved = candidate;
+                    }
+                    if (resolved.isEmpty()) continue;
+                    rewritten += text.mid(offset, match.capturedStart() - offset);
+                    rewrittenScan += scan.mid(offset, match.capturedStart() - offset);
+                    const QString label = match.captured(4).isEmpty() ? dest : match.captured(4);
+                    const QString path = fi.absoluteDir().relativeFilePath(resolved);
+                    const QString replacement = QStringLiteral("%1[%2](%3%4)").arg(match.captured(1), label,
+                        QString::fromLatin1(QUrl::toPercentEncoding(path, "/")), match.captured(3));
+                    rewritten += replacement;
+                    rewrittenScan += replacement;
+                    offset = match.capturedEnd();
+                }
+                text = rewritten + text.mid(offset);
+                scan = rewrittenScan + scan.mid(offset);
+            }
             p.init.folderId = folderFor(s.relDir);
             // Rewrite local links: notes we import, files we attach.
             QString out;
             qsizetype last = 0;
-            for (auto it = link.globalMatch(text); it.hasNext();) {
+            for (auto it = link.globalMatch(scan); it.hasNext();) {
                 const auto m = it.next();
                 out += text.mid(last, m.capturedStart() - last);
                 last = m.capturedEnd();
@@ -325,7 +375,11 @@ public:
                     out += m.captured(0);
                     continue;
                 }
-                const QString path = QFileInfo(fi.absoluteDir(), QUrl::fromPercentEncoding(target.split(u'#').first().toUtf8())).absoluteFilePath();
+                const QString path = QDir::cleanPath(QFileInfo(fi.absoluteDir(), QUrl::fromPercentEncoding(target.split(u'#').first().toUtf8())).absoluteFilePath());
+                if (specialized && !QFileInfo(path).canonicalFilePath().startsWith(QFileInfo(m_paths.first()).canonicalFilePath() + u'/')) {
+                    out += m.captured(0);
+                    continue;
+                }
                 if (idOfPath.contains(path)) {
                     out += QStringLiteral("%1[%2](ivy://note/%3)").arg(m.captured(1), m.captured(2), idOfPath.value(path));
                 } else if (QFileInfo(path).isFile()) {
@@ -426,6 +480,7 @@ private:
 
     QStringList m_paths;
     QString m_target;
+    transfer::MarkdownSource m_source;
     QHash<QString, QString> m_folders;
 };
 
@@ -533,8 +588,8 @@ namespace transfer {
 
 TransferJob *exportMarkdown(Session *session, const QString &dir, QObject *parent) { return new ExportJob(session, dir, parent); }
 
-TransferJob *importMarkdown(Session *session, const QStringList &paths, const QString &targetFolderId, QObject *parent) {
-    return new MarkdownImport(session, paths, targetFolderId, parent);
+TransferJob *importMarkdown(Session *session, const QStringList &paths, const QString &targetFolderId, QObject *parent, MarkdownSource source) {
+    return new MarkdownImport(session, paths, targetFolderId, parent, source);
 }
 
 TransferJob *importVault(Session *target, const VaultInfo &source, QObject *parent) { return new VaultImport(target, source, parent); }
