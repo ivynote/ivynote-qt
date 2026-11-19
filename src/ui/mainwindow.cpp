@@ -178,7 +178,6 @@ MainWindow::MainWindow() {
     connect(m_pane, &NotePane::openNote, this, &MainWindow::openNote);
     connect(m_pane, &NotePane::moveRequested, this, &MainWindow::moveNote);
     connect(m_pane, &NotePane::duplicateRequested, this, &MainWindow::duplicateNote);
-    connect(m_pane, &NotePane::revealFolder, this, [this](const QString &) { showPage(NotesPage); });
     connect(m_pane, &NotePane::historyRequested, this, [this](const QString &id) {
         if (!m_session) return;
         m_pane->flush();
@@ -513,6 +512,7 @@ void MainWindow::buildMenus() {
     noteAction(T("标签…"), [this](const QString &) { m_pane->pickTags(); });
     noteAction(T("复制笔记"), [this](const QString &id) { duplicateNote(id); });
     note->addSeparator();
+    noteAction(T("笔记信息…"), [this](const QString &) { m_pane->showInfo(); });
     noteAction(T("历史版本…"), [this](const QString &id) { emit m_pane->historyRequested(id); }, true);
     noteAction(T("分享…"), [this](const QString &id) { emit m_pane->shareRequested(id); }, true);
     note->addSeparator();

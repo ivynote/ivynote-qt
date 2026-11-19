@@ -96,6 +96,17 @@ private slots:
         QCOMPARE(md::wordCount(QStringLiteral("```\ncode here\n```\none")), 1);
     }
 
+    void noteStatistics() {
+        const auto s = md::noteStats(QStringLiteral("# Title\n\nFirst paragraph with [[Link]] and [web](https://x.io).\n\n- [x] done\n- [ ] open\n\n```\ncode\n\nmore\n```\n![img](ivy://res/abcdefgh12)\n"));
+        QCOMPARE(s.todos, 2);
+        QCOMPARE(s.todosDone, 1);
+        QCOMPARE(s.links, 2);
+        QCOMPARE(s.media, 1);
+        QCOMPARE(s.paragraphs, 6); // heading, text, two list items, the code block, the image line
+        QVERIFY(s.readMinutes >= 1);
+        QCOMPARE(md::noteStats(QString()).readMinutes, 0);
+    }
+
     void tasksSkipCode() {
         const QString body = QStringLiteral("- [ ] a\n```\n- [ ] code\n```\n- [x] b\n1. [ ] c");
         QCOMPARE(md::toggleTask(body, 1), QStringLiteral("- [ ] a\n```\n- [ ] code\n```\n- [ ] b\n1. [ ] c"));

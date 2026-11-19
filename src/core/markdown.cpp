@@ -1,5 +1,7 @@
 #include "core/markdown.h"
 
+#include <cmath>
+
 #include "core/models.h"
 
 #include <QRegularExpression>
@@ -143,6 +145,50 @@ int wordCount(const QString &mdText) {
         }
     }
     return count;
+}
+
+NoteStats noteStats(const QString &body) {
+    static const QRegularExpression fence(QStringLiteral(R"(^\s*(```|~~~))"));
+    static const QRegularExpression task(QStringLiteral(R"(^\s*[-*+]\s+\[([ xX])\])"));
+    static const QRegularExpression blockStart(QStringLiteral(R"(^\s*([-*+]|\d+[.)]|#{1,6}|>)\s)"));
+    static const QRegularExpression whitespace(QStringLiteral(R"(\s+)"));
+    static const QRegularExpression resource(QStringLiteral(R"(\]\(ivy://res/[A-Za-z0-9_-]{8,64}\))"));
+    static const QRegularExpression wiki(QStringLiteral(R"(\[\[[^\[\]\n]+?\]\])"));
+    static const QRegularExpression web(QStringLiteral(R"((?<!!)\[[^\]\n]*\]\((?!ivy://res/)[^)\s]+[^)]*\))"));
+    const auto count = [&body](const QRegularExpression &re) {
+        int n = 0;
+        for (auto it = re.globalMatch(body); it.hasNext(); it.next()) ++n;
+        return n;
+    };
+    NoteStats s;
+    s.words = wordCount(body);
+    QString compact = body;
+    compact.remove(whitespace);
+    s.chars = int(compact.toUcs4().size());
+    bool inFence = false, inPara = false;
+    for (const QString &line : body.split(u'\n')) {
+        if (fence.match(line).hasMatch()) {
+            if (!inFence) ++s.paragraphs;
+            inFence = !inFence;
+            inPara = false;
+            continue;
+        }
+        if (inFence) continue;
+        if (const auto m = task.match(line); m.hasMatch()) {
+            ++s.todos;
+            if (m.captured(1) != QLatin1String(" ")) ++s.todosDone;
+        }
+        if (line.trimmed().isEmpty()) {
+            inPara = false;
+        } else if (!inPara || blockStart.match(line).hasMatch()) {
+            ++s.paragraphs;
+            inPara = true;
+        }
+    }
+    s.readMinutes = s.words ? std::max(1, int(std::lround(s.words / 260.0))) : 0;
+    s.media = count(resource);
+    s.links = count(wiki) + count(web);
+    return s;
 }
 
 QString slug(const QString &text) {

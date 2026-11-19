@@ -47,6 +47,7 @@ public:
     void insertFiles(const QStringList &paths);
     void pickFiles();
     void pickTags();
+    void showInfo();
     MarkdownEditor *editor() const { return m_editor; }
     bool isLocked() const { return m_locked; }       // protected and not unlocked
     bool isProtected() const { return m_locked || m_sealed; }
@@ -54,7 +55,6 @@ public:
 
 signals:
     void openNote(const QString &id);
-    void revealFolder(const QString &folderId);
     void moveRequested(const QString &id);
     void historyRequested(const QString &id);
     void shareRequested(const QString &id);
@@ -107,7 +107,6 @@ private:
     QLabel *m_findCount;
     QToolButton *m_findCase;
     QWidget *m_topBar;
-    QHBoxLayout *m_crumbs;
     QLabel *m_pendingDot;
     QLabel *m_savedLabel;
     IconButton *m_shareButton, *m_outlineButton, *m_moreButton;

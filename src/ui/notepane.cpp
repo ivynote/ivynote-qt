@@ -11,6 +11,7 @@
 #include "ui/highlighter.h"
 #include "ui/icons.h"
 #include "ui/markdownview.h"
+#include "ui/noteinfo.h"
 #include "ui/render.h"
 #include "ui/theme.h"
 #include "ui/toast.h"
@@ -18,7 +19,7 @@
 #include "vault/session.h"
 
 #include <QAbstractTextDocumentLayout>
-#include <QButtonGroup>
+#include <QActionGroup>
 #include <QBuffer>
 #include <QComboBox>
 #include <QFutureWatcher>
@@ -72,21 +73,32 @@ private:
 
 namespace {
 
-// The well behind the editor-mode buttons: a sunken, softly cornered strip.
-class SegmentWell : public QFrame {
+// The line under the title (time and word count): clicking it opens the note info.
+class MetaLabel : public QLabel {
 public:
-    explicit SegmentWell(QWidget *parent) : QFrame(parent) {
-        connect(Theme::instance(), &Theme::changed, this, qOverload<>(&QWidget::update));
+    explicit MetaLabel(QWidget *parent) : QLabel(parent) {
+        setCursor(Qt::PointingHandCursor);
+        setFont(Theme::uiFont(12.5));
+        paint(false);
+        connect(Theme::instance(), &Theme::changed, this, [this] { paint(m_hover); });
     }
+    std::function<void()> clicked;
 
 protected:
-    void paintEvent(QPaintEvent *) override {
-        QPainter p(this);
-        p.setRenderHint(QPainter::Antialiasing);
-        p.setPen(Qt::NoPen);
-        p.setBrush(Theme::t().sunken);
-        p.drawRoundedRect(QRectF(rect()).adjusted(0.5, 0.5, -0.5, -0.5), Theme::radius + 1, Theme::radius + 1);
+    void enterEvent(QEnterEvent *) override { paint(true); }
+    void leaveEvent(QEvent *) override { paint(false); }
+    void mouseReleaseEvent(QMouseEvent *e) override {
+        if (e->button() == Qt::LeftButton && rect().contains(e->position().toPoint()) && clicked) clicked();
     }
+
+private:
+    void paint(bool hover) {
+        m_hover = hover;
+        QPalette pal = palette();
+        pal.setColor(QPalette::WindowText, hover ? Theme::t().ink2 : Theme::t().muted);
+        setPalette(pal);
+    }
+    bool m_hover = false;
 };
 
 } // namespace
@@ -102,11 +114,6 @@ NotePane::NotePane(QWidget *parent) : QWidget(parent) {
     auto *top = new QHBoxLayout(m_topBar);
     top->setContentsMargins(14, 0, 10, 0);
     top->setSpacing(4);
-    auto *crumbHost = new QWidget(m_topBar);
-    m_crumbs = new QHBoxLayout(crumbHost);
-    m_crumbs->setContentsMargins(0, 0, 0, 0);
-    m_crumbs->setSpacing(2);
-    top->addWidget(crumbHost);
     m_pendingDot = new QLabel(m_topBar);
     m_pendingDot->setFixedSize(14, 14);
     m_pendingDot->setToolTip(T("有待同步的修改"));
@@ -115,32 +122,6 @@ NotePane::NotePane(QWidget *parent) : QWidget(parent) {
     m_savedLabel->hide();
     top->addWidget(m_savedLabel);
     top->addStretch(1);
-    // Editor mode: three exclusive buttons in one well, like a native segmented control.
-    auto *modes = new SegmentWell(m_topBar);
-    modes->setObjectName(QStringLiteral("editorModePicker"));
-    auto *modeRow = new QHBoxLayout(modes);
-    modeRow->setContentsMargins(2, 2, 2, 2);
-    modeRow->setSpacing(0);
-    auto *modeGroup = new QButtonGroup(modes);
-    const struct { EditorMode mode; const char *icon; const char *tip; } segments[] = {
-        {EditorMode::Live, "eye", "即时渲染"}, {EditorMode::Source, "code", "源码"}, {EditorMode::Split, "split", "双栏"}};
-    for (const auto &segment : segments) {
-        auto *b = new IconButton(QLatin1String(segment.icon), T(segment.tip), modes);
-        b->setCheckable(true);
-        b->setFixedSize(30, 26);
-        b->setChecked(segment.mode == m_mode);
-        modeGroup->addButton(b, int(segment.mode));
-        modeRow->addWidget(b);
-    }
-    connect(modeGroup, &QButtonGroup::idClicked, this, [this](int id) {
-        setEditorMode(EditorMode(id));
-        focusEditor();
-    });
-    connect(this, &NotePane::editorModeChanged, modes, [modeGroup](EditorMode mode) {
-        if (auto *b = modeGroup->button(int(mode))) b->setChecked(true);
-    });
-    top->addWidget(modes);
-    top->addSpacing(6);
     auto *insertButton = new IconButton(QStringLiteral("plus"), T("插入") + QStringLiteral(" (Ctrl+/)"), m_topBar);
     insertButton->setObjectName(QStringLiteral("insertButton"));
     connect(insertButton, &QToolButton::clicked, this, [this] { m_editor->showInsertMenu(); });
@@ -206,7 +187,9 @@ NotePane::NotePane(QWidget *parent) : QWidget(parent) {
     auto *metaLayout = new QHBoxLayout(metaRow);
     metaLayout->setContentsMargins(2, 0, 0, 0);
     metaLayout->setSpacing(10);
-    m_meta = mutedLabel(QString(), metaRow, 12.5);
+    auto *meta = new MetaLabel(metaRow);
+    m_meta = meta;
+    meta->clicked = [this] { showInfo(); };
     metaLayout->addWidget(m_meta);
     m_tagsRow = new FlowRow(metaRow);
     metaLayout->addWidget(m_tagsRow, 1);
@@ -812,38 +795,6 @@ void NotePane::refresh() {
         setNote(QString());
         return;
     }
-    // Breadcrumb.
-    while (QLayoutItem *it = m_crumbs->takeAt(0)) {
-        delete it->widget();
-        delete it;
-    }
-    if (n) {
-        auto crumb = [this, &k](const QString &text, const QString &folderId, bool last) {
-            auto *b = new QToolButton;
-            b->setAutoRaise(true);
-            b->setText(text);
-            b->setFont(Theme::uiFont(13));
-            b->setCursor(Qt::PointingHandCursor);
-            b->setStyleSheet(QStringLiteral("QToolButton{border:none;padding:2px 4px;color:%1;}QToolButton:hover{color:%2;}")
-                                 .arg((last ? k.muted : k.faint).name(), k.ink2.name()));
-            connect(b, &QToolButton::clicked, this, [this, folderId] { emit revealFolder(folderId); });
-            m_crumbs->addWidget(b);
-        };
-        if (n->trashed()) {
-            crumb(T("回收站"), QStringLiteral("v:trash"), true);
-        } else {
-            const auto path = m_engine->folderPath(n->folderId);
-            if (path.isEmpty()) crumb(T("笔记"), QString(), true);
-            for (int i = 0; i < path.size(); ++i) {
-                if (i) {
-                    auto *sep = new QLabel(QStringLiteral("/"));
-                    sep->setStyleSheet(QStringLiteral("color:%1;").arg(k.faint.name()));
-                    m_crumbs->addWidget(sep);
-                }
-                crumb(path[i]->name, path[i]->id, i == path.size() - 1);
-            }
-        }
-    }
     // Pending dot.
     const bool pending = n && m_engine->hasPending(EntityType::Note, n->id) && m_session && m_session->isRemote();
     QPixmap dot(QSize(14, 14) * devicePixelRatioF());
@@ -875,7 +826,7 @@ void NotePane::refresh() {
         const int words = n->words > 0 ? n->words : md::wordCount(n->body);
         m_meta->setText(QStringLiteral("%1   %2 %3").arg(fmt::fullTime(n->updatedAt, now), fmt::number(words), T("字")));
     }
-    m_meta->setToolTip(T("创建于") + u' ' + fmt::fullTime(n->createdAt, now));
+    m_meta->setToolTip(T("笔记信息") + QStringLiteral("\n") + T("创建于") + u' ' + fmt::fullTime(n->createdAt, now));
     // Tag chips.
     m_tagsRow->clear();
     for (const QString &tid : n->tags) {
@@ -1359,12 +1310,38 @@ void NotePane::pickTags() {
     dialogs::tagPicker(m_engine, m_id, m_tagsRow->mapToGlobal(QPoint(0, m_tagsRow->height() + 4)), this);
 }
 
+void NotePane::showInfo() {
+    if (!m_session || !m_engine || m_id.isEmpty() || !m_engine->note(m_id)) return;
+    flush();
+    NoteInfoDialog dialog(m_session, m_id, this);
+    const QString id = m_id;
+    connect(&dialog, &NoteInfoDialog::shareRequested, this, [this, id] { QTimer::singleShot(0, this, [this, id] { emit shareRequested(id); }); });
+    connect(&dialog, &NoteInfoDialog::historyRequested, this, [this, id] { QTimer::singleShot(0, this, [this, id] { emit historyRequested(id); }); });
+    dialog.exec();
+}
+
 void NotePane::showMoreMenu() {
     if (!m_engine || m_id.isEmpty()) return;
     const Note *n = m_engine->note(m_id);
     if (!n) return;
     QMenu menu(this);
     const QString id = m_id;
+    menu.addAction(icons::themed("info"), T("笔记信息"), this, &NotePane::showInfo);
+    // The three editor modes are rarely switched, so they live here.
+    QMenu *modes = menu.addMenu(icons::themed("eye"), T("编辑模式"));
+    auto *modeGroup = new QActionGroup(modes);
+    const struct { EditorMode mode; const char *label; } entries[] = {{EditorMode::Live, "即时渲染"}, {EditorMode::Source, "源码"}, {EditorMode::Split, "双栏"}};
+    for (const auto &entry : entries) {
+        QAction *a = modes->addAction(T(entry.label));
+        a->setCheckable(true);
+        a->setChecked(m_mode == entry.mode);
+        modeGroup->addAction(a);
+        connect(a, &QAction::triggered, this, [this, mode = entry.mode] {
+            setEditorMode(mode);
+            focusEditor();
+        });
+    }
+    menu.addSeparator();
     if (!n->trashed()) {
         menu.addAction(icons::themed("pin"), n->pinned ? T("取消置顶") : T("设为置顶"), this, [this, id, pinned = n->pinned] {
             NotePatch p;
