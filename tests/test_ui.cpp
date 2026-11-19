@@ -704,13 +704,13 @@ private slots:
         QCOMPARE(dlg.result(), 0);
         QVERIFY(!button->isEnabled());
         QCOMPARE(button->text(), T("正在检查更新…"));
-        QVERIFY(!status->isHidden());
-        QCOMPARE(status->text(), T("正在检查更新…"));
+        QVERIFY(status->isHidden());
 
         const QString doneText = T("没有找到更新的版本，请稍后再试");
         dlg.setUpdateStatus(false, doneText);
         QVERIFY(button->isEnabled());
         QCOMPARE(button->text(), T("检查更新"));
+        QVERIFY(!status->isHidden());
         QCOMPARE(status->text(), doneText);
     }
 

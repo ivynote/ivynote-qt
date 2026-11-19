@@ -344,7 +344,7 @@ QWidget *SettingsDialog::aboutTab() {
     m_checkUpdate = new QPushButton(T("检查更新"), w);
     m_checkUpdate->setObjectName(QStringLiteral("aboutCheckUpdate"));
     connect(m_checkUpdate, &QPushButton::clicked, this, [this] {
-        setUpdateStatus(true, T("正在检查更新…"));
+        setUpdateStatus(true);
         emit checkUpdates();
     });
     col->addWidget(m_checkUpdate, 0, Qt::AlignHCenter);
