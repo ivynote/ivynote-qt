@@ -34,6 +34,7 @@ private:
     int m_px = 16;
     bool m_hasMarkdown = false;
     QString m_markdown, m_title;
+    QStringList m_diagrams;
     RenderOptions m_options;
     QTimer m_resizeTimer;
     QHash<QString, QUrl> m_waiting; // remote images shown as placeholders

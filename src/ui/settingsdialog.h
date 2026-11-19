@@ -6,6 +6,8 @@
 #include <QPointer>
 
 class Session;
+class QLabel;
+class QPushButton;
 class QTabWidget;
 
 // Device-wide preferences, kept in QSettings.
@@ -37,11 +39,13 @@ public:
     SettingsDialog(Session *session, QWidget *parent = nullptr);
     void showVaultTab();
     void showAboutTab();
+    void setUpdateStatus(bool checking, const QString &message = {});
 
 signals:
     void importMarkdown();
     void importVault();
     void exportMarkdown();
+    void checkUpdates();
     void removeVault();
     void vaultRenamed();
     void prefsSynced();
@@ -56,4 +60,6 @@ private:
     QTabWidget *m_tabs;
     QWidget *m_vault = nullptr;
     QWidget *m_about = nullptr;
+    QPushButton *m_checkUpdate = nullptr;
+    QLabel *m_updateStatus = nullptr;
 };

@@ -576,15 +576,14 @@ void ShelfView::startDrag(Qt::DropActions actions) {
 // --- shelf ---
 
 Shelf::Shelf(QWidget *parent) : QWidget(parent), m_model(new ShelfModel(this)), m_view(new ShelfView(this)) {
-    setMinimumWidth(220);
     auto *col = new QVBoxLayout(this);
     col->setContentsMargins(0, 0, 0, 0);
     col->setSpacing(0);
 
     auto *header = new QWidget(this);
-    header->setFixedHeight(48);
+    header->setFixedHeight(40);
     auto *hrow = new QHBoxLayout(header);
-    hrow->setContentsMargins(6, 8, 8, 0);
+    hrow->setContentsMargins(8, 0, 8, 0);
     hrow->setSpacing(2);
     m_vaultButton = new VaultButton(header);
     m_vaultButton->setToolTip(T("切换笔记库"));
@@ -594,38 +593,14 @@ Shelf::Shelf(QWidget *parent) : QWidget(parent), m_model(new ShelfModel(this)), 
     hrow->addWidget(m_vaultButton, 1);
     m_searchButton = new IconButton(QStringLiteral("search"), T("搜索") + QStringLiteral(" (Ctrl+K)"), header);
     m_newButton = new IconButton(QStringLiteral("edit"), T("新建笔记") + QStringLiteral(" (Ctrl+N)"), header);
-    m_collapseButton = new IconButton(QStringLiteral("sidebar"), T("收起书架") + QStringLiteral(" (Ctrl+\\)"), header);
     connect(m_searchButton, &QToolButton::clicked, this, &Shelf::searchRequested);
     connect(m_newButton, &QToolButton::clicked, this, [this] { emit newNote(QString()); });
-    connect(m_collapseButton, &QToolButton::clicked, this, &Shelf::collapseRequested);
     hrow->addWidget(m_searchButton);
     hrow->addWidget(m_newButton);
-    hrow->addWidget(m_collapseButton);
     col->addWidget(header);
 
     m_view->setModel(m_model);
     col->addWidget(m_view, 1);
-
-    auto *footer = new QWidget(this);
-    footer->setFixedHeight(44);
-    auto *frow = new QHBoxLayout(footer);
-    frow->setContentsMargins(12, 4, 8, 6);
-    frow->setSpacing(6);
-    m_statusDot = new QLabel(footer);
-    m_statusDot->setFixedSize(10, 10);
-    frow->addWidget(m_statusDot);
-    m_status = new QPushButton(footer);
-    m_status->setFlat(true);
-    m_status->setCursor(Qt::PointingHandCursor);
-    m_status->setFont(Theme::uiFont(12));
-    m_status->setStyleSheet(QStringLiteral("QPushButton{border:none;padding:2px 2px;text-align:left;background:transparent;}"));
-    m_status->setSizePolicy(QSizePolicy::Ignored, QSizePolicy::Fixed);
-    connect(m_status, &QPushButton::clicked, this, &Shelf::syncStatusClicked);
-    frow->addWidget(m_status, 1);
-    m_settingsButton = new IconButton(QStringLiteral("settings"), T("设置") + QStringLiteral(" (Ctrl+,)"), footer);
-    connect(m_settingsButton, &QToolButton::clicked, this, &Shelf::settingsRequested);
-    frow->addWidget(m_settingsButton);
-    col->addWidget(footer);
 
     m_rebuildTimer.setSingleShot(true);
     m_rebuildTimer.setInterval(0);
@@ -643,10 +618,6 @@ Shelf::Shelf(QWidget *parent) : QWidget(parent), m_model(new ShelfModel(this)), 
         m_view->delegate()->fresh.clear();
         m_view->viewport()->update();
     });
-    m_clock.setInterval(30000);
-    connect(&m_clock, &QTimer::timeout, this, &Shelf::updateStatus);
-    m_clock.start();
-
     connect(m_view, &ShelfView::activated, this, &Shelf::onActivated);
     connect(m_view, &ShelfView::toggle, this, &Shelf::onToggle);
     connect(m_view, &ShelfView::contextMenu, this, &Shelf::onContextMenu);
@@ -655,7 +626,6 @@ Shelf::Shelf(QWidget *parent) : QWidget(parent), m_model(new ShelfModel(this)), 
     connect(m_view, &ShelfView::deletePressed, this, &Shelf::deleteRow);
     connect(m_view, &ShelfView::renamePressed, this, &Shelf::renameRow);
     connect(Theme::instance(), &Theme::changed, this, [this] {
-        updateStatus();
         m_view->viewport()->update();
     });
 }
@@ -671,13 +641,9 @@ void Shelf::setSession(Session *session) {
     if (session) {
         loadState();
         connect(m_engine, &SyncEngine::dataChanged, this, [this] { m_rebuildTimer.start(); });
-        connect(m_engine, &SyncEngine::stateChanged, this, &Shelf::updateStatus);
-        connect(session, &Session::userChanged, this, &Shelf::updateStatus);
-        connect(session, &Session::needsSignIn, this, &Shelf::updateStatus);
     }
     updateHeader();
     rebuild();
-    updateStatus();
 }
 
 void Shelf::updateHeader() {
@@ -1076,66 +1042,4 @@ void Shelf::onDropped(const QString &mime, const QString &ids, int row) {
     }
     if (!target.isEmpty()) m_expanded.insert(target);
     rebuild();
-}
-
-void Shelf::updateStatus() {
-    const Tokens &k = Theme::t();
-    QColor dot;
-    QString text;
-    bool pulse = false;
-    if (!m_session || !m_engine) {
-        text.clear();
-    } else if (!m_session->isRemote()) {
-        text = T("本地笔记库 · 仅保存在本机");
-    } else {
-        const SyncState &s = m_engine->state();
-        const qint64 now = QDateTime::currentMSecsSinceEpoch();
-        if (!m_session->signedIn() || m_engine->paused()) {
-            text = T("需要重新登录 · 更改保存在本机");
-            dot = k.danger;
-        } else if (s.blocked > 0) {
-            text = (i18n::isZh() ? QStringLiteral("%1 条更改被服务器拒绝") : QStringLiteral("%1 changes refused by the server")).arg(s.blocked);
-            dot = k.danger;
-        } else if (s.status == SyncState::Syncing) {
-            text = T("同步中…");
-        } else if (s.status == SyncState::Offline) {
-            text = s.pending + s.uploads > 0
-                       ? (i18n::isZh() ? QStringLiteral("离线中 · %1 条更改将在联网后自动同步") : QStringLiteral("Offline · %1 changes will sync when online")).arg(s.pending + s.uploads)
-                       : T("离线中");
-            dot = k.warn;
-        } else if (s.status == SyncState::Error) {
-            text = T("同步出错");
-            dot = k.danger;
-        } else if (s.pending + s.uploads > 0) {
-            text = (i18n::isZh() ? QStringLiteral("%1 条更改待同步") : QStringLiteral("%1 changes waiting")).arg(s.pending + s.uploads);
-            dot = k.warn;
-            pulse = true;
-        } else {
-            text = T("已同步") + QStringLiteral(" · ") + fmt::ago(s.lastSyncAt, now);
-            dot = k.ok;
-        }
-        if (s.status == SyncState::Error && !s.error.isEmpty() && s.error != QLatin1String("unauthorized"))
-            m_status->setToolTip(s.error);
-        else
-            m_status->setToolTip(T("点击立即同步"));
-    }
-    Q_UNUSED(pulse);
-    QPixmap pm(QSize(10, 10) * devicePixelRatioF());
-    pm.setDevicePixelRatio(devicePixelRatioF());
-    pm.fill(Qt::transparent);
-    if (dot.isValid()) {
-        QPainter p(&pm);
-        p.setRenderHint(QPainter::Antialiasing);
-        p.setPen(Qt::NoPen);
-        p.setBrush(dot);
-        p.drawEllipse(QRectF(2, 2, 6, 6));
-    }
-    m_statusDot->setPixmap(pm);
-    m_statusDot->setVisible(dot.isValid());
-    QPalette pal = m_status->palette();
-    pal.setColor(QPalette::ButtonText, k.muted);
-    m_status->setPalette(pal);
-    m_status->setText(m_status->fontMetrics().elidedText(text, Qt::ElideRight, std::max(60, m_status->width() - 4)));
-    m_status->setProperty("fullText", text);
-    if (!text.isEmpty() && m_status->toolTip().isEmpty()) m_status->setToolTip(text);
 }

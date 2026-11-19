@@ -75,6 +75,7 @@ const QHash<QString, QString> &paths() {
         {"vault", R"(<rect x="3" y="4" width="18" height="16" rx="3"/><path d="M8 4v16"/><path d="M12 9h5M12 13h5"/>)"},
         {"split", R"(<rect x="3" y="4" width="18" height="16" rx="2"/><path d="M12 4v16"/>)"},
         {"zap", R"(<path d="M13 2 3 14h9l-1 8 10-12h-9z"/>)"},
+        {"calendar", R"(<rect x="3" y="4.5" width="18" height="16.5" rx="2.5"/><path d="M3 10h18M8 2.5v4M16 2.5v4"/>)"},
         {"server", R"(<rect x="3" y="4" width="18" height="7" rx="2"/><rect x="3" y="13" width="18" height="7" rx="2"/><path d="M7 7.5h.01M7 16.5h.01"/>)"},
     };
     return p;

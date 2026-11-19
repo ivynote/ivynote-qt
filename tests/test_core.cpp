@@ -1,4 +1,5 @@
 #include "core/hlc.h"
+#include "core/agenda.h"
 #include "core/ids.h"
 #include "core/markdown.h"
 #include "core/models.h"
@@ -15,6 +16,21 @@
 class CoreTest : public QObject {
     Q_OBJECT
 private slots:
+    void agendaSkipsCompletedDeletedAndCode() {
+        Note n;
+        n.id = QStringLiteral("note");
+        n.body = QStringLiteral("- [x] done 📅 2026-01-01\n~~~md\n- [ ] sample 📅 2026-01-01\n~~~\n"
+                                "- [ ] timed 📅 2026-11-20 8:15\n- [ ] all-day 📅 2026-11-19\n- [ ] invalid 📅 2026-02-31");
+        Note trash = n;
+        trash.trashedAt = 10;
+        const auto tasks = agendaTasks({{n.id, n}, {QStringLiteral("trash"), trash}});
+        QCOMPARE(tasks.size(), 2);
+        QVERIFY(tasks.first().allDay);
+        QCOMPARE(tasks.last().due.time(), QTime(8, 15));
+        QCOMPARE(tasks.last().line, 4);
+        QCOMPARE(tasks.last().text, QStringLiteral("timed"));
+    }
+
     void editableTablesRoundTrip() {
         const QString source = QStringLiteral("| Name | Value |\n| :--- | ---: |\n| a\\|b | 10 |\n| `code` | 2 |");
         const md::Table table = md::parseTable(source);
@@ -78,6 +94,17 @@ private slots:
                  QStringLiteral("Head bold link Alias"));
         QCOMPARE(md::wordCount(QStringLiteral("你好世界 hello world")), 6);
         QCOMPARE(md::wordCount(QStringLiteral("```\ncode here\n```\none")), 1);
+    }
+
+    void noteStatistics() {
+        const auto s = md::noteStats(QStringLiteral("# Title\n\nFirst paragraph with [[Link]] and [web](https://x.io).\n\n- [x] done\n- [ ] open\n\n```\ncode\n\nmore\n```\n![img](ivy://res/abcdefgh12)\n"));
+        QCOMPARE(s.todos, 2);
+        QCOMPARE(s.todosDone, 1);
+        QCOMPARE(s.links, 2);
+        QCOMPARE(s.media, 1);
+        QCOMPARE(s.paragraphs, 6); // heading, text, two list items, the code block, the image line
+        QVERIFY(s.readMinutes >= 1);
+        QCOMPARE(md::noteStats(QString()).readMinutes, 0);
     }
 
     void tasksSkipCode() {

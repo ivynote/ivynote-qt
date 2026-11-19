@@ -4,12 +4,14 @@
 #include "core/i18n.h"
 #include "core/markdown.h"
 #include "core/models.h"
+#include "core/notelock.h"
 #include "sync/engine.h"
 #include "ui/dialogs.h"
 #include "ui/editor.h"
 #include "ui/highlighter.h"
 #include "ui/icons.h"
 #include "ui/markdownview.h"
+#include "ui/noteinfo.h"
 #include "ui/render.h"
 #include "ui/theme.h"
 #include "ui/toast.h"
@@ -17,8 +19,11 @@
 #include "vault/session.h"
 
 #include <QAbstractTextDocumentLayout>
+#include <QActionGroup>
 #include <QBuffer>
 #include <QComboBox>
+#include <QFutureWatcher>
+#include <QtConcurrent>
 #include <QShortcut>
 #include <QDateTime>
 #include <QDesktopServices>
@@ -66,57 +71,80 @@ private:
 };
 
 
+namespace {
+
+// The line under the title (time and word count): clicking it opens the note info.
+class MetaLabel : public QLabel {
+public:
+    explicit MetaLabel(QWidget *parent) : QLabel(parent) {
+        setCursor(Qt::PointingHandCursor);
+        setFont(Theme::uiFont(12.5));
+        paint(false);
+        connect(Theme::instance(), &Theme::changed, this, [this] { paint(m_hover); });
+    }
+    std::function<void()> clicked;
+
+protected:
+    void enterEvent(QEnterEvent *) override { paint(true); }
+    void leaveEvent(QEvent *) override { paint(false); }
+    void mouseReleaseEvent(QMouseEvent *e) override {
+        if (e->button() == Qt::LeftButton && rect().contains(e->position().toPoint()) && clicked) clicked();
+    }
+
+private:
+    void paint(bool hover) {
+        m_hover = hover;
+        QPalette pal = palette();
+        pal.setColor(QPalette::WindowText, hover ? Theme::t().ink2 : Theme::t().muted);
+        setPalette(pal);
+    }
+    bool m_hover = false;
+};
+
+// The note's actions: they float in the top right corner over the page
+// instead of taking a row of their own, so the title can start at the top.
+class FloatingBar : public QWidget {
+public:
+    explicit FloatingBar(QWidget *parent) : QWidget(parent) {}
+    std::function<void()> relayout;
+
+protected:
+    bool event(QEvent *e) override {
+        const bool handled = QWidget::event(e);
+        if (e->type() == QEvent::LayoutRequest && relayout) relayout();
+        return handled;
+    }
+};
+
+// The outline starts below the floating actions.
+class OutlineList : public QListWidget {
+public:
+    explicit OutlineList(QWidget *parent) : QListWidget(parent) { setViewportMargins(0, 44, 0, 0); }
+};
+
+} // namespace
+
 NotePane::NotePane(QWidget *parent) : QWidget(parent) {
-    auto *col = new QVBoxLayout(this);
+    // The note on the left; the outline, when open, runs the full height beside it.
+    auto *outer = new QHBoxLayout(this);
+    outer->setContentsMargins(0, 0, 0, 0);
+    outer->setSpacing(0);
+    auto *main = new QWidget(this);
+    outer->addWidget(main, 1);
+    auto *col = new QVBoxLayout(main);
     col->setContentsMargins(0, 0, 0, 0);
     col->setSpacing(0);
 
-    // Top bar: breadcrumb, status, actions.
-    m_topBar = new QWidget(this);
-    m_topBar->setFixedHeight(48);
+    auto *floating = new FloatingBar(this);
+    floating->relayout = [this] { placeTopBar(); };
+    m_topBar = floating;
     auto *top = new QHBoxLayout(m_topBar);
-    top->setContentsMargins(14, 8, 12, 0);
-    top->setSpacing(4);
-    m_expandShelf = new IconButton(QStringLiteral("sidebar"), T("展开书架") + QStringLiteral(" (Ctrl+\\)"), m_topBar);
-    m_expandShelf->hide();
-    connect(m_expandShelf, &QToolButton::clicked, this, &NotePane::expandShelfRequested);
-    top->addWidget(m_expandShelf);
-    auto *crumbHost = new QWidget(m_topBar);
-    m_crumbs = new QHBoxLayout(crumbHost);
-    m_crumbs->setContentsMargins(4, 0, 0, 0);
-    m_crumbs->setSpacing(2);
-    top->addWidget(crumbHost);
-    m_pendingDot = new QLabel(m_topBar);
-    m_pendingDot->setFixedSize(14, 14);
-    m_pendingDot->setToolTip(T("有待同步的修改"));
-    top->addWidget(m_pendingDot);
-    m_savedLabel = mutedLabel(T("已保存到本机"), m_topBar, 12);
-    m_savedLabel->hide();
-    top->addWidget(m_savedLabel);
-    top->addStretch(1);
-    auto *modePicker = new QComboBox(m_topBar);
-    modePicker->setObjectName(QStringLiteral("editorModePicker"));
-    modePicker->setFont(Theme::uiFont(12));
-    modePicker->addItem(T("即时渲染"), int(EditorMode::Live));
-    modePicker->addItem(T("源码"), int(EditorMode::Source));
-    modePicker->addItem(T("双栏"), int(EditorMode::Split));
-    modePicker->setToolTip(T("编辑模式"));
-    connect(modePicker, &QComboBox::activated, this, [this, modePicker](int i) {
-        setEditorMode(EditorMode(modePicker->itemData(i).toInt()));
-        focusEditor();
-    });
-    connect(this, &NotePane::editorModeChanged, modePicker, [modePicker](EditorMode mode) {
-        modePicker->setCurrentIndex(modePicker->findData(int(mode)));
-    });
-    top->addWidget(modePicker);
-    auto *insertButton = new QToolButton(m_topBar);
-    insertButton->setText(QStringLiteral("＋"));
-    insertButton->setAutoRaise(true);
+    top->setContentsMargins(0, 0, 0, 0);
+    top->setSpacing(2);
+    auto *insertButton = new IconButton(QStringLiteral("plus"), T("插入") + QStringLiteral(" (Ctrl+/)"), m_topBar);
     insertButton->setObjectName(QStringLiteral("insertButton"));
-    insertButton->setToolTip(T("插入") + QStringLiteral(" (Ctrl+/)"));
     connect(insertButton, &QToolButton::clicked, this, [this] { m_editor->showInsertMenu(); });
     top->addWidget(insertButton);
-
 
     m_shareButton = new IconButton(QStringLiteral("share"), T("分享"), m_topBar);
     m_outlineButton = new IconButton(QStringLiteral("outline"), T("大纲"), m_topBar);
@@ -128,12 +156,13 @@ NotePane::NotePane(QWidget *parent) : QWidget(parent) {
     top->addWidget(m_shareButton);
     top->addWidget(m_outlineButton);
     top->addWidget(m_moreButton);
-    col->addWidget(m_topBar);
+    m_topBar->adjustSize();
+    m_topBar->raise();
 
     // Trash banner.
     m_banner = new QWidget(this);
     auto *bannerRow = new QHBoxLayout(m_banner);
-    bannerRow->setContentsMargins(24, 8, 24, 8);
+    bannerRow->setContentsMargins(24, 8, 172, 8); // clear of the floating actions
     auto *bannerText = new QLabel(T("这篇笔记在回收站中，只读。"), m_banner);
     bannerRow->addWidget(bannerText, 1);
     auto *restore = new PillButton(T("恢复"), PillButton::Secondary, m_banner);
@@ -160,7 +189,7 @@ NotePane::NotePane(QWidget *parent) : QWidget(parent) {
     m_headHost = new QWidget(this);
     auto *head = m_head = new QWidget(m_headHost);
     auto *headCol = new QVBoxLayout(head);
-    headCol->setContentsMargins(0, 18, 0, 6);
+    headCol->setContentsMargins(0, 22, 0, 6);
     headCol->setSpacing(6);
     m_title = new QLineEdit(head);
     m_title->setFrame(false);
@@ -178,10 +207,19 @@ NotePane::NotePane(QWidget *parent) : QWidget(parent) {
     auto *metaLayout = new QHBoxLayout(metaRow);
     metaLayout->setContentsMargins(2, 0, 0, 0);
     metaLayout->setSpacing(10);
-    m_meta = mutedLabel(QString(), metaRow, 12.5);
+    auto *meta = new MetaLabel(metaRow);
+    m_meta = meta;
+    meta->clicked = [this] { showInfo(); };
     metaLayout->addWidget(m_meta);
     m_tagsRow = new FlowRow(metaRow);
     metaLayout->addWidget(m_tagsRow, 1);
+    m_pendingDot = new QLabel(metaRow);
+    m_pendingDot->setFixedSize(14, 14);
+    m_pendingDot->setToolTip(T("有待同步的修改"));
+    metaLayout->addWidget(m_pendingDot);
+    m_savedLabel = mutedLabel(T("已保存到本机"), metaRow, 12);
+    m_savedLabel->hide();
+    metaLayout->addWidget(m_savedLabel);
     headCol->addWidget(metaRow);
     auto *headRow = new QHBoxLayout(m_headHost);
     headRow->setContentsMargins(24, 0, 24, 0);
@@ -280,13 +318,60 @@ NotePane::NotePane(QWidget *parent) : QWidget(parent) {
     m_split->addWidget(m_preview);
     m_preview->hide();
     bodyRow->addWidget(m_split, 1);
-    m_outline = new QListWidget(body);
+    m_outline = new OutlineList(this);
     m_outline->setFixedWidth(224);
     m_outline->setFrameShape(QFrame::NoFrame);
     m_outline->setFont(Theme::uiFont(13));
     m_outline->hide();
-    bodyRow->addWidget(m_outline);
+    outer->addWidget(m_outline);
     col->addWidget(body, 1);
+
+    // Lock panel: stands in for the editor while a protected note is locked.
+    m_lockPanel = new QWidget(this);
+    auto *lockOuter = new QVBoxLayout(m_lockPanel);
+    lockOuter->setContentsMargins(24, 24, 24, 80);
+    lockOuter->addStretch(1);
+    auto *lockCol = new QVBoxLayout;
+    lockCol->setSpacing(10);
+    lockCol->setAlignment(Qt::AlignHCenter);
+    m_lockIcon = new QLabel(m_lockPanel);
+    m_lockIcon->setAlignment(Qt::AlignCenter);
+    auto *lockTitle = new QLabel(T("这篇笔记已加密"), m_lockPanel);
+    lockTitle->setAlignment(Qt::AlignCenter);
+    lockTitle->setFont(Theme::serif(20));
+    m_lockHint = mutedLabel(QString(), m_lockPanel, 12.5);
+    m_lockHint->setAlignment(Qt::AlignCenter);
+    m_lockHint->setWordWrap(true);
+    m_lockPassword = new QLineEdit(m_lockPanel);
+    m_lockPassword->setObjectName(QStringLiteral("noteLockPassword"));
+    m_lockPassword->setEchoMode(QLineEdit::Password);
+    m_lockPassword->setPlaceholderText(T("输入密码"));
+    m_lockPassword->setFixedWidth(280);
+    m_lockError = new QLabel(m_lockPanel);
+    m_lockError->setObjectName(QStringLiteral("noteLockError"));
+    m_lockError->setAlignment(Qt::AlignCenter);
+    m_lockError->setWordWrap(true);
+    m_lockButton = new PillButton(T("解锁"), PillButton::Primary, m_lockPanel);
+    m_lockButton->setObjectName(QStringLiteral("noteLockButton"));
+    for (QWidget *w : {static_cast<QWidget *>(m_lockIcon), static_cast<QWidget *>(lockTitle), static_cast<QWidget *>(m_lockHint),
+                       static_cast<QWidget *>(m_lockPassword), static_cast<QWidget *>(m_lockError), static_cast<QWidget *>(m_lockButton)})
+        lockCol->addWidget(w, 0, Qt::AlignHCenter);
+    lockOuter->addLayout(lockCol);
+    lockOuter->addStretch(2);
+    m_lockPanel->hide();
+    col->addWidget(m_lockPanel, 1);
+    connect(m_lockButton, &QToolButton::clicked, this, &NotePane::tryUnlock);
+    connect(m_lockPassword, &QLineEdit::returnPressed, this, &NotePane::tryUnlock);
+    passAppShortcuts(m_lockPassword);
+    // A key idle for ten minutes is forgotten: the open note locks again.
+    m_lockTimer.setInterval(15 * 1000);
+    connect(&m_lockTimer, &QTimer::timeout, this, [this] {
+        if (m_sealed && !notelock::hasLiveKey(m_lockKey)) {
+            relock();
+            Toaster::show(T("这篇笔记已自动锁定"));
+        }
+    });
+    m_lockTimer.start();
 
     // Backlinks.
     m_backlinksButton = new QToolButton(this);
@@ -349,11 +434,15 @@ NotePane::NotePane(QWidget *parent) : QWidget(parent) {
     });
     connect(m_preview->document()->documentLayout(), &QAbstractTextDocumentLayout::documentSizeChanged, this, [this] { m_scrollMap.clear(); });
     connect(m_editor, &MarkdownEditor::edited, this, [this] {
+        if (m_sealed) notelock::touch(m_lockKey);
         refreshFind();
         m_bodyDirty = true;
         m_bodyTimer.start();
         if (m_mode == EditorMode::Split) m_previewTimer.start();
     });
+    // Reading and moving around count as use too.
+    connect(m_editor, &QTextEdit::cursorPositionChanged, this, [this] { if (m_sealed) notelock::touch(m_lockKey); });
+    connect(m_editor->verticalScrollBar(), &QScrollBar::valueChanged, this, [this] { if (m_sealed) notelock::touch(m_lockKey); });
     connect(m_title, &QLineEdit::textEdited, this, [this] {
         m_titleDirty = true;
         m_titleTimer.start();
@@ -371,6 +460,7 @@ NotePane::NotePane(QWidget *parent) : QWidget(parent) {
     connect(m_editor, &MarkdownEditor::filesDropped, this, &NotePane::insertFiles);
     connect(m_editor, &MarkdownEditor::imagePasted, this, &NotePane::addImage);
     connect(m_preview, &QTextBrowser::anchorClicked, this, [this](const QUrl &url) {
+        if (url.scheme() == QStringLiteral("ivy-diagram")) return;
         const QString s = url.toString();
         if (s.startsWith(QLatin1String("ivy-task:"))) {
             if (m_engine && m_engine->note(m_id) && !m_editor->isReadOnly()) {
@@ -406,6 +496,10 @@ NotePane::NotePane(QWidget *parent) : QWidget(parent) {
             w->setPalette(lp);
         }
         m_backlinksButton->setIcon(icons::icon(QStringLiteral("backlink"), k.muted));
+        m_lockIcon->setPixmap(icons::icon(QStringLiteral("lock"), k.muted).pixmap(QSize(40, 40)));
+        QPalette ep = m_lockError->palette();
+        ep.setColor(QPalette::WindowText, k.danger);
+        m_lockError->setPalette(ep);
         refresh();
         refreshPreview();
     };
@@ -416,6 +510,9 @@ NotePane::NotePane(QWidget *parent) : QWidget(parent) {
 
 void NotePane::setSession(Session *session) {
     flush();
+    if (m_session != session) notelock::forgetAll(); // keys never outlive their library
+    m_sealed = m_locked = false;
+    m_lockKey = {};
     if (m_engine) m_engine->disconnect(this);
     if (m_session) m_session->disconnect(this);
     m_session = session;
@@ -425,7 +522,7 @@ void NotePane::setSession(Session *session) {
     m_shareButton->setVisible(session->isRemote());
     connect(m_engine, &SyncEngine::aboutToApplyRemote, this, &NotePane::flush, Qt::DirectConnection);
     connect(m_engine, &SyncEngine::remoteBody, this, [this](const QString &id, const QString &body) {
-        if (id == m_id && !m_bodyDirty && m_editor->markdown() != body) m_editor->applyRemote(body);
+        if (id == m_id && !m_bodyDirty) onRemoteBody(body);
     });
     connect(m_engine, &SyncEngine::dataChanged, this, [this] {
         refresh();
@@ -468,10 +565,10 @@ void NotePane::setNote(const QString &id) {
     const bool has = n != nullptr;
     for (QWidget *w : findChildren<QWidget *>(Qt::FindDirectChildrenOnly)) w->setEnabled(has);
     m_title->setText(n ? n->title : QString());
-    m_editor->setMarkdown(n ? n->body : QString());
-    m_editor->setReadOnly(!n || n->trashed());
-    m_replaceOne->setEnabled(n && !n->trashed());
-    m_replaceAll->setEnabled(n && !n->trashed());
+    loadBody(n ? n->body : QString());
+    m_editor->setReadOnly(!n || n->trashed() || m_locked);
+    m_replaceOne->setEnabled(n && !n->trashed() && !m_locked);
+    m_replaceAll->setEnabled(n && !n->trashed() && !m_locked);
     m_title->setReadOnly(!n || n->trashed());
     m_backlinks->hide();
     refresh();
@@ -481,7 +578,7 @@ void NotePane::setNote(const QString &id) {
     if (has) {
         // Note to note: a quick cross-fade, not a cut.
         rise(m_headHost, 180);
-        rise(m_body, 180);
+        rise(m_locked ? m_lockPanel : m_body, 180);
     }
 }
 
@@ -496,10 +593,27 @@ void NotePane::flush() {
         m_bodyDirty = m_titleDirty = false;
         return;
     }
+    // A locked note's editor is empty and not the note's text: never save it.
+    if (m_locked) m_bodyDirty = false;
     NotePatch p;
-    if (m_bodyDirty) p.body = m_editor->markdown();
+    if (m_bodyDirty) {
+        if (m_sealed) {
+            // The plaintext stays in this editor; only the sealed body is saved.
+            const QString sealed = notelock::seal(m_editor->markdown(), m_lockKey);
+            if (sealed.isEmpty()) {
+                Toaster::show(T("无法加密这篇笔记，修改未保存。"), true);
+                m_bodyDirty = false;
+            } else {
+                p.body = sealed;
+                notelock::touch(m_lockKey);
+            }
+        } else {
+            p.body = m_editor->markdown();
+        }
+    }
     if (m_titleDirty) p.title = m_title->text().simplified().left(300);
     m_bodyDirty = m_titleDirty = false;
+    if (!p.body && !p.title) return;
     m_engine->updateNote(m_id, p);
     if (!m_savedLabel->isVisible()) {
         m_savedLabel->show();
@@ -507,6 +621,196 @@ void NotePane::flush() {
     }
     m_savedTimer.start();
     if (p.body) refreshOutline();
+}
+
+// --- Password-protected notes (guide 8.4) ---
+
+void NotePane::loadBody(const QString &body) {
+    m_sealed = m_locked = false;
+    m_lockKey = {};
+    QString text = body;
+    if (notelock::isEncrypted(body)) {
+        QString plain;
+        notelock::Key key;
+        if (notelock::openRemembered(body, &plain, &key)) {
+            m_sealed = true;
+            m_lockKey = key;
+            text = plain;
+        } else {
+            m_locked = true;
+            text.clear();
+        }
+    }
+    m_editor->setMarkdown(text);
+    showLockPanel(m_locked, m_locked ? notelock::passwordHint(body) : QString());
+}
+
+void NotePane::showLockPanel(bool locked, const QString &hint) {
+    m_lockPanel->setVisible(locked);
+    m_body->setVisible(!locked);
+    if (auto *insert = findChild<QToolButton *>(QStringLiteral("insertButton"))) insert->setEnabled(!locked);
+    if (!locked) return;
+    m_findBar->hide();
+    m_lockHint->setText(hint.isEmpty() ? QString() : T("密码提示：") + hint);
+    m_lockHint->setVisible(!hint.isEmpty());
+    m_lockPassword->clear();
+    m_lockError->clear();
+    m_lockPassword->setEnabled(!m_unlocking);
+    m_lockButton->setEnabled(!m_unlocking);
+    if (isVisible() && !m_unlocking) m_lockPassword->setFocus();
+}
+
+void NotePane::reloadFromEngine() {
+    const Note *n = m_engine && !m_id.isEmpty() ? m_engine->note(m_id) : nullptr;
+    if (!n) return;
+    loadBody(n->body);
+    m_editor->setReadOnly(n->trashed() || m_locked);
+    m_replaceOne->setEnabled(!n->trashed() && !m_locked);
+    m_replaceAll->setEnabled(!n->trashed() && !m_locked);
+    refresh();
+    refreshOutline();
+    if (m_mode == EditorMode::Split) refreshPreview();
+}
+
+void NotePane::onRemoteBody(const QString &body) {
+    // A body from another device or the merge of ours. Plain notes just take
+    // it; protected ones are opened with the key we hold, or the lock panel
+    // comes back (the password was changed elsewhere, or the note was
+    // protected or unprotected there).
+    const bool encrypted = notelock::isEncrypted(body);
+    if (!encrypted && !m_sealed && !m_locked) {
+        if (m_editor->markdown() != body) m_editor->applyRemote(body);
+        return;
+    }
+    if (encrypted && m_sealed) {
+        QString plain;
+        if (notelock::open(body, m_lockKey, &plain) == notelock::Status::Ok) {
+            if (m_editor->markdown() != plain) m_editor->applyRemote(plain);
+            return;
+        }
+    }
+    reloadFromEngine();
+}
+
+void NotePane::tryUnlock() {
+    if (!m_locked || m_unlocking || !m_engine) return;
+    const QString password = m_lockPassword->text();
+    const Note *n = m_engine->note(m_id);
+    if (password.isEmpty() || !n) return;
+    struct Result {
+        notelock::Status status = notelock::Status::Broken;
+        notelock::Key key;
+    };
+    m_unlocking = true;
+    m_lockPassword->setEnabled(false);
+    m_lockButton->setEnabled(false);
+    m_lockError->clear();
+    const QString id = m_id;
+    const QString body = n->body;
+    auto *watcher = new QFutureWatcher<Result>(this);
+    connect(watcher, &QFutureWatcher<Result>::finished, this, [this, watcher, id] {
+        const Result r = watcher->result();
+        watcher->deleteLater();
+        m_unlocking = false;
+        m_lockPassword->setEnabled(true);
+        m_lockButton->setEnabled(true);
+        if (r.status == notelock::Status::Ok) {
+            // The key is remembered now; show the note it opens. When the user
+            // already moved on, the remembered key makes the next visit instant.
+            if (m_id == id) {
+                m_lockPassword->clear();
+                reloadFromEngine();
+                focusEditor();
+            }
+            return;
+        }
+        if (m_id != id) return;
+        m_lockError->setText(r.status == notelock::Status::WrongPassword ? T("密码不正确。") : T("这篇笔记的加密数据已损坏，无法打开。"));
+        m_lockPassword->selectAll();
+        m_lockPassword->setFocus();
+    });
+    watcher->setFuture(QtConcurrent::run([body, password] {
+        Result r;
+        QString plain;
+        r.status = notelock::unlock(body, password, &plain, &r.key);
+        return r;
+    }));
+}
+
+void NotePane::relock() {
+    if (!m_sealed) return;
+    flush();
+    notelock::forget(m_lockKey);
+    reloadFromEngine();
+}
+
+void NotePane::protectNote(bool change) {
+    if (!m_engine || m_id.isEmpty() || m_locked || m_protecting) return;
+    const Note *n = m_engine->note(m_id);
+    if (!n || n->trashed()) return;
+    QString password, hint;
+    if (!dialogs::askNotePassword(this, change, &password, &hint)) return;
+    flush();
+    m_protecting = true;
+    Toaster::show(T("正在加密…"));
+    const QString id = m_id;
+    auto *watcher = new QFutureWatcher<notelock::Key>(this);
+    connect(watcher, &QFutureWatcher<notelock::Key>::finished, this, [this, watcher, id] {
+        const notelock::Key key = watcher->result();
+        watcher->deleteLater();
+        m_protecting = false;
+        if (!key.valid()) {
+            Toaster::show(T("无法加密这篇笔记。"), true);
+            return;
+        }
+        const Note *cur = m_engine ? m_engine->note(id) : nullptr;
+        if (m_id != id || !cur || cur->trashed() || m_locked) {
+            Toaster::show(T("笔记已切换或不可编辑，没有加密。"), true);
+            return;
+        }
+        // Typing may have gone on while the key was derived: seal what the
+        // editor holds now.
+        m_editor->commitPendingCell();
+        m_bodyTimer.stop();
+        m_bodyDirty = false;
+        const QString sealed = notelock::seal(m_editor->markdown(), key);
+        if (sealed.isEmpty()) {
+            Toaster::show(T("无法加密这篇笔记。"), true);
+            return;
+        }
+        if (m_sealed) notelock::forget(m_lockKey);
+        m_sealed = true;
+        m_lockKey = key;
+        notelock::remember(key);
+        NotePatch p;
+        p.body = sealed;
+        m_engine->updateNote(id, p);
+        refresh();
+        Toaster::show(T("已加密。忘记密码无法恢复。"));
+    });
+    watcher->setFuture(QtConcurrent::run([password, hint] { return notelock::newKey(password, hint); }));
+}
+
+void NotePane::removeProtection() {
+    if (!m_engine || m_id.isEmpty() || !m_sealed) return;
+    if (!dialogs::confirm(this, T("移除密码"), T("移除密码后，这篇笔记会以明文保存和同步，服务器可以看到内容。继续吗？"), T("移除密码"))) return;
+    m_editor->commitPendingCell();
+    m_bodyTimer.stop();
+    m_bodyDirty = false;
+    const QString plain = m_editor->markdown();
+    if (notelock::isEncrypted(plain)) {
+        // Saving it would turn the note back into an unreadable envelope.
+        Toaster::show(T("正文本身是一段加密数据，无法移除密码。"), true);
+        return;
+    }
+    notelock::forget(m_lockKey);
+    m_sealed = false;
+    m_lockKey = {};
+    NotePatch p;
+    p.body = plain;
+    m_engine->updateNote(m_id, p);
+    refresh();
+    Toaster::show(T("已移除密码"));
 }
 
 void NotePane::refresh() {
@@ -517,38 +821,6 @@ void NotePane::refresh() {
         m_id.clear();
         setNote(QString());
         return;
-    }
-    // Breadcrumb.
-    while (QLayoutItem *it = m_crumbs->takeAt(0)) {
-        delete it->widget();
-        delete it;
-    }
-    if (n) {
-        auto crumb = [this, &k](const QString &text, const QString &folderId, bool last) {
-            auto *b = new QToolButton;
-            b->setAutoRaise(true);
-            b->setText(text);
-            b->setFont(Theme::uiFont(13));
-            b->setCursor(Qt::PointingHandCursor);
-            b->setStyleSheet(QStringLiteral("QToolButton{border:none;padding:2px 4px;color:%1;}QToolButton:hover{color:%2;}")
-                                 .arg((last ? k.muted : k.faint).name(), k.ink2.name()));
-            connect(b, &QToolButton::clicked, this, [this, folderId] { emit revealFolder(folderId); });
-            m_crumbs->addWidget(b);
-        };
-        if (n->trashed()) {
-            crumb(T("回收站"), QStringLiteral("v:trash"), true);
-        } else {
-            const auto path = m_engine->folderPath(n->folderId);
-            if (path.isEmpty()) crumb(T("笔记"), QString(), true);
-            for (int i = 0; i < path.size(); ++i) {
-                if (i) {
-                    auto *sep = new QLabel(QStringLiteral("/"));
-                    sep->setStyleSheet(QStringLiteral("color:%1;").arg(k.faint.name()));
-                    m_crumbs->addWidget(sep);
-                }
-                crumb(path[i]->name, path[i]->id, i == path.size() - 1);
-            }
-        }
     }
     // Pending dot.
     const bool pending = n && m_engine->hasPending(EntityType::Note, n->id) && m_session && m_session->isRemote();
@@ -572,9 +844,16 @@ void NotePane::refresh() {
     // Keep the title in step with other devices unless it is being typed.
     if (!m_titleDirty && !m_title->hasFocus() && m_title->text() != n->title) m_title->setText(n->title);
     const qint64 now = QDateTime::currentMSecsSinceEpoch();
-    const int words = n->words > 0 ? n->words : md::wordCount(n->body);
-    m_meta->setText(QStringLiteral("%1   %2 %3").arg(fmt::fullTime(n->updatedAt, now), fmt::number(words), T("字")));
-    m_meta->setToolTip(T("创建于") + u' ' + fmt::fullTime(n->createdAt, now));
+    const bool protectedNote = notelock::isEncrypted(n->body);
+    m_shareButton->setVisible(m_session && m_session->isRemote() && !protectedNote); // protected notes cannot be shared
+    if (protectedNote) {
+        // The count of a sealed body would be the ciphertext's.
+        m_meta->setText(QStringLiteral("%1   %2").arg(fmt::fullTime(n->updatedAt, now), T("已加密")));
+    } else {
+        const int words = n->words > 0 ? n->words : md::wordCount(n->body);
+        m_meta->setText(QStringLiteral("%1   %2 %3").arg(fmt::fullTime(n->updatedAt, now), fmt::number(words), T("字")));
+    }
+    m_meta->setToolTip(T("笔记信息") + QStringLiteral("\n") + T("创建于") + u' ' + fmt::fullTime(n->createdAt, now));
     // Tag chips.
     m_tagsRow->clear();
     for (const QString &tid : n->tags) {
@@ -678,6 +957,7 @@ void NotePane::refreshIndex() {
 }
 
 void NotePane::showFind() {
+    if (m_locked) return;
     m_editor->commitPendingCell();
     m_findBar->show();
     if (m_editor->textCursor().hasSelection()) {
@@ -738,19 +1018,27 @@ void NotePane::refreshFind() {
     if (m_findCase->isChecked()) flags |= QTextDocument::FindCaseSensitively;
     QTextCursor c(m_editor->document());
     int count = 0;
+    int current = 0;
+    const QTextCursor selected = m_editor->textCursor();
     while (!query.isEmpty()) {
         c = m_editor->document()->find(query, c, flags);
         if (c.isNull()) break;
         ++count;
+        const bool isCurrent = selected.hasSelection() && c.selectionStart() == selected.selectionStart() && c.selectionEnd() == selected.selectionEnd();
+        if (isCurrent) current = count;
         // Bound decoration cost on large notes, while reporting the full count.
         if (marks.size() < 2000) {
             QTextEdit::ExtraSelection mark;
             mark.cursor = c;
-            mark.format.setBackground(Theme::alpha(Theme::t().warn, 0.25));
+            // The match the cursor is on stands out from the rest, also while
+            // the focus is in the find field and the selection is drawn dim.
+            mark.format.setBackground(Theme::alpha(Theme::t().warn, isCurrent ? 0.6 : 0.25));
             marks << mark;
         }
     }
-    m_findCount->setText(query.isEmpty() ? QString() : QString::number(count));
+    m_findCount->setText(query.isEmpty() ? QString()
+                         : current ? QStringLiteral("%1 / %2").arg(current).arg(count)
+                                   : QString::number(count));
     m_editor->setExtraSelections(marks);
 }
 
@@ -767,7 +1055,20 @@ void NotePane::findNext(bool backward) {
     }
     if (found.isNull()) return;
     m_editor->setTextCursor(found);
-    m_editor->ensureCursorVisible();
+    centerMatch();
+    refreshFind();
+}
+
+// Brings the cursor to the middle of the editor, unless it already sits in the
+// middle part: a match that is in view stays put, one at the edge, or far
+// away, is moved to where it reads comfortably.
+void NotePane::centerMatch() {
+    const QRect r = m_editor->cursorRect();
+    const int height = m_editor->viewport()->height();
+    const int y = r.center().y();
+    if (y >= height * 0.35 && y <= height * 0.65) return;
+    QScrollBar *bar = m_editor->verticalScrollBar();
+    bar->setValue(bar->value() + y - height / 2);
 }
 
 void NotePane::refreshOutline() {
@@ -799,13 +1100,26 @@ void NotePane::refreshPreview() {
     syncScroll(true);
 }
 
+void NotePane::placeTopBar() {
+    m_topBar->adjustSize();
+    m_topBar->move(width() - m_topBar->width() - 10, 16);
+    m_topBar->raise();
+}
+
+void NotePane::resizeEvent(QResizeEvent *e) {
+    QWidget::resizeEvent(e);
+    placeTopBar();
+    alignHead();
+}
+
 void NotePane::alignHead() {
     // The head spans the editor's text column, wherever the editor sits
     // (narrower in the split view, beside the outline).
     const QRect col = m_editor->textColumn();
     const QPoint at = m_editor->mapTo(this, col.topLeft());
     const int left = std::max(0, at.x());
-    const int right = std::max(0, width() - left - col.width());
+    // Leave room for the floating actions when the column runs close to the edge.
+    const int right = std::max({0, m_headHost->width() - left - col.width(), m_topBar->width() + 16});
     if (auto *l = m_headHost->layout(); l->contentsMargins().left() != left || l->contentsMargins().right() != right)
         l->setContentsMargins(left, 0, right, 0);
 }
@@ -920,11 +1234,6 @@ void NotePane::setFontSize(int px) {
     m_preview->setBaseSize(px);
 }
 
-void NotePane::setShelfCollapsed(bool collapsed) {
-    m_shelfCollapsed = collapsed;
-    m_expandShelf->setVisible(collapsed);
-}
-
 void NotePane::toggleOutline() {
     m_outlineOpen = !m_outlineOpen;
     m_outlineButton->setChecked(m_outlineOpen);
@@ -998,6 +1307,10 @@ void NotePane::openLink(const QString &target, bool wiki) {
 
 void NotePane::attach(const QByteArray &data, const QString &name, const QString &mime) {
     if (!m_engine || m_id.isEmpty()) return;
+    if (m_locked) {
+        Toaster::show(T("先解锁这篇笔记，再插入文件。"), true);
+        return;
+    }
     const QString noteId = m_id;
     m_uploading++;
     refresh();
@@ -1013,14 +1326,19 @@ void NotePane::attach(const QByteArray &data, const QString &name, const QString
         QString label = f.name.isEmpty() ? name : f.name;
         label.remove(u'[').remove(u']');
         const QString md = (f.kind == QLatin1String("file") ? QString() : QStringLiteral("!")) + QStringLiteral("[%1](ivy://res/%2)").arg(label, f.id);
-        if (self->m_id == noteId) {
+        if (self->m_id == noteId && !self->m_locked) {
             self->m_editor->insertBlockText(md);
-        } else if (const Note *n = self->m_engine->note(noteId)) {
+        } else if (const Note *n = self->m_engine->note(noteId); n && !notelock::isEncrypted(n->body)) {
             NotePatch p;
             p.body = n->body + (n->body.endsWith(u'\n') || n->body.isEmpty() ? QString() : QStringLiteral("\n")) + md + u'\n';
             self->m_engine->updateNote(noteId, p);
+        } else if (n) {
+            // A sealed note that is not open cannot take text appended to it.
+            Toaster::show(T("这篇笔记已加密，文件没有插入。请解锁后重新插入。"), true);
+            return;
         }
-        if (f.local) Toaster::show(T("离线中，文件将在联网后上传"));
+        if (f.local && self->m_sealed) Toaster::show(T("离线中：加密笔记里的文件只在本机可见，联网后请重新插入。"), true);
+        else if (f.local) Toaster::show(T("离线中，文件将在联网后上传"));
     });
 }
 
@@ -1053,33 +1371,38 @@ void NotePane::pickTags() {
     dialogs::tagPicker(m_engine, m_id, m_tagsRow->mapToGlobal(QPoint(0, m_tagsRow->height() + 4)), this);
 }
 
+void NotePane::showInfo() {
+    if (!m_session || !m_engine || m_id.isEmpty() || !m_engine->note(m_id)) return;
+    flush();
+    NoteInfoDialog dialog(m_session, m_id, this);
+    const QString id = m_id;
+    connect(&dialog, &NoteInfoDialog::shareRequested, this, [this, id] { QTimer::singleShot(0, this, [this, id] { emit shareRequested(id); }); });
+    connect(&dialog, &NoteInfoDialog::historyRequested, this, [this, id] { QTimer::singleShot(0, this, [this, id] { emit historyRequested(id); }); });
+    dialog.exec();
+}
+
 void NotePane::showMoreMenu() {
     if (!m_engine || m_id.isEmpty()) return;
     const Note *n = m_engine->note(m_id);
     if (!n) return;
     QMenu menu(this);
-    // Editor mode as a segmented choice.
-    auto *modes = new QWidget(&menu);
-    auto *row = new QHBoxLayout(modes);
-    row->setContentsMargins(10, 6, 10, 6);
-    row->setSpacing(2);
-    const QList<QPair<EditorMode, const char *>> list{{EditorMode::Live, "即时渲染"}, {EditorMode::Source, "源码"}, {EditorMode::Split, "双栏"}};
-    for (const auto &[mode, label] : list) {
-        auto *b = new QPushButton(T(label), modes);
-        b->setCheckable(true);
-        b->setChecked(m_mode == mode);
-        b->setFlat(m_mode != mode);
-        connect(b, &QPushButton::clicked, &menu, [this, &menu, m = mode] {
-            setEditorMode(m);
-            menu.close();
-        });
-        row->addWidget(b);
-    }
-    auto *wa = new QWidgetAction(&menu);
-    wa->setDefaultWidget(modes);
-    menu.addAction(wa);
-    menu.addSeparator();
     const QString id = m_id;
+    menu.addAction(icons::themed("info"), T("笔记信息"), this, &NotePane::showInfo);
+    // The three editor modes are rarely switched, so they live here.
+    QMenu *modes = menu.addMenu(icons::themed("eye"), T("编辑模式"));
+    auto *modeGroup = new QActionGroup(modes);
+    const struct { EditorMode mode; const char *label; } entries[] = {{EditorMode::Live, "即时渲染"}, {EditorMode::Source, "源码"}, {EditorMode::Split, "双栏"}};
+    for (const auto &entry : entries) {
+        QAction *a = modes->addAction(T(entry.label));
+        a->setCheckable(true);
+        a->setChecked(m_mode == entry.mode);
+        modeGroup->addAction(a);
+        connect(a, &QAction::triggered, this, [this, mode = entry.mode] {
+            setEditorMode(mode);
+            focusEditor();
+        });
+    }
+    menu.addSeparator();
     if (!n->trashed()) {
         menu.addAction(icons::themed("pin"), n->pinned ? T("取消置顶") : T("设为置顶"), this, [this, id, pinned = n->pinned] {
             NotePatch p;
@@ -1088,11 +1411,22 @@ void NotePane::showMoreMenu() {
         });
         menu.addAction(icons::themed("move"), T("移动到…"), this, [this, id] { emit moveRequested(id); });
         menu.addAction(icons::themed("tag"), T("标签…"), this, &NotePane::pickTags);
-        menu.addAction(icons::themed("paperclip"), T("插入图片或文件…"), this, &NotePane::pickFiles);
-        menu.addAction(icons::themed("outline"), T("大纲"), this, &NotePane::toggleOutline);
+        if (!m_locked) {
+            menu.addAction(icons::themed("paperclip"), T("插入图片或文件…"), this, &NotePane::pickFiles);
+            menu.addAction(icons::themed("outline"), T("大纲"), this, &NotePane::toggleOutline);
+        }
         menu.addAction(icons::themed("copy"), T("复制笔记"), this, [this, id] { emit duplicateRequested(id); });
         if (m_session && m_session->isRemote()) menu.addAction(icons::themed("history"), T("历史版本"), this, [this, id] { emit historyRequested(id); });
         menu.addSeparator();
+        if (m_sealed) {
+            menu.addAction(icons::themed("lock"), T("立即锁定"), this, &NotePane::relock);
+            menu.addAction(icons::themed("edit"), T("修改密码…"), this, [this] { protectNote(true); });
+            menu.addAction(icons::themed("x"), T("移除密码…"), this, &NotePane::removeProtection);
+            menu.addSeparator();
+        } else if (!m_locked) {
+            menu.addAction(icons::themed("lock"), T("设置密码…"), this, [this] { protectNote(false); });
+            menu.addSeparator();
+        }
         menu.addAction(icons::themed("trash"), T("移到回收站"), this, [this, id] {
             flush();
             NotePatch p;

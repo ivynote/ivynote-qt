@@ -28,6 +28,19 @@ QStringList resourceRefs(const QString &body);  // ivy://res/<id>, code included
 
 QString excerpt(const QString &md, int max = 120);
 int wordCount(const QString &md);
+
+// Numbers for the note info panel, as in the web client's noteStats.
+struct NoteStats {
+    int words = 0;
+    int chars = 0;       // spaces and line breaks excluded
+    int paragraphs = 0;
+    int readMinutes = 0; // at least one for any text
+    int media = 0;       // embedded images, videos and attached files
+    int links = 0;       // to other notes and to the web
+    int todos = 0;
+    int todosDone = 0;
+};
+NoteStats noteStats(const QString &body);
 QString slug(const QString &text);
 
 struct Heading {

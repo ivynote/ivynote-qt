@@ -37,8 +37,9 @@ TransferJob *exportMarkdown(Session *session, const QString &dir, QObject *paren
 // Markdown files or folders; sub-folders become notebooks, front matter
 // (title, created, updated, tags, pinned) is kept, linked local files are
 // attached and links between imported notes are rewired.
+enum class MarkdownSource { Generic, Joplin, Obsidian };
 TransferJob *importMarkdown(Session *session, const QStringList &paths, const QString &targetFolderId,
-                            QObject *parent = nullptr);
+                            QObject *parent = nullptr, MarkdownSource source = MarkdownSource::Generic);
 
 // Notebooks, tags, notes and their files from another vault on this device.
 // Notes in its trash are left behind. Ids are new, so importing twice

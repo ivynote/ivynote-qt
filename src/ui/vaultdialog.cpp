@@ -5,11 +5,17 @@
 #include "sync/api.h"
 #include "ui/dialogs.h"
 #include "ui/icons.h"
+#include "ui/officialsites.h"
 #include "ui/theme.h"
 #include "ui/widgets.h"
 #include "storage/crypto.h"
 
 #include <QCheckBox>
+#include <QComboBox>
+#include <QJsonArray>
+#include <QNetworkAccessManager>
+#include <QSettings>
+#include <QTimeZone>
 #include <QFormLayout>
 #include <QHBoxLayout>
 #include <QJsonObject>
@@ -173,7 +179,47 @@ VaultDialog::VaultDialog(QWidget *parent, bool startWithServer) : QDialog(parent
         col->addWidget(sub);
         col->addSpacing(6);
         m_server = field(QStringLiteral("notes.example.com"), page);
+        auto *nodes = new QComboBox(page);
+        nodes->addItems({T("中国大陆"), T("全球"), T("自定义服务器")});
+        col->addWidget(nodes);
         col->addWidget(m_server);
+        const QStringList mainlandZones{QStringLiteral("Asia/Shanghai"), QStringLiteral("Asia/Urumqi"),
+            QStringLiteral("Asia/Chongqing"), QStringLiteral("Asia/Chungking"), QStringLiteral("Asia/Harbin"),
+            QStringLiteral("Asia/Kashgar"), QStringLiteral("PRC")};
+        nodes->setCurrentIndex(mainlandZones.contains(QString::fromUtf8(QTimeZone::systemTimeZoneId())) ? 0 : 1);
+        const auto selectNode = [this, nodes](int index) {
+            if (index == 2) {
+                m_server->clear();
+                m_server->setFocus();
+                return;
+            }
+            const QString id = index == 0 ? QStringLiteral("cn") : QStringLiteral("global");
+            const QString fallback = index == 0 ? QStringLiteral("https://web.ivynote.net") : QStringLiteral("https://web.ivynote.app");
+            m_server->setText(QSettings().value(QStringLiteral("officialNodes/") + id, fallback).toString());
+        };
+        connect(nodes, &QComboBox::activated, this, selectNode);
+        connect(m_server, &QLineEdit::textEdited, nodes, [nodes] { nodes->setCurrentIndex(2); });
+        selectNode(nodes->currentIndex());
+        official::fetch(new QNetworkAccessManager(this), this, QStringLiteral("/api/v1/regions"),
+            [this, nodes, selectNode](const QJsonObject &response) {
+                QHash<QString, QString> addresses;
+                for (const auto &region : response.value(QStringLiteral("regions")).toArray()) {
+                    const auto object = region.toObject();
+                    const auto id = object.value(QStringLiteral("id")).toString();
+                    const QUrl url(object.value(QStringLiteral("url")).toString(), QUrl::StrictMode);
+                    if (url.isValid() && url.scheme() == QStringLiteral("https") && !url.host().isEmpty() &&
+                        url.userInfo().isEmpty() && !url.authority().contains(u'@') && !url.hasQuery() &&
+                        !url.hasFragment() && (url.path().isEmpty() || url.path() == QStringLiteral("/"))) {
+                        addresses.insert(id, url.toString(QUrl::RemovePath | QUrl::FullyEncoded));
+                    }
+                }
+                if (!addresses.contains(QStringLiteral("cn")) || !addresses.contains(QStringLiteral("global"))) return false;
+                QSettings settings;
+                for (const auto &id : {QStringLiteral("cn"), QStringLiteral("global")})
+                    settings.setValue(QStringLiteral("officialNodes/") + id, addresses.value(id));
+                if (!m_api && nodes->currentIndex() < 2) selectNode(nodes->currentIndex());
+                return true;
+            });
         m_serverWarn = new QLabel(page);
         m_serverWarn->setWordWrap(true);
         QPalette wp = m_serverWarn->palette();
