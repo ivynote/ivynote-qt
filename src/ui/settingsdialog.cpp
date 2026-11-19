@@ -341,14 +341,34 @@ QWidget *SettingsDialog::aboutTab() {
     auto *tag = mutedLabel(T("本地优先的 Markdown 笔记") + QStringLiteral(" · ") + QStringLiteral("Qt " QT_VERSION_STR " · v" IVY_VERSION), w, 12.5);
     tag->setAlignment(Qt::AlignHCenter);
     col->addWidget(tag);
-    auto *check = new QPushButton(T("检查更新"), w);
-    check->setObjectName(QStringLiteral("aboutCheckUpdate"));
-    connect(check, &QPushButton::clicked, this, [this] { accept(); emit checkUpdates(); });
-    col->addWidget(check, 0, Qt::AlignHCenter);
+    m_checkUpdate = new QPushButton(T("检查更新"), w);
+    m_checkUpdate->setObjectName(QStringLiteral("aboutCheckUpdate"));
+    connect(m_checkUpdate, &QPushButton::clicked, this, [this] {
+        setUpdateStatus(true, T("正在检查更新…"));
+        emit checkUpdates();
+    });
+    col->addWidget(m_checkUpdate, 0, Qt::AlignHCenter);
+    m_updateStatus = mutedLabel(QString(), w, 12.0);
+    m_updateStatus->setObjectName(QStringLiteral("aboutUpdateStatus"));
+    m_updateStatus->setAlignment(Qt::AlignHCenter);
+    m_updateStatus->setWordWrap(true);
+    m_updateStatus->hide();
+    col->addWidget(m_updateStatus);
     col->addSpacing(12);
     auto *body = note(T("笔记先保存在本机，再在后台同步。服务器端的数据由服务器加密保存；勾选「加密本机数据」后，这台电脑上的副本也会加密，密钥存放在系统钥匙串中。"), w);
     body->setAlignment(Qt::AlignHCenter);
     col->addWidget(body);
     col->addStretch(1);
     return w;
+}
+
+void SettingsDialog::setUpdateStatus(bool checking, const QString &message) {
+    if (m_checkUpdate) {
+        m_checkUpdate->setEnabled(!checking);
+        m_checkUpdate->setText(checking ? T("正在检查更新…") : T("检查更新"));
+    }
+    if (m_updateStatus) {
+        m_updateStatus->setText(message);
+        m_updateStatus->setVisible(!message.isEmpty());
+    }
 }

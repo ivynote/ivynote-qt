@@ -8,14 +8,18 @@
 #include <QBuffer>
 #include <QPainter>
 #include <QSplitter>
+#include <QLabel>
 #include <QLineEdit>
+#include <QProgressDialog>
 #include <QPushButton>
 #include <QToolButton>
+#include "core/i18n.h"
 #include "ui/markdownview.h"
 #include "core/markdown.h"
 #include <QTextTable>
 #include "ui/palette.h"
 #include "ui/settingsdialog.h"
+#include "ui/updater.h"
 #include "ui/vaultdialog.h"
 #include "storage/localstore.h"
 #include "sync/engine.h"
@@ -690,11 +694,38 @@ private slots:
         SettingsDialog dlg(nullptr);
         dlg.showAboutTab();
         auto *button = dlg.findChild<QPushButton *>(QStringLiteral("aboutCheckUpdate"));
+        auto *status = dlg.findChild<QLabel *>(QStringLiteral("aboutUpdateStatus"));
         QVERIFY(button);
+        QVERIFY(status);
+        QVERIFY(status->isHidden());
         QSignalSpy spy(&dlg, &SettingsDialog::checkUpdates);
         button->click();
         QCOMPARE(spy.count(), 1);
-        QCOMPARE(dlg.result(), static_cast<int>(QDialog::Accepted));
+        QCOMPARE(dlg.result(), 0);
+        QVERIFY(!button->isEnabled());
+        QCOMPARE(button->text(), T("正在检查更新…"));
+        QVERIFY(!status->isHidden());
+        QCOMPARE(status->text(), T("正在检查更新…"));
+
+        const QString doneText = T("没有找到更新的版本，请稍后再试");
+        dlg.setUpdateStatus(false, doneText);
+        QVERIFY(button->isEnabled());
+        QCOMPARE(button->text(), T("检查更新"));
+        QCOMPARE(status->text(), doneText);
+    }
+
+    void manualUpdateShowsCheckingDialog() {
+        QWidget host;
+        updater::check(&host, true);
+        auto *progress = host.findChild<QProgressDialog *>(QStringLiteral("updateCheckProgress"), Qt::FindDirectChildrenOnly);
+        QVERIFY(progress);
+        QCOMPARE(progress->labelText(), T("正在检查更新…"));
+        QVERIFY(progress->isVisible());
+        auto *cancelBtn = progress->findChild<QPushButton *>();
+        QVERIFY(cancelBtn);
+        cancelBtn->click();
+        QCoreApplication::processEvents();
+        QVERIFY(!host.findChild<QObject *>(QStringLiteral("updateCheckSession"), Qt::FindDirectChildrenOnly));
     }
 };
 
