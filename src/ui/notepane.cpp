@@ -101,27 +101,46 @@ private:
     bool m_hover = false;
 };
 
+// The note's actions: they float in the top right corner over the page
+// instead of taking a row of their own, so the title can start at the top.
+class FloatingBar : public QWidget {
+public:
+    explicit FloatingBar(QWidget *parent) : QWidget(parent) {}
+    std::function<void()> relayout;
+
+protected:
+    bool event(QEvent *e) override {
+        const bool handled = QWidget::event(e);
+        if (e->type() == QEvent::LayoutRequest && relayout) relayout();
+        return handled;
+    }
+};
+
+// The outline starts below the floating actions.
+class OutlineList : public QListWidget {
+public:
+    explicit OutlineList(QWidget *parent) : QListWidget(parent) { setViewportMargins(0, 44, 0, 0); }
+};
+
 } // namespace
 
 NotePane::NotePane(QWidget *parent) : QWidget(parent) {
-    auto *col = new QVBoxLayout(this);
+    // The note on the left; the outline, when open, runs the full height beside it.
+    auto *outer = new QHBoxLayout(this);
+    outer->setContentsMargins(0, 0, 0, 0);
+    outer->setSpacing(0);
+    auto *main = new QWidget(this);
+    outer->addWidget(main, 1);
+    auto *col = new QVBoxLayout(main);
     col->setContentsMargins(0, 0, 0, 0);
     col->setSpacing(0);
 
-    // Top bar: breadcrumb, status, actions.
-    m_topBar = new QWidget(this);
-    m_topBar->setFixedHeight(40);
+    auto *floating = new FloatingBar(this);
+    floating->relayout = [this] { placeTopBar(); };
+    m_topBar = floating;
     auto *top = new QHBoxLayout(m_topBar);
-    top->setContentsMargins(14, 0, 10, 0);
-    top->setSpacing(4);
-    m_pendingDot = new QLabel(m_topBar);
-    m_pendingDot->setFixedSize(14, 14);
-    m_pendingDot->setToolTip(T("有待同步的修改"));
-    top->addWidget(m_pendingDot);
-    m_savedLabel = mutedLabel(T("已保存到本机"), m_topBar, 12);
-    m_savedLabel->hide();
-    top->addWidget(m_savedLabel);
-    top->addStretch(1);
+    top->setContentsMargins(0, 0, 0, 0);
+    top->setSpacing(2);
     auto *insertButton = new IconButton(QStringLiteral("plus"), T("插入") + QStringLiteral(" (Ctrl+/)"), m_topBar);
     insertButton->setObjectName(QStringLiteral("insertButton"));
     connect(insertButton, &QToolButton::clicked, this, [this] { m_editor->showInsertMenu(); });
@@ -137,12 +156,13 @@ NotePane::NotePane(QWidget *parent) : QWidget(parent) {
     top->addWidget(m_shareButton);
     top->addWidget(m_outlineButton);
     top->addWidget(m_moreButton);
-    col->addWidget(m_topBar);
+    m_topBar->adjustSize();
+    m_topBar->raise();
 
     // Trash banner.
     m_banner = new QWidget(this);
     auto *bannerRow = new QHBoxLayout(m_banner);
-    bannerRow->setContentsMargins(24, 8, 24, 8);
+    bannerRow->setContentsMargins(24, 8, 172, 8); // clear of the floating actions
     auto *bannerText = new QLabel(T("这篇笔记在回收站中，只读。"), m_banner);
     bannerRow->addWidget(bannerText, 1);
     auto *restore = new PillButton(T("恢复"), PillButton::Secondary, m_banner);
@@ -169,7 +189,7 @@ NotePane::NotePane(QWidget *parent) : QWidget(parent) {
     m_headHost = new QWidget(this);
     auto *head = m_head = new QWidget(m_headHost);
     auto *headCol = new QVBoxLayout(head);
-    headCol->setContentsMargins(0, 18, 0, 6);
+    headCol->setContentsMargins(0, 22, 0, 6);
     headCol->setSpacing(6);
     m_title = new QLineEdit(head);
     m_title->setFrame(false);
@@ -193,6 +213,13 @@ NotePane::NotePane(QWidget *parent) : QWidget(parent) {
     metaLayout->addWidget(m_meta);
     m_tagsRow = new FlowRow(metaRow);
     metaLayout->addWidget(m_tagsRow, 1);
+    m_pendingDot = new QLabel(metaRow);
+    m_pendingDot->setFixedSize(14, 14);
+    m_pendingDot->setToolTip(T("有待同步的修改"));
+    metaLayout->addWidget(m_pendingDot);
+    m_savedLabel = mutedLabel(T("已保存到本机"), metaRow, 12);
+    m_savedLabel->hide();
+    metaLayout->addWidget(m_savedLabel);
     headCol->addWidget(metaRow);
     auto *headRow = new QHBoxLayout(m_headHost);
     headRow->setContentsMargins(24, 0, 24, 0);
@@ -291,12 +318,12 @@ NotePane::NotePane(QWidget *parent) : QWidget(parent) {
     m_split->addWidget(m_preview);
     m_preview->hide();
     bodyRow->addWidget(m_split, 1);
-    m_outline = new QListWidget(body);
+    m_outline = new OutlineList(this);
     m_outline->setFixedWidth(224);
     m_outline->setFrameShape(QFrame::NoFrame);
     m_outline->setFont(Theme::uiFont(13));
     m_outline->hide();
-    bodyRow->addWidget(m_outline);
+    outer->addWidget(m_outline);
     col->addWidget(body, 1);
 
     // Lock panel: stands in for the editor while a protected note is locked.
@@ -1052,13 +1079,26 @@ void NotePane::refreshPreview() {
     syncScroll(true);
 }
 
+void NotePane::placeTopBar() {
+    m_topBar->adjustSize();
+    m_topBar->move(width() - m_topBar->width() - 10, 16);
+    m_topBar->raise();
+}
+
+void NotePane::resizeEvent(QResizeEvent *e) {
+    QWidget::resizeEvent(e);
+    placeTopBar();
+    alignHead();
+}
+
 void NotePane::alignHead() {
     // The head spans the editor's text column, wherever the editor sits
     // (narrower in the split view, beside the outline).
     const QRect col = m_editor->textColumn();
     const QPoint at = m_editor->mapTo(this, col.topLeft());
     const int left = std::max(0, at.x());
-    const int right = std::max(0, width() - left - col.width());
+    // Leave room for the floating actions when the column runs close to the edge.
+    const int right = std::max({0, m_headHost->width() - left - col.width(), m_topBar->width() + 16});
     if (auto *l = m_headHost->layout(); l->contentsMargins().left() != left || l->contentsMargins().right() != right)
         l->setContentsMargins(left, 0, right, 0);
 }

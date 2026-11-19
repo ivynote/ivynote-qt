@@ -61,7 +61,11 @@ signals:
     void editorModeChanged(EditorMode mode);
     void duplicateRequested(const QString &id);
 
+protected:
+    void resizeEvent(QResizeEvent *e) override;
+
 private:
+    void placeTopBar();
     void refresh();          // meta, breadcrumb, banner from the engine
     void refreshIndex();     // titles for links and completion; backlinks
     void refreshPreview();
