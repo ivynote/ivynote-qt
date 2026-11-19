@@ -877,6 +877,7 @@ void MainWindow::showSettings(SettingsPage page) {
     connect(&dlg, &SettingsDialog::importMarkdown, this, &MainWindow::importMarkdown, Qt::QueuedConnection);
     connect(&dlg, &SettingsDialog::importVault, this, &MainWindow::importVault, Qt::QueuedConnection);
     connect(&dlg, &SettingsDialog::exportMarkdown, this, &MainWindow::exportMarkdown, Qt::QueuedConnection);
+    connect(&dlg, &SettingsDialog::checkUpdates, this, [this] { QTimer::singleShot(0, this, [this] { updater::check(this, true); }); });
     connect(&dlg, &SettingsDialog::removeVault, this, [this, &dlg] {
         dlg.accept();
         QTimer::singleShot(0, this, &MainWindow::removeVault);

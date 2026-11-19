@@ -9,6 +9,7 @@
 #include <QPainter>
 #include <QSplitter>
 #include <QLineEdit>
+#include <QPushButton>
 #include <QToolButton>
 #include "ui/markdownview.h"
 #include "core/markdown.h"
@@ -683,6 +684,17 @@ private slots:
         QVERIFY(html.contains(QLatin1String("ivy-task:0")));
         QVERIFY(html.contains(QLatin1String("ivy-task:1")));
         QVERIFY(html.contains(QLatin1String("class=\"file\"")));
+    }
+
+    void aboutCheckUpdateButton() {
+        SettingsDialog dlg(nullptr);
+        dlg.showAboutTab();
+        auto *button = dlg.findChild<QPushButton *>(QStringLiteral("aboutCheckUpdate"));
+        QVERIFY(button);
+        QSignalSpy spy(&dlg, &SettingsDialog::checkUpdates);
+        button->click();
+        QCOMPARE(spy.count(), 1);
+        QCOMPARE(dlg.result(), static_cast<int>(QDialog::Accepted));
     }
 };
 

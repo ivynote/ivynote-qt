@@ -359,3 +359,14 @@ jobs:
               --repo "$GITHUB_REPOSITORY" --verify-tag \
               --title "Ivynote $VERSION" --notes-file ../notes.md --generate-notes "${flags[@]}"
           fi
+      # Tell the websites to pull this release immediately instead of waiting for
+      # their next poll (within 10 minutes). Skipped when SITE_ADMIN_TOKEN is unset.
+      - name: Refresh the websites
+        env:
+          TOKEN: ${{ secrets.SITE_ADMIN_TOKEN }}
+        run: |
+          [ -n "$TOKEN" ] || { echo "SITE_ADMIN_TOKEN not set; the sites refresh on their own"; exit 0; }
+          for site in https://ivynote.net https://ivynote.app; do
+            curl -fsS -m 30 --retry 3 -X POST -H "Authorization: Bearer $TOKEN" "$site/api/admin/releases/refresh" \
+              && echo "refreshed $site" || echo "::warning::could not refresh $site"
+          done

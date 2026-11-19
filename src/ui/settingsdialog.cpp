@@ -341,6 +341,10 @@ QWidget *SettingsDialog::aboutTab() {
     auto *tag = mutedLabel(T("本地优先的 Markdown 笔记") + QStringLiteral(" · ") + QStringLiteral("Qt " QT_VERSION_STR " · v" IVY_VERSION), w, 12.5);
     tag->setAlignment(Qt::AlignHCenter);
     col->addWidget(tag);
+    auto *check = new QPushButton(T("检查更新"), w);
+    check->setObjectName(QStringLiteral("aboutCheckUpdate"));
+    connect(check, &QPushButton::clicked, this, [this] { accept(); emit checkUpdates(); });
+    col->addWidget(check, 0, Qt::AlignHCenter);
     col->addSpacing(12);
     auto *body = note(T("笔记先保存在本机，再在后台同步。服务器端的数据由服务器加密保存；勾选「加密本机数据」后，这台电脑上的副本也会加密，密钥存放在系统钥匙串中。"), w);
     body->setAlignment(Qt::AlignHCenter);

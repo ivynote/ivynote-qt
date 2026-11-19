@@ -42,6 +42,7 @@ signals:
     void importMarkdown();
     void importVault();
     void exportMarkdown();
+    void checkUpdates();
     void removeVault();
     void vaultRenamed();
     void prefsSynced();
