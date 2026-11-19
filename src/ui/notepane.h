@@ -71,6 +71,7 @@ private:
     void refreshPreview();
     void refreshOutline();
     void findNext(bool backward = false);
+    void centerMatch();
     void refreshFind();
     void replaceMatches(bool all);
     void scheduleBody();

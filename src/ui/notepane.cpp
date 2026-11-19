@@ -1018,19 +1018,27 @@ void NotePane::refreshFind() {
     if (m_findCase->isChecked()) flags |= QTextDocument::FindCaseSensitively;
     QTextCursor c(m_editor->document());
     int count = 0;
+    int current = 0;
+    const QTextCursor selected = m_editor->textCursor();
     while (!query.isEmpty()) {
         c = m_editor->document()->find(query, c, flags);
         if (c.isNull()) break;
         ++count;
+        const bool isCurrent = selected.hasSelection() && c.selectionStart() == selected.selectionStart() && c.selectionEnd() == selected.selectionEnd();
+        if (isCurrent) current = count;
         // Bound decoration cost on large notes, while reporting the full count.
         if (marks.size() < 2000) {
             QTextEdit::ExtraSelection mark;
             mark.cursor = c;
-            mark.format.setBackground(Theme::alpha(Theme::t().warn, 0.25));
+            // The match the cursor is on stands out from the rest, also while
+            // the focus is in the find field and the selection is drawn dim.
+            mark.format.setBackground(Theme::alpha(Theme::t().warn, isCurrent ? 0.6 : 0.25));
             marks << mark;
         }
     }
-    m_findCount->setText(query.isEmpty() ? QString() : QString::number(count));
+    m_findCount->setText(query.isEmpty() ? QString()
+                         : current ? QStringLiteral("%1 / %2").arg(current).arg(count)
+                                   : QString::number(count));
     m_editor->setExtraSelections(marks);
 }
 
@@ -1047,7 +1055,20 @@ void NotePane::findNext(bool backward) {
     }
     if (found.isNull()) return;
     m_editor->setTextCursor(found);
-    m_editor->ensureCursorVisible();
+    centerMatch();
+    refreshFind();
+}
+
+// Brings the cursor to the middle of the editor, unless it already sits in the
+// middle part: a match that is in view stays put, one at the edge, or far
+// away, is moved to where it reads comfortably.
+void NotePane::centerMatch() {
+    const QRect r = m_editor->cursorRect();
+    const int height = m_editor->viewport()->height();
+    const int y = r.center().y();
+    if (y >= height * 0.35 && y <= height * 0.65) return;
+    QScrollBar *bar = m_editor->verticalScrollBar();
+    bar->setValue(bar->value() + y - height / 2);
 }
 
 void NotePane::refreshOutline() {
