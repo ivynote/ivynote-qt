@@ -378,7 +378,6 @@ bool MainWindow::openVault(const QString &id) {
     rebuildVaultMenu();
     updateTitle();
     for (QAction *a : std::as_const(m_remoteActions)) a->setVisible(s->isRemote());
-    for (QAction *a : std::as_const(m_localActions)) a->setVisible(!s->isRemote());
     if (m_backup) m_backup->setSession(s);
     const QString last = QSettings().value(noteKey(s)).toString();
     if (s->engine()->note(last)) {
@@ -503,9 +502,7 @@ void MainWindow::buildMenus() {
     import->addSeparator();
     import->addAction(T("从其他笔记库导入…"), this, &MainWindow::importVault);
     file->addAction(T("导出为 Markdown…"), this, &MainWindow::exportMarkdown);
-    QAction *localBackupAction = file->addAction(T("本地备份管理…"), this, [this] { showBackupManager(false); });
-    localBackupAction->setVisible(false);
-    m_localActions << localBackupAction;
+    file->addAction(T("本地备份管理…"), this, [this] { showBackupManager(false); });
     file->addSeparator();
     file->addAction(T("设置…"), QKeySequence(QStringLiteral("Ctrl+,")), this, [this] { showSettings(); });
     file->addSeparator();
@@ -723,7 +720,7 @@ void MainWindow::showVaultMenu(const QPoint &global) {
     menu.addAction(icons::themed("folder"), T("打开已有本地笔记库…"), this, &MainWindow::openExistingVault);
     menu.addAction(icons::themed("cloud"), T("连接 Ivynote 服务器…"), this, [this] { addVault(true); });
     menu.addSeparator();
-    if (m_session && !m_session->isRemote())
+    if (m_session)
         menu.addAction(icons::themed("download"), T("本地备份管理…"), this, [this] { showBackupManager(false); });
     menu.addAction(icons::themed("settings"), T("笔记库设置…"), this, [this] { showSettings(VaultPage); });
     menu.exec(global);
@@ -1096,14 +1093,13 @@ void MainWindow::showSearch(const QString &initial) {
     }
     if (m_session->isRemote()) {
         cmds.append({T("立即同步"), QStringLiteral("Ctrl+R"), QStringLiteral("refresh"), [this] { if (m_session) m_session->wake(); }});
-    } else {
-        cmds.append({T("本地备份管理…"), QString(), QStringLiteral("download"), [this] { showBackupManager(false); }});
-        cmds.append({T("立即备份本地笔记"), QString(), QStringLiteral("download"), [this] {
-            if (!m_session || m_session->isRemote() || !m_backup) return;
-            m_pane->flush();
-            m_backup->runNow(true);
-        }});
     }
+    cmds.append({T("本地备份管理…"), QString(), QStringLiteral("download"), [this] { showBackupManager(false); }});
+    cmds.append({T("立即执行本地备份"), QString(), QStringLiteral("download"), [this] {
+        if (!m_session || !m_backup) return;
+        m_pane->flush();
+        m_backup->runNow(true);
+    }});
     for (const VaultInfo &v : vaults::list())
         if (v.id != m_session->info().id)
             cmds.append({T("切换到") + QStringLiteral(" ") + v.name, QString(), QStringLiteral("vault"), [this, id = v.id] { openVault(id); }});
@@ -1124,7 +1120,7 @@ void MainWindow::showSettings(SettingsPage page) {
     connect(&dlg, &SettingsDialog::exportMarkdown, this, &MainWindow::exportMarkdown, Qt::QueuedConnection);
     connect(&dlg, &SettingsDialog::manageBackup, this, [this] { showBackupManager(false); }, Qt::QueuedConnection);
     connect(&dlg, &SettingsDialog::backupNow, this, [this] {
-        if (!m_session || m_session->isRemote() || !m_backup) return;
+        if (!m_session || !m_backup) return;
         m_pane->flush();
         m_backup->runNow(true);
     }, Qt::QueuedConnection);
@@ -1147,7 +1143,7 @@ void MainWindow::showSettings(SettingsPage page) {
 }
 
 void MainWindow::showBackupManager(bool firstRun) {
-    if (!m_session || m_session->isRemote() || !m_backup) return;
+    if (!m_session || !m_backup) return;
     m_pane->flush();
     LocalBackupDialog dlg(m_session, m_backup, firstRun, this);
     connect(&dlg, &LocalBackupDialog::importBackupRequested, this, [this](const QString &dir) {

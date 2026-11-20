@@ -335,11 +335,7 @@ private:
     bool prepare() {
         m_record.timestamp = QDateTime::currentMSecsSinceEpoch();
         if (!m_session || !m_session->engine()) {
-            m_record.error = T("没有打开的本地笔记库。");
-            return false;
-        }
-        if (m_session->isRemote()) {
-            m_record.error = T("本地备份仅适用于本地笔记库。");
+            m_record.error = T("没有打开的笔记库。");
             return false;
         }
         if (m_dir.isEmpty()) {
@@ -875,10 +871,12 @@ bool isDirectoryWritable(const QString &dir) {
 
 Config loadConfig(const VaultInfo &vault) {
     Config cfg;
+    cfg.enabled = !vault.isRemote();
+    cfg.configured = vault.isRemote();
     if (vault.id.isEmpty()) return cfg;
     QSettings s;
-    cfg.enabled = s.value(settingsKey(vault.id, "enabled"), true).toBool();
-    cfg.configured = s.value(settingsKey(vault.id, "configured"), false).toBool();
+    cfg.enabled = s.value(settingsKey(vault.id, "enabled"), !vault.isRemote()).toBool();
+    cfg.configured = s.value(settingsKey(vault.id, "configured"), vault.isRemote()).toBool();
     cfg.directory = cleanDirPath(s.value(settingsKey(vault.id, "directory"), QString()).toString());
     cfg.intervalMinutes = std::clamp(s.value(settingsKey(vault.id, "intervalMinutes"), kDefaultIntervalMinutes).toInt(), 5, 1440);
     if (cfg.directory.isEmpty()) cfg.directory = suggestDefaultDirectory(vault);
@@ -962,12 +960,14 @@ void LocalBackupManager::setSession(Session *session) {
     resetTimer();
     emit stateChanged();
 
-    // First time this local vault uses local backup: ask UI to show setup dialog.
-    if (!m_config.configured) {
+    // First time a local vault uses local backup: ask UI to show setup dialog.
+    // Remote vaults default to disabled and opt in manually without a startup prompt.
+    if (!m_session->isRemote() && !m_config.configured) {
         m_setupSignaled = true;
         QPointer<LocalBackupManager> self(this);
         QTimer::singleShot(450, this, [self] {
-            if (self && self->isActive() && !self->m_config.configured) emit self->needsInitialSetup();
+            if (self && self->isActive() && !self->m_session->isRemote() && !self->m_config.configured)
+                emit self->needsInitialSetup();
         });
     } else if (m_config.enabled) {
         const backup::SpaceCheck sc = currentSpace();
@@ -990,7 +990,7 @@ void LocalBackupManager::setSession(Session *session) {
 }
 
 bool LocalBackupManager::isActive() const {
-    return m_session && !m_session->isRemote() && m_session->engine();
+    return m_session && m_session->engine();
 }
 
 backup::ManifestSummary LocalBackupManager::manifestSummary() const {
@@ -1049,8 +1049,8 @@ void LocalBackupManager::runNow(bool manual) {
             m_job->deleteLater();
             m_job = nullptr;
         }
-        if (ok) m_dirty = false;
         const backup::RunRecord rec = m_pendingRecord;
+        if (ok && rec.missingAttachments == 0) m_dirty = false;
         emit backupFinished(rec);
         emit stateChanged();
     });
@@ -1063,5 +1063,5 @@ void LocalBackupManager::runIfDirtyOnClose() {
     const backup::SpaceCheck sc = currentSpace();
     if (sc.valid && sc.criticalSpace) return;
     const backup::RunRecord rec = backup::runIncrementalSync(m_session, m_config.directory, false);
-    if (rec.ok) m_dirty = false;
+    if (rec.ok && rec.missingAttachments == 0) m_dirty = false;
 }

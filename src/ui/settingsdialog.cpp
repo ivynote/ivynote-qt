@@ -31,6 +31,7 @@
 #include <QLineEdit>
 #include <QMessageBox>
 #include <QPushButton>
+#include <QResizeEvent>
 #include <QScrollArea>
 #include <QSettings>
 #include <QSpinBox>
@@ -64,6 +65,32 @@ void Prefs::setDefaultNoteFolder(const QString &v) { QSettings().setValue(QStrin
 void Prefs::setDefaultNoteTitle(const QString &v) { QSettings().setValue(QStringLiteral("ui/defaultNoteTitle"), v); emit changed(); }
 
 namespace {
+
+// Word-wrapped QLabel (especially with rich-text links or slash-separated paths)
+// computes sizeHint()/minimumSizeHint() at a narrow fallback width, inflating
+// row height even when the label fits in fewer lines. Size from heightForWidth()
+// at the current width (defaulting to one line before layout) instead.
+class WrapLabel : public QLabel {
+public:
+    using QLabel::QLabel;
+    QSize minimumSizeHint() const override {
+        const QMargins m = contentsMargins();
+        return {0, fontMetrics().height() + m.top() + m.bottom()};
+    }
+    QSize sizeHint() const override {
+        const QMargins m = contentsMargins();
+        if (wordWrap() && width() > 0) {
+            const int h = heightForWidth(width());
+            if (h > 0) return {width(), h};
+        }
+        return {QLabel::sizeHint().width(), fontMetrics().height() + m.top() + m.bottom()};
+    }
+protected:
+    void resizeEvent(QResizeEvent *e) override {
+        QLabel::resizeEvent(e);
+        if (e->size().width() != e->oldSize().width()) updateGeometry();
+    }
+};
 
 QLabel *note(const QString &text, QWidget *parent) {
     auto *l = mutedLabel(text, parent, 12);
@@ -262,27 +289,53 @@ QWidget *SettingsDialog::vaultTab() {
     const VaultInfo &info = m_session->info();
 
     auto *formBox = new QWidget(w);
-    auto *form = new QFormLayout(formBox);
-    form->setContentsMargins(0, 0, 0, 0);
+    auto *grid = new QGridLayout(formBox);
+    grid->setContentsMargins(0, 0, 0, 0);
+    grid->setHorizontalSpacing(12);
+    grid->setVerticalSpacing(10);
+    grid->setColumnStretch(1, 1);
+
+    int fRow = 0;
+    auto addFieldRow = [&](const QString &labelText, QWidget *field, Qt::Alignment labelAlign = Qt::AlignRight | Qt::AlignVCenter,
+                           const QString &labelObjName = QString()) {
+        if (!labelText.isEmpty()) {
+            auto *lbl = new QLabel(labelText, formBox);
+            if (!labelObjName.isEmpty()) lbl->setObjectName(labelObjName);
+            grid->addWidget(lbl, fRow, 0, labelAlign);
+        }
+        grid->addWidget(field, fRow++, 1);
+    };
+
     auto *name = new QLineEdit(info.name, formBox);
     connect(name, &QLineEdit::editingFinished, this, [this, name] {
         if (!m_session || name->text().trimmed().isEmpty() || name->text().trimmed() == m_session->info().name) return;
         m_session->rename(name->text());
         emit vaultRenamed();
     });
-    form->addRow(T("名称"), name);
-    form->addRow(T("类型"), new QLabel(info.isRemote() ? T("同步笔记库") : T("本地笔记库（不同步）"), formBox));
+    addFieldRow(T("名称"), name);
+
+    auto *typeLbl = new QLabel(info.isRemote() ? T("同步笔记库") : T("本地笔记库（不同步）"), formBox);
+    typeLbl->setObjectName(QStringLiteral("vaultTypeLabel"));
+    addFieldRow(T("类型"), typeLbl);
+
     if (info.isRemote()) {
-        auto *server = new QLabel(QStringLiteral("<a href=\"%1\">%1</a>").arg(info.server.toHtmlEscaped()), formBox);
+        auto *server = new WrapLabel(QStringLiteral("<a href=\"%1\">%1</a>").arg(info.server.toHtmlEscaped()), formBox);
         server->setOpenExternalLinks(true);
-        form->addRow(T("服务器"), server);
-        form->addRow(T("账户"), new QLabel(info.username, formBox));
+        server->setWordWrap(true);
+        server->setAlignment(Qt::AlignLeft | Qt::AlignTop);
+        server->setSizePolicy(QSizePolicy::Expanding, QSizePolicy::Preferred);
+        addFieldRow(T("服务器"), server, Qt::AlignRight | Qt::AlignTop);
+        addFieldRow(T("账户"), new QLabel(info.username, formBox));
     }
-    auto *dir = new QLabel(QStringLiteral("<a href=\"%1\">%2</a>").arg(QUrl::fromLocalFile(info.dir()).toString(), QDir::toNativeSeparators(info.dir()).toHtmlEscaped()), formBox);
+
+    auto *dir = new WrapLabel(QStringLiteral("<a href=\"%1\">%2</a>").arg(QUrl::fromLocalFile(info.dir()).toString(), QDir::toNativeSeparators(info.dir()).toHtmlEscaped()), formBox);
+    dir->setObjectName(QStringLiteral("vaultLocationLabel"));
     dir->setOpenExternalLinks(true);
     dir->setWordWrap(true);
-    dir->setSizePolicy(QSizePolicy::Expanding, QSizePolicy::Minimum);
-    form->addRow(T("位置"), dir);
+    dir->setAlignment(Qt::AlignLeft | Qt::AlignTop);
+    dir->setSizePolicy(QSizePolicy::Expanding, QSizePolicy::Preferred);
+    addFieldRow(T("位置"), dir, Qt::AlignRight | Qt::AlignTop, QStringLiteral("vaultLocationTitle"));
+
     auto *crypt = new QWidget(formBox);
     auto *cryptRow = new QHBoxLayout(crypt);
     cryptRow->setContentsMargins(0, 0, 0, 0);
@@ -296,9 +349,11 @@ QWidget *SettingsDialog::vaultTab() {
         cryptRow->addWidget(show);
     }
     cryptRow->addStretch(1);
-    form->addRow(T("本机加密"), crypt);
+    addFieldRow(T("本机加密"), crypt);
+
     if (secrets::insecure())
-        form->addRow(QString(), note(T("⚠ 系统钥匙串不可用，令牌和密钥保存在仅当前用户可读的文件中。"), formBox));
+        addFieldRow(QString(), note(T("⚠ 系统钥匙串不可用，令牌和密钥保存在仅当前用户可读的文件中。"), formBox));
+
     if (info.isRemote()) {
         auto *cache = new QWidget(formBox);
         auto *cacheRow = new QHBoxLayout(cache);
@@ -313,11 +368,11 @@ QWidget *SettingsDialog::vaultTab() {
         cacheRow->addWidget(size);
         cacheRow->addWidget(clear);
         cacheRow->addStretch(1);
-        form->addRow(T("附件缓存"), cache);
+        addFieldRow(T("附件缓存"), cache);
     }
     col->addWidget(formBox);
 
-    if (!info.isRemote()) {
+    {
         auto *bak = new QGroupBox(T("本地自动备份"), w);
         bak->setObjectName(QStringLiteral("localBackupGroup"));
         auto *bakCol = new QVBoxLayout(bak);
@@ -341,16 +396,17 @@ QWidget *SettingsDialog::vaultTab() {
             const QString when = QDateTime::fromMSecsSinceEpoch(sum.lastBackupAt).toString(QStringLiteral("yyyy-MM-dd HH:mm"));
             statusText += QStringLiteral(" · ") + T("上次备份：") + when;
         }
-        auto *statusLbl = new QLabel(statusText, bak);
+        auto *statusLbl = new WrapLabel(statusText, bak);
+        statusLbl->setObjectName(QStringLiteral("localBackupStatusLabel"));
         statusLbl->setWordWrap(true);
-        statusLbl->setSizePolicy(QSizePolicy::Expanding, QSizePolicy::Minimum);
+        statusLbl->setSizePolicy(QSizePolicy::Expanding, QSizePolicy::Preferred);
         statusLbl->setAlignment(Qt::AlignLeft | Qt::AlignTop);
         bakGrid->addWidget(new QLabel(T("状态"), bak), bRow, 0, Qt::AlignLeft | Qt::AlignTop);
         bakGrid->addWidget(statusLbl, bRow++, 1);
 
-        auto *bakDir = new QLabel(cfg.directory.isEmpty() ? T("未设置") : QDir::toNativeSeparators(cfg.directory), bak);
+        auto *bakDir = new WrapLabel(cfg.directory.isEmpty() ? T("未设置") : QDir::toNativeSeparators(cfg.directory), bak);
         bakDir->setWordWrap(true);
-        bakDir->setSizePolicy(QSizePolicy::Expanding, QSizePolicy::Minimum);
+        bakDir->setSizePolicy(QSizePolicy::Expanding, QSizePolicy::Preferred);
         bakDir->setAlignment(Qt::AlignLeft | Qt::AlignTop);
         bakDir->setTextInteractionFlags(Qt::TextSelectableByMouse);
         bakGrid->addWidget(new QLabel(T("备份目录"), bak), bRow, 0, Qt::AlignLeft | Qt::AlignTop);
@@ -359,9 +415,9 @@ QWidget *SettingsDialog::vaultTab() {
         if (space.valid) {
             const QString spText = (i18n::isZh() ? QStringLiteral("可用 %1 / 总计 %2") : QStringLiteral("%1 free / %2 total"))
                                        .arg(fmt::bytes(space.bytesAvailable), fmt::bytes(space.bytesTotal));
-            auto *spLbl = new QLabel(space.lowSpace ? QStringLiteral("⚠ ") + spText : spText, bak);
+            auto *spLbl = new WrapLabel(space.lowSpace ? QStringLiteral("⚠ ") + spText : spText, bak);
             spLbl->setWordWrap(true);
-            spLbl->setSizePolicy(QSizePolicy::Expanding, QSizePolicy::Minimum);
+            spLbl->setSizePolicy(QSizePolicy::Expanding, QSizePolicy::Preferred);
             spLbl->setAlignment(Qt::AlignLeft | Qt::AlignTop);
             if (space.lowSpace) {
                 QPalette pal = spLbl->palette();
@@ -390,7 +446,11 @@ QWidget *SettingsDialog::vaultTab() {
         bakRow->addWidget(openBtn);
         bakRow->addStretch(1);
         bakCol->addLayout(bakRow);
-        bakCol->addWidget(note(T("仅针对本地笔记库生效，定时以 Markdown 格式增量备份所有笔记与附件，可直接浏览或手动导入恢复。"), bak));
+        bakCol->addWidget(note(
+            info.isRemote()
+                ? T("在线笔记库默认关闭本地备份，可手动开启以定时将笔记与附件增量导出为 Markdown 留存本机，可直接浏览或手动导入恢复。")
+                : T("本地笔记库默认开启定时增量 Markdown 备份，可直接浏览或手动导入恢复。"),
+            bak));
         col->addWidget(bak);
     }
 

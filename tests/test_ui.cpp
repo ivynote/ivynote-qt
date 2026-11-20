@@ -991,16 +991,69 @@ private slots:
         std::unique_ptr<Session> remote(Session::open(remoteInfo, {}, &err, &msg));
         QVERIFY(remote != nullptr);
 
-        // SettingsDialog shows local backup group ONLY for local vaults.
+        // SettingsDialog shows local backup group for both local (enabled by default)
+        // and remote (disabled by default) vaults, and keeps the vault location link aligned.
         {
             SettingsDialog localSettings(local.get());
             localSettings.showVaultTab();
+            localSettings.resize(700, 620);
+            localSettings.show();
+            QCoreApplication::processEvents();
             QVERIFY(localSettings.findChild<QGroupBox *>(QStringLiteral("localBackupGroup")) != nullptr);
+            auto *locLbl = localSettings.findChild<QLabel *>(QStringLiteral("vaultLocationLabel"));
+            auto *rowTitle = localSettings.findChild<QLabel *>(QStringLiteral("vaultLocationTitle"));
+            auto *typeLbl = localSettings.findChild<QLabel *>(QStringLiteral("vaultTypeLabel"));
+            QVERIFY(locLbl && rowTitle && typeLbl);
+            QVERIFY2(qAbs(locLbl->y() - rowTitle->y()) <= 4,
+                     qPrintable(QStringLiteral("location row misaligned: label y=%1, field y=%2")
+                                    .arg(rowTitle->y()).arg(locLbl->y())));
+            const int hfw = locLbl->heightForWidth(locLbl->width());
+            QVERIFY2(locLbl->height() >= hfw && locLbl->height() <= hfw + 4,
+                     qPrintable(QStringLiteral("location label height mismatch: loc=%1x%2, hfw=%3")
+                                    .arg(locLbl->width()).arg(locLbl->height()).arg(hfw)));
+            // When wide enough to fit on one line, the label shrinks cleanly to single-line height.
+            localSettings.resize(1200, 620);
+            QCoreApplication::processEvents();
+            QVERIFY2(locLbl->height() <= typeLbl->height() + 4,
+                     qPrintable(QStringLiteral("single-line location bloated: loc=%1x%2, type=%3x%4, hfw=%5")
+                                    .arg(locLbl->width()).arg(locLbl->height())
+                                    .arg(typeLbl->width()).arg(typeLbl->height())
+                                    .arg(locLbl->heightForWidth(locLbl->width()))));
         }
         {
             SettingsDialog remoteSettings(remote.get());
             remoteSettings.showVaultTab();
-            QVERIFY(remoteSettings.findChild<QGroupBox *>(QStringLiteral("localBackupGroup")) == nullptr);
+            QVERIFY(remoteSettings.findChild<QGroupBox *>(QStringLiteral("localBackupGroup")) != nullptr);
+            auto *statusLbl = remoteSettings.findChild<QLabel *>(QStringLiteral("localBackupStatusLabel"));
+            QVERIFY(statusLbl != nullptr);
+            QVERIFY(statusLbl->text().contains(T("已关闭")));
+        }
+
+        // LocalBackupDialog for a remote vault defaults to unchecked and supports manual enable + backup.
+        {
+            remote->engine()->createNote({.title = QStringLiteral("Remote entry"), .body = QStringLiteral("Cloud note body")});
+            LocalBackupManager remoteMgr;
+            remoteMgr.setSession(remote.get());
+            QTemporaryDir remoteBakDir;
+            backup::Config rcfg = remoteMgr.config();
+            QVERIFY(!rcfg.enabled);
+            rcfg.directory = remoteBakDir.filePath(QStringLiteral("remote_bak"));
+            remoteMgr.updateConfig(rcfg);
+
+            LocalBackupDialog rdlg(remote.get(), &remoteMgr, false);
+            auto *enCheck = rdlg.findChild<QCheckBox *>(QStringLiteral("backupEnabledCheck"));
+            auto *saveBtn = rdlg.findChild<QPushButton *>(QStringLiteral("backupSaveBtn"));
+            QVERIFY(enCheck && saveBtn);
+            QVERIFY(!enCheck->isChecked());
+            enCheck->setChecked(true);
+            saveBtn->click();
+            QVERIFY(backup::loadConfig(remoteInfo).enabled);
+
+            QSignalSpy rDone(&remoteMgr, &LocalBackupManager::backupFinished);
+            remoteMgr.runNow(true);
+            QTRY_COMPARE(rDone.count(), 1);
+            QVERIFY(QFile::exists(QDir(rcfg.directory).filePath(QStringLiteral("Remote entry.md"))));
+            remoteMgr.setSession(nullptr);
         }
 
         // LocalBackupDialog first-run setup & manual backup run.
@@ -1045,6 +1098,7 @@ private slots:
         local->close();
         remote->close();
         backup::removeConfig(localInfo.id);
+        backup::removeConfig(remoteInfo.id);
     }
 
     void vaultDialogCustomLocationAndOpenExisting() {

@@ -108,5 +108,4 @@ private:
     QAction *m_readAction = nullptr;
     QList<QAction *> m_noteActions;
     QList<QAction *> m_remoteActions;
-    QList<QAction *> m_localActions;
 };

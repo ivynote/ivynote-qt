@@ -1,8 +1,9 @@
-// Incremental local Markdown backup for local-only vaults.
+// Incremental local Markdown backup for local and synced vaults.
 //
-// Only local vaults (VaultInfo::Local) participate: synced vaults already back
-// up to their server. Backups write standard Markdown files + YAML front matter
-// + _attachments/ compatible with transfer::importMarkdown(), tracking state in
+// Local vaults have scheduled incremental backup enabled by default; remote
+// (synced) vaults have it disabled by default and can enable it manually.
+// Backups write standard Markdown files + YAML front matter + _attachments/
+// compatible with transfer::importMarkdown(), tracking state in
 // .ivynote-backup.json so only changed notes and attachments are written and
 // untracked user files in the backup folder are never touched.
 #pragma once
@@ -51,9 +52,9 @@ struct SpaceCheck {
 };
 
 struct Config {
-    bool enabled = true;        // enabled by default for local vaults
+    bool enabled = true;        // default true for local vaults, false for remote vaults
     bool configured = false;    // becomes true after first-run setup or explicit save
-    QString directory;          // backup folder for this local vault
+    QString directory;          // backup folder for this vault
     int intervalMinutes = kDefaultIntervalMinutes;
 };
 
@@ -105,18 +106,18 @@ ManifestSummary readManifestSummary(const QString &dir);
 
 // --- Incremental export ---
 
-// Asynchronous incremental export job (local vaults only). Writes changed/new
-// notes and attachments atomically via QSaveFile, removes previously-tracked
-// stale files, and leaves untracked user files untouched.
+// Asynchronous incremental export job. Writes changed/new notes and
+// attachments atomically via QSaveFile, removes previously-tracked stale
+// files, and leaves untracked user files untouched.
 TransferJob *exportMarkdownIncremental(Session *session, const QString &dir, bool manual = true,
                                        RunRecord *outRecord = nullptr, QObject *parent = nullptr);
 
-// Synchronous incremental export for quick flush when closing a local vault.
+// Synchronous incremental export for quick flush when closing a vault.
 RunRecord runIncrementalSync(Session *session, const QString &dir, bool manual = false);
 
 } // namespace backup
 
-// Coordinates scheduled and on-demand incremental backups for the active local vault.
+// Coordinates scheduled and on-demand incremental backups for the active vault.
 class LocalBackupManager : public QObject {
     Q_OBJECT
 public:
@@ -124,7 +125,7 @@ public:
     ~LocalBackupManager() override;
 
     void setSession(Session *session);
-    bool isActive() const; // true iff a local vault is currently attached
+    bool isActive() const; // true iff a vault session is currently attached
     bool isRunning() const { return m_job != nullptr; }
     backup::Config config() const { return m_config; }
     backup::ManifestSummary manifestSummary() const;

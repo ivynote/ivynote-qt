@@ -319,8 +319,8 @@ private slots:
         QCOMPARE(r->attachments().size(), 1);
     }
 
-    void backupRejectsRemoteVaultAndManagerLifecycle() {
-        // Remote vault must be rejected by incremental backup and ignored by LocalBackupManager.
+    void backupRemoteAndLocalVaultManagerLifecycle() {
+        // Remote vault defaults to disabled (no startup prompt) and can be enabled & backed up manually.
         VaultInfo remoteInfo;
         remoteInfo.name = QStringLiteral("CloudVault");
         remoteInfo.kind = VaultInfo::Remote;
@@ -331,19 +331,32 @@ private slots:
         Session::OpenError oe = Session::OpenError::None;
         std::unique_ptr<Session> remote(Session::open(remoteInfo, {}, &oe, &err));
         QVERIFY(remote != nullptr);
-
-        QTemporaryDir dir;
-        backup::RunRecord remoteRec;
-        QVERIFY(!run(backup::exportMarkdownIncremental(remote.get(), dir.path(), true, &remoteRec)));
-        QVERIFY(!remoteRec.ok);
-        QVERIFY(!backup::runIncrementalSync(remote.get(), dir.path(), false).ok);
+        remote->engine()->createNote({.title = QStringLiteral("Cloud Note"), .body = QStringLiteral("synced content")});
 
         LocalBackupManager mgr;
         QSignalSpy setupSpy(&mgr, &LocalBackupManager::needsInitialSetup);
         mgr.setSession(remote.get());
-        QVERIFY(!mgr.isActive());
+        QVERIFY(mgr.isActive());
+        QVERIFY(!mgr.config().enabled);
+        QVERIFY(mgr.config().configured);
+        QVERIFY(!mgr.config().directory.isEmpty());
         QTest::qWait(50);
         QCOMPARE(setupSpy.count(), 0);
+
+        QTemporaryDir dir;
+        backup::Config remoteCfg = mgr.config();
+        remoteCfg.enabled = true;
+        remoteCfg.directory = dir.filePath(QStringLiteral("remote_bak"));
+        mgr.updateConfig(remoteCfg);
+        QVERIFY(backup::loadConfig(remote->info()).enabled);
+        QCOMPARE(backup::loadConfig(remote->info()).directory, remoteCfg.directory);
+
+        backup::RunRecord remoteRec;
+        QVERIFY(run(backup::exportMarkdownIncremental(remote.get(), remoteCfg.directory, true, &remoteRec)));
+        QVERIFY(remoteRec.ok);
+        QCOMPARE(remoteRec.writtenNotes, 1);
+        QVERIFY(QFile::exists(QDir(remoteCfg.directory).filePath(QStringLiteral("Cloud Note.md"))));
+        QVERIFY(backup::runIncrementalSync(remote.get(), remoteCfg.directory, false).ok);
 
         // Local vault activates manager, defaults to enabled=true with auto-selected directory, and runs cleanly.
         std::unique_ptr<Session> local(makeVault("MyLocalVault", false));
@@ -376,6 +389,11 @@ private slots:
         vaults::remove(localId);
         QVERIFY(!QSettings().contains(QStringLiteral("backup/%1/directory").arg(localId)));
         QVERIFY(QFile::exists(QDir(cfg.directory).filePath("Hello.md")));
+
+        remote->close();
+        remote.reset();
+        vaults::remove(remoteInfo.id);
+        QVERIFY(!QSettings().contains(QStringLiteral("backup/%1/directory").arg(remoteInfo.id)));
     }
 
     void defaultDataRootAndLegacyMigration() {
