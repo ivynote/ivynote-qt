@@ -93,7 +93,33 @@ private slots:
         QCOMPARE(md::excerpt(QStringLiteral("# Head\n\n**bold** [link](http://x) ![img](a.png) [[Wiki|Alias]]")),
                  QStringLiteral("Head bold link Alias"));
         QCOMPARE(md::wordCount(QStringLiteral("你好世界 hello world")), 6);
+        QCOMPARE(md::wordCount(QStringLiteral("Hello, world!")), 2);
+        QCOMPARE(md::wordCount(QStringLiteral("It's a don’t-miss “event”.")), 4);
+        QCOMPARE(md::wordCount(QStringLiteral("你好，世界！")), 6);
+        QCOMPARE(md::wordCount(QStringLiteral("使用Word软件")), 5);
+        QCOMPARE(md::wordCount(QStringLiteral("他说：“你好！”")), 8);
+        QCOMPARE(md::wordCount(QStringLiteral("你好——世界……")), 8);
+        QCOMPARE(md::wordCount(QStringLiteral("# 标题\n\n**加粗** 和 *斜体*\n\n---\n\n| 列一 | 列二 |\n| --- | --- |\n| 值一 | 值二 |")), 15);
         QCOMPARE(md::wordCount(QStringLiteral("```\ncode here\n```\none")), 1);
+        QCOMPARE(md::wordCount(QStringLiteral(
+            "东方\n"
+            "人在世上，往往会碰上\n"
+            "夜\t谈\t\n"
+            "\"晦气\"或“幸运”。自然，谁都喜欢“幸运”而不要“晦气”。但“幸运”降落到谁头\n"
+            "城隍抓“球”\t上会凭机遇，并非刻意追求\t\"可遇而不可求\".下面的故\t所能得,这就是人们常说的\t\n"
+            "事就充分证明了这个道理。\n"
+            "福建\t苏文恭\t\n"
+            "有个孩子，出生时右额角上就长着一个红红的肉瘤子。随着他年龄的增长，肉瘤子也一天天长大。到他八岁时，肉瘤子已有小皮球那么大了。\n"
+            "如果人人额上都长肉瘤子，那就没什么问题了。偏偏其他人没有，就他有，这就显得“出格”，“出格”就遭人嫌。于是，一家人都看不起他，父母亲也讨厌他。他在\n"
+            "你就别余\t半点温暖。\t家里成了“臭猪头”，得不到\t\n"
+            "一天晚饭后，无缘无故的母亲又指着儿子的肉瘤子大骂了起来，而且骂了个没完没了。这使孩子觉得非常伤心，就偷偷地离家出走\n"
+            "成功\n"
+            "去哪里呢?他不知道，只是沿着小道漫无目的地往\n"
+            "W\n"
+            "前走。走着走着，来到了城\n"
+            "也是有感情的\t也很累，他就在庙门口坐下\t\n"
+            "隍庙前。这时，天已漆黑，人\n"
+            "图膜")), 396);
     }
 
     void noteStatistics() {
