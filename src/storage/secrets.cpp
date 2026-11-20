@@ -1,4 +1,5 @@
 #include "storage/secrets.h"
+#include "vault/vaults.h"
 
 #include <QDir>
 #include <QEventLoop>
@@ -6,7 +7,6 @@
 #include <QJsonDocument>
 #include <QJsonObject>
 #include <QSaveFile>
-#include <QStandardPaths>
 #include <qt6keychain/keychain.h>
 
 namespace secrets {
@@ -18,7 +18,7 @@ bool g_fallbackOnly = false;
 bool g_insecure = false;
 
 QString fallbackPath() {
-    const QString dir = QStandardPaths::writableLocation(QStandardPaths::AppDataLocation);
+    const QString dir = vaults::dataRoot();
     QDir().mkpath(dir);
     return dir + QStringLiteral("/secrets.json");
 }

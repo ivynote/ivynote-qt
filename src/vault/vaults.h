@@ -36,6 +36,10 @@ struct VaultInfo {
 namespace vaults {
 
 QString dataRoot();
+QString defaultDataRoot(); // matches Tauri app_data_dir (app.ivynote.desktop)
+QString legacyDataRoot();  // previous Qt AppDataLocation (Ivynote/Ivynote)
+bool migrateLegacyData();
+bool migrateLegacyData(const QString &fromDir, const QString &toDir);
 QList<VaultInfo> list();
 VaultInfo find(const QString &id);
 void save(const VaultInfo &v); // insert or update

@@ -54,6 +54,7 @@ int main(int argc, char *argv[]) {
         QMessageBox::information(nullptr, T("常青笔记"), T("常青笔记已经在运行。"));
         return 0;
     }
+    vaults::migrateLegacyData();
 
     MainWindow w;
     w.show();

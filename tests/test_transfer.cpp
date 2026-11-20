@@ -376,6 +376,44 @@ private slots:
         QVERIFY(!QSettings().contains(QStringLiteral("backup/%1/directory").arg(localId)));
         QVERIFY(QFile::exists(QDir(cfg.directory).filePath("Hello.md")));
     }
+
+    void defaultDataRootAndLegacyMigration() {
+        QVERIFY(vaults::defaultDataRoot().endsWith(QStringLiteral("/app.ivynote.desktop")));
+
+        QTemporaryDir sandbox;
+        const QString legacy = sandbox.filePath(QStringLiteral("Ivynote/Ivynote"));
+        const QString target = sandbox.filePath(QStringLiteral("app.ivynote.desktop"));
+        QVERIFY(QDir().mkpath(legacy + QStringLiteral("/vaults/v1/files")));
+        QVERIFY(QDir().mkpath(target + QStringLiteral("/libraries/lib1/files")));
+
+        const auto write = [](const QString &path, const QByteArray &data) {
+            QFile f(path);
+            return f.open(QIODevice::WriteOnly) && f.write(data) == data.size();
+        };
+        QVERIFY(write(legacy + QStringLiteral("/vaults.json"), R"({"vaults":[{"id":"v1","name":"Old"}]})"));
+        QVERIFY(write(legacy + QStringLiteral("/vaults/v1/vault.db"), "sqlite-bytes"));
+        QVERIFY(write(legacy + QStringLiteral("/vaults/v1/files/f1"), "attachment-bytes"));
+        QVERIFY(write(legacy + QStringLiteral("/secrets.json"), R"({"k":"v"})"));
+        // Existing Tauri files in app.ivynote.desktop must stay completely untouched.
+        QVERIFY(write(target + QStringLiteral("/libraries/lib1/files/a"), "tauri-file"));
+
+        QVERIFY(vaults::migrateLegacyData(legacy, target));
+        QVERIFY(QFile::exists(target + QStringLiteral("/vaults.json")));
+        QVERIFY(QFile::exists(target + QStringLiteral("/vaults/v1/vault.db")));
+        QVERIFY(QFile::exists(target + QStringLiteral("/vaults/v1/files/f1")));
+        QVERIFY(QFile::exists(target + QStringLiteral("/secrets.json")));
+        QVERIFY(QFile::exists(target + QStringLiteral("/libraries/lib1/files/a")));
+        QVERIFY(!QFile::exists(legacy + QStringLiteral("/vaults.json")));
+
+        // Idempotent on second call, and never overwrites an existing target registry.
+        QVERIFY(!vaults::migrateLegacyData(legacy, target));
+        QVERIFY(QDir().mkpath(legacy));
+        QVERIFY(write(legacy + QStringLiteral("/vaults.json"), R"({"vaults":[{"id":"v2","name":"ShouldNotOverwrite"}]})"));
+        QVERIFY(!vaults::migrateLegacyData(legacy, target));
+        QFile reg(target + QStringLiteral("/vaults.json"));
+        QVERIFY(reg.open(QIODevice::ReadOnly));
+        QVERIFY(reg.readAll().contains("\"v1\""));
+    }
 };
 
 QTEST_MAIN(TransferTest)
