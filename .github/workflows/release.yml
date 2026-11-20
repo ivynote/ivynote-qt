@@ -143,12 +143,6 @@ jobs:
             echo "::warning::fcitx5 plugin not built; the AppImage will only have ibus input-method support"
           fi
 
-      # linuxdeploy-plugin-qt bundles every SQL driver it finds, and the
-      # MySQL/ODBC/PostgreSQL/Mimer ones need client libraries we neither have
-      # nor want. The app only uses SQLite.
-      - name: Keep only the SQLite driver
-        run: find "$QT_ROOT_DIR/plugins/sqldrivers" -name '*.so' ! -name 'libqsqlite.so' -print -delete
-
       - name: Packaging tools
         run: make appimage-tools
 

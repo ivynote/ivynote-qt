@@ -77,7 +77,7 @@ QString formatNoteTitle(const QString &tpl, const QDateTime &now, bool zh) {
     const QDate d = now.date();
     const QTime t = now.time();
     const int wd = d.dayOfWeek() % 7; // 0 = Sun .. 6 = Sat
-    auto pad2 = [](int v) { return QStringLiteral("%1").arg(v, 2, 10, u'0'); };
+    auto pad2 = [](int v) { return QStringLiteral("%1").arg(v, 2, 10, QLatin1Char('0')); };
     QString out;
     out.reserve(raw.size() + 16);
     qsizetype last = 0;
