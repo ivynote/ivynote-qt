@@ -267,8 +267,19 @@ void MainWindow::start() {
     auto *updates = new QTimer(this);
     connect(updates, &QTimer::timeout, this, [this] { updater::check(this, false); });
     updates->start(6 * 60 * 60 * 1000);
+    // Discover any valid unregistered local vaults already sitting in the default location.
+    vaults::discoverDefaultVaults();
     QString id = vaults::lastOpened();
-    if (vaults::find(id).id.isEmpty()) id = vaults::list().isEmpty() ? QString() : vaults::list().first().id;
+    if (vaults::find(id).id.isEmpty()) {
+        const auto all = vaults::list();
+        for (const VaultInfo &v : all) {
+            if (QFileInfo::exists(v.dir())) {
+                id = v.id;
+                break;
+            }
+        }
+        if (id.isEmpty() && !all.isEmpty()) id = all.first().id;
+    }
     if (id.isEmpty()) {
         // First run: a local vault, ready to write in.
         VaultInfo v;
@@ -475,6 +486,7 @@ void MainWindow::buildMenus() {
     file->addSeparator();
     m_vaultMenu = file->addMenu(T("切换笔记库"));
     file->addAction(T("新建或接入笔记库…"), this, [this] { addVault(); });
+    file->addAction(T("打开已有本地笔记库…"), this, &MainWindow::openExistingVault);
     file->addSeparator();
     QMenu *import = file->addMenu(T("导入"));
     const auto addImport = [this, import](const QString &label, transfer::MarkdownSource source) {
@@ -707,7 +719,8 @@ void MainWindow::showVaultMenu(const QPoint &global) {
         });
     }
     menu.addSeparator();
-    menu.addAction(icons::themed("plus"), T("新建本地笔记库…"), this, [this] { addVault(false); });
+    menu.addAction(icons::themed("plus"), T("新建本地笔记库…"), this, &MainWindow::createLocalVault);
+    menu.addAction(icons::themed("folder"), T("打开已有本地笔记库…"), this, &MainWindow::openExistingVault);
     menu.addAction(icons::themed("cloud"), T("连接 Ivynote 服务器…"), this, [this] { addVault(true); });
     menu.addSeparator();
     if (m_session && !m_session->isRemote())
@@ -718,6 +731,26 @@ void MainWindow::showVaultMenu(const QPoint &global) {
 
 void MainWindow::addVault(bool server) {
     VaultDialog dlg(this, server);
+    if (dlg.exec() != QDialog::Accepted || dlg.vaultId().isEmpty()) {
+        if (!m_session && !vaults::list().isEmpty()) openVault(vaults::list().first().id);
+        return;
+    }
+    openVault(dlg.vaultId());
+}
+
+void MainWindow::createLocalVault() {
+    VaultDialog dlg(this);
+    dlg.showLocalCreate();
+    if (dlg.exec() != QDialog::Accepted || dlg.vaultId().isEmpty()) {
+        if (!m_session && !vaults::list().isEmpty()) openVault(vaults::list().first().id);
+        return;
+    }
+    openVault(dlg.vaultId());
+}
+
+void MainWindow::openExistingVault() {
+    VaultDialog dlg(this);
+    dlg.showOpenExisting();
     if (dlg.exec() != QDialog::Accepted || dlg.vaultId().isEmpty()) {
         if (!m_session && !vaults::list().isEmpty()) openVault(vaults::list().first().id);
         return;
@@ -1049,6 +1082,7 @@ void MainWindow::showSearch(const QString &initial) {
         {T("导入 Markdown…"), QString(), QStringLiteral("upload"), [this] { importMarkdown(); }},
         {T("导出为 Markdown…"), QString(), QStringLiteral("download"), [this] { exportMarkdown(); }},
         {T("新建或接入笔记库…"), QString(), QStringLiteral("vault"), [this] { addVault(); }},
+        {T("打开已有本地笔记库…"), QString(), QStringLiteral("folder"), [this] { openExistingVault(); }},
         {T("设置"), QStringLiteral("Ctrl+,"), QStringLiteral("settings"), [this] { showSettings(); }},
         {T("清空回收站"), QString(), QStringLiteral("trash"), [this] { emptyTrash(); }},
     };
@@ -1063,6 +1097,7 @@ void MainWindow::showSearch(const QString &initial) {
     if (m_session->isRemote()) {
         cmds.append({T("立即同步"), QStringLiteral("Ctrl+R"), QStringLiteral("refresh"), [this] { if (m_session) m_session->wake(); }});
     } else {
+        cmds.append({T("更改笔记库位置…"), QString(), QStringLiteral("folder"), [this] { relocateVault(); }});
         cmds.append({T("本地备份管理…"), QString(), QStringLiteral("download"), [this] { showBackupManager(false); }});
         cmds.append({T("立即备份本地笔记"), QString(), QStringLiteral("download"), [this] {
             if (!m_session || m_session->isRemote() || !m_backup) return;
@@ -1094,6 +1129,7 @@ void MainWindow::showSettings(SettingsPage page) {
         m_pane->flush();
         m_backup->runNow(true);
     }, Qt::QueuedConnection);
+    connect(&dlg, &SettingsDialog::relocateVault, this, &MainWindow::relocateVault, Qt::QueuedConnection);
     connect(&dlg, &SettingsDialog::checkUpdates, this, [this, dlgPtr = QPointer<SettingsDialog>(&dlg)] {
         updater::check(this, true, [dlgPtr](updater::Outcome, const QString &message) {
             if (dlgPtr) dlgPtr->setUpdateStatus(false, message);
@@ -1234,36 +1270,90 @@ void MainWindow::exportMarkdown() {
     runJob(transfer::exportMarkdown(m_session, dir, this), T("正在导出…"));
 }
 
+void MainWindow::relocateVault() {
+    if (!m_session || m_session->isRemote()) return;
+    const VaultInfo info = m_session->info();
+    const QString target = QFileDialog::getExistingDirectory(this, T("选择新的笔记库位置"), info.dir());
+    if (target.isEmpty()) return;
+    const QString cleanTarget = QDir::cleanPath(target);
+    if (cleanTarget == QDir::cleanPath(info.dir())) {
+        Toaster::show(T("所选位置与当前笔记库位置相同"));
+        return;
+    }
+    const QString msg = (i18n::isZh()
+        ? QStringLiteral("将把「%1」的数据库与附件移动到：\n%2\n\n所选文件夹将直接作为新的笔记库目录（不会创建子文件夹）。")
+        : QStringLiteral("Move the database and attachments of \"%1\" to:\n%2\n\nThe selected folder will be used directly as the vault directory (no subfolder will be created)."))
+                            .arg(info.name, QDir::toNativeSeparators(cleanTarget));
+    if (!dialogs::confirm(this, T("更改笔记库位置"), msg, T("移动"))) return;
+
+    const QString openNoteId = m_pane->noteId();
+    m_pane->flush();
+    m_session->engine()->persistNow();
+    closeVault();
+
+    QString err;
+    const bool ok = vaults::relocate(info.id, cleanTarget, &err);
+    openVault(info.id);
+    if (!openNoteId.isEmpty() && m_session && m_session->engine()->note(openNoteId)) {
+        openNote(openNoteId);
+    }
+    if (!ok) {
+        QMessageBox::warning(this, T("更改笔记库位置失败"), err);
+        return;
+    }
+    Toaster::show(T("笔记库位置已更新"));
+}
+
 void MainWindow::removeVault() {
     if (!m_session) return;
     const VaultInfo info = m_session->info();
     const SyncState st = m_session->engine()->state();
-    QString text;
+    bool deleteFiles = true;
+
     if (info.isRemote()) {
-        text = T("退出登录并从这台电脑移除「%1」？服务器上的笔记不受影响。").arg(info.name);
+        QString text = T("退出登录并从这台电脑移除「%1」？服务器上的笔记不受影响。").arg(info.name);
         if (st.blocked > 0 || st.pending + st.uploads > 0)
             text += u'\n' + (i18n::isZh() ? QStringLiteral("\n注意：还有 %1 条更改没有同步到服务器（其中 %2 条被拒绝），移除后会丢失。")
                                           : QStringLiteral("\nNote: %1 changes have not reached the server (%2 refused) and will be lost."))
                                 .arg(st.pending + st.uploads + st.blocked).arg(st.blocked);
+        if (!dialogs::confirm(this, T("退出登录"), text, T("退出并移除"))) return;
+    } else if (info.hasCustomPath()) {
+        QMessageBox box(QMessageBox::Question, T("移除本地笔记库"),
+                        T("要如何处理本地笔记库「%1」？\n\n位置：%2").arg(info.name, QDir::toNativeSeparators(info.dir())),
+                        QMessageBox::NoButton, this);
+        QPushButton *unlinkBtn = box.addButton(T("仅从列表移除（保留文件）"), QMessageBox::AcceptRole);
+        QPushButton *deleteBtn = box.addButton(T("彻底删除笔记库文件"), QMessageBox::DestructiveRole);
+        box.addButton(T("取消"), QMessageBox::RejectRole);
+        box.setDefaultButton(unlinkBtn);
+        box.exec();
+        if (box.clickedButton() == unlinkBtn) {
+            deleteFiles = false;
+        } else if (box.clickedButton() == deleteBtn) {
+            deleteFiles = true;
+            bool ok = false;
+            const QString typed = QInputDialog::getText(this, T("删除笔记库"), T("请输入笔记库名称以确认："), QLineEdit::Normal, QString(), &ok);
+            if (!ok || typed.trimmed() != info.name) return;
+        } else {
+            return;
+        }
     } else {
-        text = T("永久删除本地笔记库「%1」及其中全部笔记和附件？此操作无法撤销。").arg(info.name);
-    }
-    if (!dialogs::confirm(this, info.isRemote() ? T("退出登录") : T("删除笔记库"), text, info.isRemote() ? T("退出并移除") : T("删除"))) return;
-    if (!info.isRemote()) {
+        const QString text = T("永久删除本地笔记库「%1」及其中全部笔记和附件？此操作无法撤销。").arg(info.name);
+        if (!dialogs::confirm(this, T("删除笔记库"), text, T("删除"))) return;
         bool ok = false;
         const QString typed = QInputDialog::getText(this, T("删除笔记库"), T("请输入笔记库名称以确认："), QLineEdit::Normal, QString(), &ok);
         if (!ok || typed.trimmed() != info.name) return;
     }
+
     m_pane->flush();
     QPointer<MainWindow> self(this);
     setEnabled(false);
-    Toaster::show(info.isRemote() ? T("正在同步并退出…") : T("正在删除…"));
-    m_session->signOut([self, info] {
+    Toaster::show(info.isRemote() ? T("正在同步并退出…") : (deleteFiles ? T("正在删除…") : T("正在移除…")));
+    m_session->signOut([self, info, deleteFiles] {
         if (!self) return;
         self->setEnabled(true);
         self->closeVault();
-        vaults::remove(info.id);
-        Toaster::show(info.isRemote() ? T("已退出并移除") : T("已删除"));
+        vaults::remove(info.id, deleteFiles);
+        Toaster::show(info.isRemote() ? T("已退出并移除") : (deleteFiles ? T("已删除") : T("已从列表移除，文件仍保留在原位置")));
         const auto rest = vaults::list();
         if (!rest.isEmpty() && self->openVault(rest.first().id)) return;
         self->rebuildVaultMenu();

@@ -278,10 +278,26 @@ QWidget *SettingsDialog::vaultTab() {
         form->addRow(T("服务器"), server);
         form->addRow(T("账户"), new QLabel(info.username, formBox));
     }
-    auto *dir = new QLabel(QStringLiteral("<a href=\"%1\">%2</a>").arg(QUrl::fromLocalFile(info.dir()).toString(), info.dir().toHtmlEscaped()), formBox);
+    auto *locBox = new QWidget(formBox);
+    auto *locCol = new QVBoxLayout(locBox);
+    locCol->setContentsMargins(0, 0, 0, 0);
+    locCol->setSpacing(6);
+    auto *dir = new QLabel(QStringLiteral("<a href=\"%1\">%2</a>").arg(QUrl::fromLocalFile(info.dir()).toString(), QDir::toNativeSeparators(info.dir()).toHtmlEscaped()), locBox);
     dir->setOpenExternalLinks(true);
     dir->setWordWrap(true);
-    form->addRow(T("位置"), dir);
+    dir->setSizePolicy(QSizePolicy::Expanding, QSizePolicy::Minimum);
+    locCol->addWidget(dir);
+    if (!info.isRemote()) {
+        auto *locActions = new QHBoxLayout;
+        locActions->setContentsMargins(0, 0, 0, 0);
+        auto *relocateBtn = new QPushButton(T("更改位置…"), locBox);
+        relocateBtn->setObjectName(QStringLiteral("changeVaultLocationBtn"));
+        connect(relocateBtn, &QPushButton::clicked, this, [this] { accept(); emit relocateVault(); });
+        locActions->addWidget(relocateBtn);
+        locActions->addStretch(1);
+        locCol->addLayout(locActions);
+    }
+    form->addRow(T("位置"), locBox);
     auto *crypt = new QWidget(formBox);
     auto *cryptRow = new QHBoxLayout(crypt);
     cryptRow->setContentsMargins(0, 0, 0, 0);
@@ -415,12 +431,18 @@ QWidget *SettingsDialog::vaultTab() {
 
     auto *danger = new QGroupBox(T("移除"), w);
     auto *dangerCol = new QVBoxLayout(danger);
-    auto *remove = new QPushButton(info.isRemote() ? T("退出登录并从本机移除…") : T("删除这个笔记库…"), danger);
+    const QString removeLabel = info.isRemote()
+        ? T("退出登录并从本机移除…")
+        : (info.hasCustomPath() ? T("移除或删除这个笔记库…") : T("删除这个笔记库…"));
+    const QString removeNote = info.isRemote()
+        ? T("会先同步，再结束登录，然后删除本机的笔记、附件缓存和令牌。服务器上的数据不受影响。")
+        : (info.hasCustomPath()
+               ? T("可以选择仅从列表移除（保留磁盘上的笔记库文件，日后可重新打开），或彻底删除笔记库文件。")
+               : T("会永久删除这台电脑上这个笔记库的全部笔记和附件。"));
+    auto *remove = new QPushButton(removeLabel, danger);
     connect(remove, &QPushButton::clicked, this, [this] { emit removeVault(); });
     dangerCol->addWidget(remove, 0, Qt::AlignLeft);
-    dangerCol->addWidget(note(info.isRemote() ? T("会先同步，再结束登录，然后删除本机的笔记、附件缓存和令牌。服务器上的数据不受影响。")
-                                              : T("会永久删除这台电脑上这个笔记库的全部笔记和附件。"),
-                              danger));
+    dangerCol->addWidget(note(removeNote, danger));
     col->addWidget(danger);
     col->addStretch(1);
     scroll->setWidget(w);

@@ -43,6 +43,8 @@ private:
     void rebuildVaultMenu();
     void showVaultMenu(const QPoint &global);
     void addVault(bool server = false);
+    void createLocalVault();
+    void openExistingVault();
     void newNote(const QString &folderId);
     void openNote(const QString &id);
     void openNoteInMode(const QString &id, bool forEditing);
@@ -63,6 +65,7 @@ private:
     void importMarkdown();
     void importVault();
     void exportMarkdown();
+    void relocateVault();
     void removeVault();
     void runJob(class TransferJob *job, const QString &title);
     void syncPrefsFromServer();

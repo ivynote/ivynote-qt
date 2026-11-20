@@ -3,6 +3,7 @@
 #include "storage/secrets.h"
 #include "sync/engine.h"
 #include "vault/backup.h"
+#include "vault/files.h"
 #include "vault/session.h"
 #include "vault/transfer.h"
 #include "vault/vaults.h"
@@ -413,6 +414,231 @@ private slots:
         QFile reg(target + QStringLiteral("/vaults.json"));
         QVERIFY(reg.open(QIODevice::ReadOnly));
         QVERIFY(reg.readAll().contains("\"v1\""));
+    }
+
+    void customVaultLocationDiscoverScanRelocateAndSafeRemove() {
+        QTemporaryDir external;
+        const QString customDir = external.filePath(QStringLiteral("MyCustomVault"));
+        QString err;
+
+        // 1. Create a local vault directly at customDir (no extra subdirectory).
+        VaultInfo custom;
+        custom.name = QStringLiteral("CustomNotes");
+        custom.kind = VaultInfo::Local;
+        custom.path = customDir;
+        QVERIFY2(vaults::create(custom, &err), qPrintable(err));
+        QVERIFY(custom.hasCustomPath());
+        QCOMPARE(custom.dir(), QDir::cleanPath(customDir));
+        QVERIFY(QFile::exists(customDir + QStringLiteral("/vault.json")));
+
+        {
+            Session::OpenError oe = Session::OpenError::None;
+            std::unique_ptr<Session> s(Session::open(custom, {}, &oe, &err));
+            QVERIFY2(s != nullptr, qPrintable(err));
+            const Note n = s->engine()->createNote({.title = QStringLiteral("Custom Note"), .body = QStringLiteral("Stored directly in custom folder")});
+            QVERIFY(s->files()->putFile(QStringLiteral("att1234567890123"), QByteArray("hello-bytes")));
+            QVERIFY(!n.id.isEmpty());
+            s->engine()->persistNow();
+            s->close();
+        }
+        QVERIFY(QFile::exists(customDir + QStringLiteral("/vault.db")));
+        QVERIFY(QDir(customDir + QStringLiteral("/files")).exists());
+        QVERIFY(backup::isPathInsideVault(customDir + QStringLiteral("/backups"), custom));
+
+        // 2. Creating another vault inside or overlapping customDir must fail.
+        {
+            VaultInfo overlap;
+            overlap.name = QStringLiteral("Overlap");
+            overlap.kind = VaultInfo::Local;
+            overlap.path = customDir + QStringLiteral("/nested");
+            QVERIFY(!vaults::create(overlap, &err));
+        }
+
+        // 3. inspectDir verifies valid local vaults, legacy vaults (without vault.json),
+        //    encrypted vaults, and rejects non-vault folders.
+        {
+            const DiscoveredVault d = vaults::inspectDir(customDir);
+            QVERIFY(d.valid);
+            QVERIFY(!d.encrypted);
+            QVERIFY(!d.isRemote);
+            QCOMPARE(d.name, QStringLiteral("CustomNotes"));
+            QCOMPARE(d.noteRecords, 1);
+            QCOMPARE(d.registeredId, custom.id);
+
+            // Legacy vault without vault.json still passes inspection.
+            QVERIFY(QFile::remove(customDir + QStringLiteral("/vault.json")));
+            const DiscoveredVault legacy = vaults::inspectDir(customDir);
+            QVERIFY(legacy.valid);
+            QCOMPARE(legacy.noteRecords, 1);
+
+            // Reopening recreates vault.json.
+            Session::OpenError oe = Session::OpenError::None;
+            std::unique_ptr<Session> s(Session::open(custom, {}, &oe, &err));
+            QVERIFY(s != nullptr);
+            s->close();
+            QVERIFY(QFile::exists(customDir + QStringLiteral("/vault.json")));
+
+            // Invalid dirs are rejected.
+            const QString notAVault = external.filePath(QStringLiteral("NotAVault"));
+            QVERIFY(QDir().mkpath(notAVault));
+            QVERIFY(!vaults::inspectDir(notAVault).valid);
+            QFile fakeDb(notAVault + QStringLiteral("/vault.db"));
+            QVERIFY(fakeDb.open(QIODevice::WriteOnly));
+            fakeDb.write("not a sqlite database at all, just junk bytes padded over 100 bytes................................................");
+            fakeDb.close();
+            QVERIFY(!vaults::inspectDir(notAVault).valid);
+        }
+
+        // Encrypted vault detection via meta.keycheck.
+        {
+            const QString encDir = external.filePath(QStringLiteral("EncryptedVault"));
+            VaultInfo enc;
+            enc.name = QStringLiteral("SecretVault");
+            enc.kind = VaultInfo::Local;
+            enc.encrypted = true;
+            enc.path = encDir;
+            QVERIFY2(vaults::create(enc, &err), qPrintable(err));
+            Session::OpenError oe = Session::OpenError::None;
+            std::unique_ptr<Session> s(Session::open(enc, {}, &oe, &err));
+            QVERIFY2(s != nullptr, qPrintable(err));
+            s->engine()->createNote({.title = QStringLiteral("Top Secret"), .body = QStringLiteral("Encrypted body")});
+            s->engine()->persistNow();
+            s->close();
+            vaults::remove(enc.id, false);
+            const DiscoveredVault d = vaults::inspectDir(encDir);
+            QVERIFY(d.valid);
+            QVERIFY(d.encrypted);
+            QVERIFY(!d.isRemote);
+            QVERIFY(d.registeredId.isEmpty());
+        }
+
+        // 4. Safe unlink (deleteFiles = false) keeps all files and allows re-attaching cleanly.
+        const QString userFile = customDir + QStringLiteral("/unrelated-user-file.txt");
+        {
+            QFile f(userFile);
+            QVERIFY(f.open(QIODevice::WriteOnly));
+            f.write("keep me safe");
+        }
+        vaults::remove(custom.id, false);
+        QVERIFY(vaults::find(custom.id).id.isEmpty());
+        QVERIFY(QFile::exists(customDir + QStringLiteral("/vault.db")));
+        QVERIFY(QFile::exists(userFile));
+
+        VaultInfo reattached;
+        QVERIFY2(vaults::attachExisting(customDir, QString(), &reattached, &err), qPrintable(err));
+        QCOMPARE(reattached.name, QStringLiteral("CustomNotes"));
+        QCOMPARE(reattached.dir(), QDir::cleanPath(customDir));
+        // Re-attaching an already-registered vault deduplicates cleanly.
+        VaultInfo reattachedAgain;
+        QVERIFY(vaults::attachExisting(customDir, QString(), &reattachedAgain, &err));
+        QCOMPARE(reattachedAgain.id, reattached.id);
+
+        // 5. scanForVaults discovers custom vaults inside provided roots and skips hidden dirs.
+        {
+            const QString scanRoot = external.filePath(QStringLiteral("ScanArea"));
+            const QString nestedVault = scanRoot + QStringLiteral("/Projects/2026/ScannedDiary");
+            VaultInfo sv;
+            sv.name = QStringLiteral("ScannedDiary");
+            sv.kind = VaultInfo::Local;
+            sv.path = nestedVault;
+            QVERIFY(vaults::create(sv, &err));
+            Session::OpenError oe = Session::OpenError::None;
+            std::unique_ptr<Session> s(Session::open(sv, {}, &oe, &err));
+            QVERIFY(s != nullptr);
+            s->engine()->createNote({.title = QStringLiteral("Scanned Note"), .body = QStringLiteral("Found me!")});
+            s->engine()->persistNow();
+            s->close();
+            vaults::remove(sv.id, false);
+
+            const QList<DiscoveredVault> found = vaults::scanForVaults({scanRoot});
+            QCOMPARE(found.size(), 1);
+            QCOMPARE(found.first().dir, QDir::cleanPath(nestedVault));
+            QCOMPARE(found.first().name, QStringLiteral("ScannedDiary"));
+            QCOMPARE(found.first().noteRecords, 1);
+        }
+
+        // 6. relocate moves vault artifacts directly into the new folder without touching unrelated user files.
+        const QString relocatedDir = external.filePath(QStringLiteral("RelocatedVault"));
+        QVERIFY(!vaults::relocate(reattached.id, customDir + QStringLiteral("/inside"), &err));
+        QVERIFY2(vaults::relocate(reattached.id, relocatedDir, &err), qPrintable(err));
+        QCOMPARE(vaults::find(reattached.id).dir(), QDir::cleanPath(relocatedDir));
+        QVERIFY(QFile::exists(relocatedDir + QStringLiteral("/vault.db")));
+        QVERIFY(QFile::exists(relocatedDir + QStringLiteral("/vault.json")));
+        QVERIFY(QDir(relocatedDir + QStringLiteral("/files")).exists());
+        QVERIFY(!QFile::exists(customDir + QStringLiteral("/vault.db")));
+        QVERIFY(QFile::exists(userFile)); // unrelated file stayed untouched in old folder
+
+        {
+            Session::OpenError oe = Session::OpenError::None;
+            std::unique_ptr<Session> s(Session::open(vaults::find(reattached.id), {}, &oe, &err));
+            QVERIFY2(s != nullptr, qPrintable(err));
+            QCOMPARE(s->engine()->notes().size(), 1);
+            QCOMPARE(s->engine()->notes().constBegin()->title, QStringLiteral("Custom Note"));
+            QByteArray attData;
+            QVERIFY(s->files()->readFile(QStringLiteral("att1234567890123"), &attData));
+            QCOMPARE(attData, QByteArray("hello-bytes"));
+            s->close();
+        }
+
+        // 7. Destructive remove (deleteFiles = true) on a custom folder removes only Ivynote artifacts.
+        const QString keepInRelocated = relocatedDir + QStringLiteral("/personal.txt");
+        {
+            QFile f(keepInRelocated);
+            QVERIFY(f.open(QIODevice::WriteOnly));
+            f.write("do not delete");
+        }
+        vaults::remove(reattached.id, true);
+        QVERIFY(!QFile::exists(relocatedDir + QStringLiteral("/vault.db")));
+        QVERIFY(!QFile::exists(relocatedDir + QStringLiteral("/vault.json")));
+        QVERIFY(!QDir(relocatedDir + QStringLiteral("/files")).exists());
+        QVERIFY(QFile::exists(keepInRelocated));
+
+        // 8. discoverDefaultVaults recovers unregistered local vaults in default dataRoot()/vaults
+        //    and ignores remote vault caches.
+        {
+            const QString prevRoot = vaults::dataRoot();
+            QTemporaryDir freshRoot;
+            vaults::setDataRoot(freshRoot.path());
+
+            VaultInfo defVault;
+            defVault.name = QStringLiteral("DefaultVault");
+            defVault.kind = VaultInfo::Local;
+            QVERIFY(vaults::create(defVault, &err));
+            {
+                Session::OpenError oe = Session::OpenError::None;
+                std::unique_ptr<Session> s(Session::open(defVault, {}, &oe, &err));
+                QVERIFY(s != nullptr);
+                s->engine()->createNote({.title = QStringLiteral("Survived"), .body = QStringLiteral("In default dir")});
+                s->engine()->persistNow();
+                s->close();
+            }
+
+            VaultInfo remoteCache;
+            remoteCache.name = QStringLiteral("RemoteCache");
+            remoteCache.kind = VaultInfo::Remote;
+            remoteCache.server = QStringLiteral("https://example.invalid");
+            remoteCache.username = QStringLiteral("dave");
+            QVERIFY(vaults::create(remoteCache, &err));
+            {
+                Session::OpenError oe = Session::OpenError::None;
+                std::unique_ptr<Session> s(Session::open(remoteCache, {}, &oe, &err));
+                QVERIFY(s != nullptr);
+                s->close();
+            }
+
+            // Simulate fresh registry while vault dirs still exist on disk.
+            QVERIFY(QFile::remove(vaults::dataRoot() + QStringLiteral("/vaults.json")));
+            QVERIFY(vaults::list().isEmpty());
+
+            const QList<VaultInfo> discovered = vaults::discoverDefaultVaults();
+            QCOMPARE(discovered.size(), 1);
+            QCOMPARE(discovered.first().id, defVault.id);
+            QCOMPARE(discovered.first().name, QStringLiteral("DefaultVault"));
+            QVERIFY(!discovered.first().hasCustomPath());
+            QCOMPARE(vaults::list().size(), 1);
+
+            vaults::setDataRoot(prevRoot);
+        }
     }
 };
 

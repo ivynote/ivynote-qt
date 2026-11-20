@@ -1046,6 +1046,119 @@ private slots:
         remote->close();
         backup::removeConfig(localInfo.id);
     }
+
+    void vaultDialogCustomLocationAndOpenExisting() {
+        QTemporaryDir root;
+        vaults::setDataRoot(root.path());
+
+        // Prepare an existing local vault on disk (unregistered) for OpenExisting verification.
+        QTemporaryDir external;
+        const QString existingDir = external.filePath(QStringLiteral("ExistingNotes"));
+        QString err;
+        VaultInfo seed;
+        seed.name = QStringLiteral("ExistingNotes");
+        seed.kind = VaultInfo::Local;
+        seed.path = existingDir;
+        QVERIFY2(vaults::create(seed, &err), qPrintable(err));
+        {
+            Session::OpenError oe = Session::OpenError::None;
+            std::unique_ptr<Session> s(Session::open(seed, {}, &oe, &err));
+            QVERIFY(s != nullptr);
+            s->engine()->createNote({.title = QStringLiteral("Old Entry"), .body = QStringLiteral("Still here")});
+            s->engine()->persistNow();
+            s->close();
+        }
+        vaults::remove(seed.id, false);
+        QVERIFY(vaults::list().isEmpty());
+
+        // 1. Choose page has 3 cards; Local create page has collapsed-by-default advanced location box.
+        {
+            VaultDialog dlg;
+            dlg.show();
+            QCoreApplication::processEvents();
+            QVERIFY(dlg.findChild<QToolButton *>(QStringLiteral("cardCreateLocal")) != nullptr);
+            QVERIFY(dlg.findChild<QToolButton *>(QStringLiteral("cardOpenExisting")) != nullptr);
+            QVERIFY(dlg.findChild<QToolButton *>(QStringLiteral("cardConnectServer")) != nullptr);
+
+            dlg.showLocalCreate();
+            QCoreApplication::processEvents();
+            auto *advToggle = dlg.findChild<QToolButton *>(QStringLiteral("localAdvancedToggle"));
+            auto *advBox = dlg.findChild<QWidget *>(QStringLiteral("localAdvancedBox"));
+            QVERIFY(advToggle && advBox);
+            QVERIFY(!advToggle->isChecked());
+            QVERIFY(advBox->isHidden());
+
+            advToggle->click();
+            QCoreApplication::processEvents();
+            QVERIFY(advToggle->isChecked());
+            QVERIFY(!advBox->isHidden());
+            QVERIFY(dlg.findChild<QLineEdit *>(QStringLiteral("localPathEdit")) != nullptr);
+            QVERIFY(dlg.findChild<QPushButton *>(QStringLiteral("localBrowseBtn")) != nullptr);
+            QVERIFY(dlg.findChild<QPushButton *>(QStringLiteral("localResetPathBtn")) != nullptr);
+        }
+
+        // 2. OpenExisting page verifies candidate folders live and attaches a valid local vault.
+        {
+            VaultDialog dlg;
+            dlg.show();
+            dlg.showOpenExisting();
+            QCoreApplication::processEvents();
+            auto *pathEdit = dlg.findChild<QLineEdit *>(QStringLiteral("existingPathEdit"));
+            auto *statusLbl = dlg.findChild<QLabel *>(QStringLiteral("existingStatusLabel"));
+            auto *openBtn = dlg.findChild<QToolButton *>(QStringLiteral("openExistingBtn"));
+            QVERIFY(pathEdit && statusLbl && openBtn);
+            QVERIFY(!openBtn->isEnabled());
+
+            const QString invalidDir = external.filePath(QStringLiteral("EmptyDir"));
+            QVERIFY(QDir().mkpath(invalidDir));
+            pathEdit->setText(invalidDir);
+            QCoreApplication::processEvents();
+            QVERIFY(!openBtn->isEnabled());
+            QVERIFY(!statusLbl->isHidden());
+
+            pathEdit->setText(existingDir);
+            QCoreApplication::processEvents();
+            QVERIFY(openBtn->isEnabled());
+            QVERIFY(statusLbl->text().contains(QStringLiteral("ExistingNotes")));
+
+            openBtn->click();
+            QCoreApplication::processEvents();
+            QCOMPARE(dlg.result(), int(QDialog::Accepted));
+            QVERIFY(!dlg.vaultId().isEmpty());
+            QCOMPARE(vaults::find(dlg.vaultId()).dir(), QDir::cleanPath(existingDir));
+        }
+
+        // 3. SettingsDialog shows "Change location..." button for local vaults and hides it for remote vaults.
+        {
+            const VaultInfo localInfo = vaults::list().first();
+            Session::OpenError oe = Session::OpenError::None;
+            std::unique_ptr<Session> local(Session::open(localInfo, {}, &oe, &err));
+            QVERIFY(local != nullptr);
+
+            SettingsDialog localSettings(local.get());
+            localSettings.showVaultTab();
+            auto *relocBtn = localSettings.findChild<QPushButton *>(QStringLiteral("changeVaultLocationBtn"));
+            QVERIFY(relocBtn != nullptr);
+            QSignalSpy relocSpy(&localSettings, &SettingsDialog::relocateVault);
+            relocBtn->click();
+            QCOMPARE(relocSpy.count(), 1);
+            local->close();
+
+            VaultInfo remoteInfo;
+            remoteInfo.name = QStringLiteral("RemoteOnly");
+            remoteInfo.kind = VaultInfo::Remote;
+            remoteInfo.server = QStringLiteral("https://example.invalid");
+            remoteInfo.username = QStringLiteral("carol");
+            QVERIFY(vaults::create(remoteInfo, &err));
+            std::unique_ptr<Session> remote(Session::open(remoteInfo, {}, &oe, &err));
+            QVERIFY(remote != nullptr);
+
+            SettingsDialog remoteSettings(remote.get());
+            remoteSettings.showVaultTab();
+            QVERIFY(remoteSettings.findChild<QPushButton *>(QStringLiteral("changeVaultLocationBtn")) == nullptr);
+            remote->close();
+        }
+    }
 };
 
 QTEST_MAIN(UiTest)
