@@ -51,6 +51,8 @@ signals:
     void importMarkdown();
     void importVault();
     void exportMarkdown();
+    void manageBackup();
+    void backupNow();
     void checkUpdates();
     void removeVault();
     void vaultRenamed();

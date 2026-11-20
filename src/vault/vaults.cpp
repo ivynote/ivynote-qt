@@ -3,6 +3,7 @@
 #include "core/ids.h"
 #include "storage/crypto.h"
 #include "storage/secrets.h"
+#include "vault/backup.h"
 
 #include <QDateTime>
 #include <QDir>
@@ -109,6 +110,7 @@ void remove(const QString &id) {
         QDir(v.dir()).removeRecursively();
         secrets::remove(v.tokenKey());
         secrets::remove(v.vaultKeyKey());
+        backup::removeConfig(v.id);
     }
 }
 

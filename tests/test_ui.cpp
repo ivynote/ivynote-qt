@@ -28,16 +28,20 @@
 #include <QTemporaryDir>
 #include <QTabBar>
 #include <QStackedWidget>
+#include "ui/backupdialog.h"
 #include "ui/diffdialog.h"
 #include "ui/panels.h"
 #include "ui/render.h"
 #include "ui/taskpicker.h"
 #include "ui/theme.h"
+#include "vault/backup.h"
 #include "vault/session.h"
 
 #include <QApplication>
+#include <QCheckBox>
 #include <QClipboard>
 #include <QComboBox>
+#include <QGroupBox>
 #include <QListWidget>
 #include <QMimeData>
 #include <QSettings>
@@ -962,6 +966,70 @@ private slots:
         QCOMPARE(pane.editorMode(), EditorMode::Live);
 
         Prefs::instance()->setEditorMode(savedMode);
+    }
+
+    void localBackupDialogAndSettingsVisibility() {
+        QTemporaryDir root;
+        vaults::setDataRoot(root.path());
+
+        VaultInfo localInfo;
+        localInfo.name = QStringLiteral("LocalDiary");
+        localInfo.kind = VaultInfo::Local;
+        QString msg;
+        QVERIFY(vaults::create(localInfo, &msg));
+        Session::OpenError err = Session::OpenError::None;
+        std::unique_ptr<Session> local(Session::open(localInfo, {}, &err, &msg));
+        QVERIFY(local != nullptr);
+        local->engine()->createNote({.title = QStringLiteral("First entry"), .body = QStringLiteral("Backup test content")});
+
+        VaultInfo remoteInfo;
+        remoteInfo.name = QStringLiteral("RemoteCloud");
+        remoteInfo.kind = VaultInfo::Remote;
+        remoteInfo.server = QStringLiteral("https://example.invalid");
+        remoteInfo.username = QStringLiteral("bob");
+        QVERIFY(vaults::create(remoteInfo, &msg));
+        std::unique_ptr<Session> remote(Session::open(remoteInfo, {}, &err, &msg));
+        QVERIFY(remote != nullptr);
+
+        // SettingsDialog shows local backup group ONLY for local vaults.
+        {
+            SettingsDialog localSettings(local.get());
+            localSettings.showVaultTab();
+            QVERIFY(localSettings.findChild<QGroupBox *>(QStringLiteral("localBackupGroup")) != nullptr);
+        }
+        {
+            SettingsDialog remoteSettings(remote.get());
+            remoteSettings.showVaultTab();
+            QVERIFY(remoteSettings.findChild<QGroupBox *>(QStringLiteral("localBackupGroup")) == nullptr);
+        }
+
+        // LocalBackupDialog first-run setup & manual backup run.
+        LocalBackupManager mgr;
+        mgr.setSession(local.get());
+        QTemporaryDir bakDir;
+        backup::Config cfg = mgr.config();
+        cfg.directory = bakDir.filePath(QStringLiteral("bak"));
+        mgr.updateConfig(cfg);
+
+        LocalBackupDialog dlg(local.get(), &mgr, true);
+        QCOMPARE(dlg.windowTitle(), T("本地笔记自动备份设置"));
+        QCOMPARE(dlg.selectedDirectory(), cfg.directory);
+        QVERIFY(dlg.currentSpaceCheck().valid);
+
+        auto *backupNowBtn = dlg.findChild<QPushButton *>(QStringLiteral("backupNowBtn"));
+        auto *historyList = dlg.findChild<QListWidget *>(QStringLiteral("backupHistoryList"));
+        QVERIFY(backupNowBtn && historyList);
+        QSignalSpy doneSpy(&mgr, &LocalBackupManager::backupFinished);
+        backupNowBtn->click();
+        QTRY_COMPARE(doneSpy.count(), 1);
+        QVERIFY(QFile::exists(QDir(cfg.directory).filePath(QStringLiteral("First entry.md"))));
+        QVERIFY(QFile::exists(QDir(cfg.directory).filePath(QString::fromLatin1(backup::kManifestFileName))));
+        QCOMPARE(historyList->count(), 1);
+
+        mgr.setSession(nullptr);
+        local->close();
+        remote->close();
+        backup::removeConfig(localInfo.id);
     }
 };
 

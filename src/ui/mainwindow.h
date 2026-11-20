@@ -9,6 +9,7 @@
 #include <optional>
 
 class Session;
+class LocalBackupManager;
 class Shelf;
 class AgendaPanel;
 class MediaPanel;
@@ -54,6 +55,7 @@ private:
     void showSearch(const QString &initial = {});
     enum SettingsPage { GeneralPage, VaultPage, AboutPage };
     void showSettings(SettingsPage page = GeneralPage);
+    void showBackupManager(bool firstRun = false);
     void signIn();
     void toggleShelf();
     void applyPrefs();
@@ -76,6 +78,7 @@ private:
     void refreshNoteTabs();
 
     QPointer<Session> m_session;
+    LocalBackupManager *m_backup = nullptr;
     Divider *m_split;
     QStackedWidget *m_side;
     Shelf *m_shelf;
@@ -103,4 +106,5 @@ private:
     QAction *m_readAction = nullptr;
     QList<QAction *> m_noteActions;
     QList<QAction *> m_remoteActions;
+    QList<QAction *> m_localActions;
 };

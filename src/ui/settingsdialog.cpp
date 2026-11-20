@@ -11,6 +11,7 @@
 #include "ui/toast.h"
 #include "ui/vaultdialog.h"
 #include "ui/widgets.h"
+#include "vault/backup.h"
 #include "vault/files.h"
 #include "vault/session.h"
 
@@ -19,6 +20,7 @@
 #include <QDateTime>
 #include <QDesktopServices>
 #include <QDialogButtonBox>
+#include <QDir>
 #include <QFormLayout>
 #include <QGroupBox>
 #include <QHBoxLayout>
@@ -28,6 +30,7 @@
 #include <QLineEdit>
 #include <QMessageBox>
 #include <QPushButton>
+#include <QScrollArea>
 #include <QSettings>
 #include <QSpinBox>
 #include <QTabWidget>
@@ -248,6 +251,9 @@ QWidget *SettingsDialog::generalTab() {
 }
 
 QWidget *SettingsDialog::vaultTab() {
+    auto *scroll = new QScrollArea;
+    scroll->setFrameShape(QFrame::NoFrame);
+    scroll->setWidgetResizable(true);
     auto *w = new QWidget;
     auto *col = new QVBoxLayout(w);
     col->setContentsMargins(20, 20, 20, 20);
@@ -309,6 +315,69 @@ QWidget *SettingsDialog::vaultTab() {
     }
     col->addWidget(formBox);
 
+    if (!info.isRemote()) {
+        auto *bak = new QGroupBox(T("本地自动备份"), w);
+        bak->setObjectName(QStringLiteral("localBackupGroup"));
+        auto *bakCol = new QVBoxLayout(bak);
+        bakCol->setSpacing(8);
+        const backup::Config cfg = backup::loadConfig(info);
+        const backup::ManifestSummary sum = backup::readManifestSummary(cfg.directory);
+        const backup::SpaceCheck space = backup::checkSpace(cfg.directory, backup::estimateVaultBytes(info));
+
+        auto *bakForm = new QFormLayout;
+        bakForm->setContentsMargins(0, 0, 0, 0);
+        bakForm->setVerticalSpacing(6);
+        QString statusText = cfg.enabled
+            ? (i18n::isZh() ? QStringLiteral("已开启（每 %1 分钟增量备份）").arg(cfg.intervalMinutes)
+                            : QStringLiteral("Enabled (incremental every %1 min)").arg(cfg.intervalMinutes))
+            : T("已关闭");
+        if (sum.exists && sum.lastBackupAt > 0) {
+            const QString when = QDateTime::fromMSecsSinceEpoch(sum.lastBackupAt).toString(QStringLiteral("yyyy-MM-dd HH:mm"));
+            statusText += QStringLiteral(" · ") + T("上次备份：") + when;
+        }
+        auto *statusLbl = new QLabel(statusText, bak);
+        statusLbl->setWordWrap(true);
+        bakForm->addRow(T("状态"), statusLbl);
+
+        auto *bakDir = new QLabel(cfg.directory.isEmpty() ? T("未设置") : QDir::toNativeSeparators(cfg.directory), bak);
+        bakDir->setWordWrap(true);
+        bakDir->setTextInteractionFlags(Qt::TextSelectableByMouse);
+        bakForm->addRow(T("备份目录"), bakDir);
+
+        if (space.valid) {
+            const QString spText = (i18n::isZh() ? QStringLiteral("可用 %1 / 总计 %2") : QStringLiteral("%1 free / %2 total"))
+                                       .arg(fmt::bytes(space.bytesAvailable), fmt::bytes(space.bytesTotal));
+            auto *spLbl = new QLabel(space.lowSpace ? QStringLiteral("⚠ ") + spText : spText, bak);
+            if (space.lowSpace) {
+                QPalette pal = spLbl->palette();
+                pal.setColor(QPalette::WindowText, Theme::t().danger);
+                spLbl->setPalette(pal);
+            }
+            bakForm->addRow(T("磁盘空间"), spLbl);
+        }
+        bakCol->addLayout(bakForm);
+
+        auto *bakRow = new QHBoxLayout;
+        auto *manageBtn = new QPushButton(T("本地备份管理…"), bak);
+        auto *nowBtn = new QPushButton(T("立即备份"), bak);
+        auto *openBtn = new QPushButton(T("打开备份目录"), bak);
+        openBtn->setEnabled(!cfg.directory.isEmpty());
+        connect(manageBtn, &QPushButton::clicked, this, [this] { accept(); emit manageBackup(); });
+        connect(nowBtn, &QPushButton::clicked, this, [this] { accept(); emit backupNow(); });
+        connect(openBtn, &QPushButton::clicked, this, [dirPath = cfg.directory] {
+            if (dirPath.isEmpty()) return;
+            QDir().mkpath(dirPath);
+            QDesktopServices::openUrl(QUrl::fromLocalFile(dirPath));
+        });
+        bakRow->addWidget(manageBtn);
+        bakRow->addWidget(nowBtn);
+        bakRow->addWidget(openBtn);
+        bakRow->addStretch(1);
+        bakCol->addLayout(bakRow);
+        bakCol->addWidget(note(T("仅针对本地笔记库生效，定时以 Markdown 格式增量备份所有笔记与附件，可直接浏览或手动导入恢复。"), bak));
+        col->addWidget(bak);
+    }
+
     auto *data = new QGroupBox(T("导入与导出"), w);
     auto *dataCol = new QVBoxLayout(data);
     auto *row = new QHBoxLayout;
@@ -339,7 +408,8 @@ QWidget *SettingsDialog::vaultTab() {
                               danger));
     col->addWidget(danger);
     col->addStretch(1);
-    return w;
+    scroll->setWidget(w);
+    return scroll;
 }
 
 QWidget *SettingsDialog::accountTab() {

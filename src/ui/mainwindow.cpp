@@ -6,6 +6,7 @@
 #include "core/models.h"
 #include "sync/api.h"
 #include "sync/engine.h"
+#include "ui/backupdialog.h"
 #include "ui/dialogs.h"
 #include "ui/diffdialog.h"
 #include "ui/editor.h"
@@ -22,6 +23,7 @@
 #include "ui/updater.h"
 #include "ui/vaultdialog.h"
 #include "ui/widgets.h"
+#include "vault/backup.h"
 #include "vault/session.h"
 #include "vault/transfer.h"
 
@@ -228,6 +230,27 @@ MainWindow::MainWindow() {
     });
 
     buildMenus();
+    m_backup = new LocalBackupManager(this);
+    connect(m_backup, &LocalBackupManager::needsInitialSetup, this, [this] {
+        if (!m_session || m_session->isRemote()) return;
+        if (QApplication::platformName() == QLatin1String("offscreen")) return;
+        if (QApplication::activeModalWidget()) return;
+        showBackupManager(true);
+    });
+    connect(m_backup, &LocalBackupManager::lowSpaceDetected, this, [this](const backup::SpaceCheck &space) {
+        const QString msg = (i18n::isZh()
+            ? QStringLiteral("本地备份目录所在磁盘可用空间不足（仅剩 %1），建议更换备份位置")
+            : QStringLiteral("Low disk space on local backup drive (%1 left); consider changing the backup folder"))
+                                .arg(fmt::bytes(space.bytesAvailable));
+        Toaster::show(msg, true, T("备份设置"), [this] { showBackupManager(false); });
+    });
+    connect(m_backup, &LocalBackupManager::backupFinished, this, [this](const backup::RunRecord &record) {
+        if (record.manual) {
+            Toaster::show(record.ok ? record.summary : (T("本地备份失败：") + record.error), !record.ok);
+        } else if (!record.ok) {
+            Toaster::show(T("定时本地备份失败：") + record.error, true, T("备份设置"), [this] { showBackupManager(false); });
+        }
+    });
     applyPrefs();
     QSettings s;
     restoreGeometry(s.value(QStringLiteral("window/geometry")).toByteArray());
@@ -344,6 +367,8 @@ bool MainWindow::openVault(const QString &id) {
     rebuildVaultMenu();
     updateTitle();
     for (QAction *a : std::as_const(m_remoteActions)) a->setVisible(s->isRemote());
+    for (QAction *a : std::as_const(m_localActions)) a->setVisible(!s->isRemote());
+    if (m_backup) m_backup->setSession(s);
     const QString last = QSettings().value(noteKey(s)).toString();
     if (s->engine()->note(last)) {
         openNote(last);
@@ -363,6 +388,10 @@ void MainWindow::closeVault() {
     if (!m_session) return;
     m_pane->flush();
     dropEmptyDraft(QString());
+    if (m_backup) {
+        m_backup->runIfDirtyOnClose();
+        m_backup->setSession(nullptr);
+    }
     m_shelf->setSession(nullptr);
     m_agenda->setSession(nullptr);
     m_media->setSession(nullptr);
@@ -462,6 +491,9 @@ void MainWindow::buildMenus() {
     import->addSeparator();
     import->addAction(T("从其他笔记库导入…"), this, &MainWindow::importVault);
     file->addAction(T("导出为 Markdown…"), this, &MainWindow::exportMarkdown);
+    QAction *localBackupAction = file->addAction(T("本地备份管理…"), this, [this] { showBackupManager(false); });
+    localBackupAction->setVisible(false);
+    m_localActions << localBackupAction;
     file->addSeparator();
     file->addAction(T("设置…"), QKeySequence(QStringLiteral("Ctrl+,")), this, [this] { showSettings(); });
     file->addSeparator();
@@ -678,6 +710,8 @@ void MainWindow::showVaultMenu(const QPoint &global) {
     menu.addAction(icons::themed("plus"), T("新建本地笔记库…"), this, [this] { addVault(false); });
     menu.addAction(icons::themed("cloud"), T("连接 Ivynote 服务器…"), this, [this] { addVault(true); });
     menu.addSeparator();
+    if (m_session && !m_session->isRemote())
+        menu.addAction(icons::themed("download"), T("本地备份管理…"), this, [this] { showBackupManager(false); });
     menu.addAction(icons::themed("settings"), T("笔记库设置…"), this, [this] { showSettings(VaultPage); });
     menu.exec(global);
 }
@@ -1026,7 +1060,16 @@ void MainWindow::showSearch(const QString &initial) {
             m_pane->editor()->openDuePicker();
         }});
     }
-    if (m_session->isRemote()) cmds.append({T("立即同步"), QStringLiteral("Ctrl+R"), QStringLiteral("refresh"), [this] { if (m_session) m_session->wake(); }});
+    if (m_session->isRemote()) {
+        cmds.append({T("立即同步"), QStringLiteral("Ctrl+R"), QStringLiteral("refresh"), [this] { if (m_session) m_session->wake(); }});
+    } else {
+        cmds.append({T("本地备份管理…"), QString(), QStringLiteral("download"), [this] { showBackupManager(false); }});
+        cmds.append({T("立即备份本地笔记"), QString(), QStringLiteral("download"), [this] {
+            if (!m_session || m_session->isRemote() || !m_backup) return;
+            m_pane->flush();
+            m_backup->runNow(true);
+        }});
+    }
     for (const VaultInfo &v : vaults::list())
         if (v.id != m_session->info().id)
             cmds.append({T("切换到") + QStringLiteral(" ") + v.name, QString(), QStringLiteral("vault"), [this, id = v.id] { openVault(id); }});
@@ -1045,6 +1088,12 @@ void MainWindow::showSettings(SettingsPage page) {
     connect(&dlg, &SettingsDialog::importMarkdown, this, &MainWindow::importMarkdown, Qt::QueuedConnection);
     connect(&dlg, &SettingsDialog::importVault, this, &MainWindow::importVault, Qt::QueuedConnection);
     connect(&dlg, &SettingsDialog::exportMarkdown, this, &MainWindow::exportMarkdown, Qt::QueuedConnection);
+    connect(&dlg, &SettingsDialog::manageBackup, this, [this] { showBackupManager(false); }, Qt::QueuedConnection);
+    connect(&dlg, &SettingsDialog::backupNow, this, [this] {
+        if (!m_session || m_session->isRemote() || !m_backup) return;
+        m_pane->flush();
+        m_backup->runNow(true);
+    }, Qt::QueuedConnection);
     connect(&dlg, &SettingsDialog::checkUpdates, this, [this, dlgPtr = QPointer<SettingsDialog>(&dlg)] {
         updater::check(this, true, [dlgPtr](updater::Outcome, const QString &message) {
             if (dlgPtr) dlgPtr->setUpdateStatus(false, message);
@@ -1060,6 +1109,17 @@ void MainWindow::showSettings(SettingsPage page) {
         rebuildVaultMenu();
         updateTitle();
     });
+    dlg.exec();
+}
+
+void MainWindow::showBackupManager(bool firstRun) {
+    if (!m_session || m_session->isRemote() || !m_backup) return;
+    m_pane->flush();
+    LocalBackupDialog dlg(m_session, m_backup, firstRun, this);
+    connect(&dlg, &LocalBackupDialog::importBackupRequested, this, [this](const QString &dir) {
+        if (!m_session || dir.isEmpty()) return;
+        runJob(transfer::importMarkdown(m_session, {dir}, QString(), this), T("正在导入…"));
+    }, Qt::QueuedConnection);
     dlg.exec();
 }
 

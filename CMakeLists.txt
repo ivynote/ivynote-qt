@@ -55,6 +55,7 @@ add_library(ivycore STATIC
     src/vault/session.cpp
     src/vault/files.cpp
     src/vault/transfer.cpp
+    src/vault/backup.cpp
     src/ui/render.cpp
 )
 target_include_directories(ivycore PUBLIC src)
@@ -85,6 +86,7 @@ add_library(ivyui STATIC
     src/ui/officialsites.cpp
     src/ui/serverpanels.cpp
     src/ui/updater.cpp
+    src/ui/backupdialog.cpp
     src/ui/settingsdialog.cpp
     src/ui/historydialog.cpp
     src/ui/mainwindow.cpp

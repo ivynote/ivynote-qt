@@ -2,12 +2,14 @@
 #include "core/models.h"
 #include "storage/secrets.h"
 #include "sync/engine.h"
+#include "vault/backup.h"
 #include "vault/session.h"
 #include "vault/transfer.h"
 #include "vault/vaults.h"
 
 #include <QDirIterator>
 #include <QFile>
+#include <QSettings>
 #include <QSignalSpy>
 #include <QTemporaryDir>
 #include <QtTest>
@@ -160,6 +162,219 @@ private slots:
         QCOMPARE(path.size(), 2);
         QCOMPARE(path[0]->name, QStringLiteral("Local notes"));
         QCOMPARE(path[1]->name, QStringLiteral("Books"));
+    }
+
+    void backupVolumePickerAndPathGuards() {
+        QVERIFY(backup::isVirtualFileSystem(QStringLiteral("tmpfs"), QStringLiteral("/run")));
+        QVERIFY(backup::isVirtualFileSystem(QStringLiteral("squashfs"), QStringLiteral("/snap/core/1")));
+        QVERIFY(backup::isVirtualFileSystem(QStringLiteral("overlay"), QStringLiteral("/var/lib/docker")));
+        QVERIFY(!backup::isVirtualFileSystem(QStringLiteral("ext4"), QStringLiteral("/data")));
+        QVERIFY(!backup::isVirtualFileSystem(QStringLiteral("ntfs"), QStringLiteral("D:/")));
+
+        const qint64 GiB = 1024LL * 1024 * 1024;
+        QList<backup::VolumeCandidate> vols{
+            {.rootPath = QStringLiteral("/snap/x"), .fileSystemType = QStringLiteral("squashfs"), .candidateBaseDir = QStringLiteral("/snap/x/IvynoteBackups"),
+             .bytesTotal = 5000 * GiB, .bytesAvailable = 5000 * GiB, .valid = true, .ready = true, .readOnly = false, .writable = true},
+            {.rootPath = QStringLiteral("/readonly"), .fileSystemType = QStringLiteral("ext4"), .candidateBaseDir = QStringLiteral("/readonly/IvynoteBackups"),
+             .bytesTotal = 4000 * GiB, .bytesAvailable = 4000 * GiB, .valid = true, .ready = true, .readOnly = true, .writable = false},
+            {.rootPath = QStringLiteral("/"), .fileSystemType = QStringLiteral("ext4"), .candidateBaseDir = QStringLiteral("/home/u/IvynoteBackups"),
+             .bytesTotal = 256 * GiB, .bytesAvailable = 80 * GiB, .valid = true, .ready = true, .readOnly = false, .writable = true},
+            {.rootPath = QStringLiteral("/mnt/big"), .fileSystemType = QStringLiteral("ext4"), .candidateBaseDir = QStringLiteral("/mnt/big/IvynoteBackups"),
+             .bytesTotal = 2000 * GiB, .bytesAvailable = 1200 * GiB, .valid = true, .ready = true, .readOnly = false, .writable = true},
+            {.rootPath = QStringLiteral("/mnt/huge_full"), .fileSystemType = QStringLiteral("ext4"), .candidateBaseDir = QStringLiteral("/mnt/huge_full/IvynoteBackups"),
+             .bytesTotal = 8000 * GiB, .bytesAvailable = 50 * 1024 * 1024, .valid = true, .ready = true, .readOnly = false, .writable = true},
+        };
+        // Picks largest total writable disk that still has sufficient available space (skips huge_full with only 50 MiB free).
+        const backup::VolumeCandidate best = backup::pickBestVolume(vols, backup::kLowSpaceWarningBytes);
+        QVERIFY(best.valid);
+        QCOMPARE(best.rootPath, QStringLiteral("/mnt/big"));
+
+        // If all writable drives are below threshold, falls back to largest available space among writable drives.
+        QList<backup::VolumeCandidate> tight{
+            {.rootPath = QStringLiteral("/a"), .fileSystemType = QStringLiteral("ext4"), .candidateBaseDir = QStringLiteral("/a/IvynoteBackups"),
+             .bytesTotal = 1000 * GiB, .bytesAvailable = 40 * 1024 * 1024, .valid = true, .ready = true, .readOnly = false, .writable = true},
+            {.rootPath = QStringLiteral("/b"), .fileSystemType = QStringLiteral("ext4"), .candidateBaseDir = QStringLiteral("/b/IvynoteBackups"),
+             .bytesTotal = 500 * GiB, .bytesAvailable = 200 * 1024 * 1024, .valid = true, .ready = true, .readOnly = false, .writable = true},
+        };
+        const backup::VolumeCandidate fallback = backup::pickBestVolume(tight, backup::kLowSpaceWarningBytes);
+        QVERIFY(fallback.valid);
+        QCOMPARE(fallback.rootPath, QStringLiteral("/b"));
+
+        // Vault path guard prevents backing up inside vault dir or app vaults/ directory, while allowing sibling dirs sharing a prefix.
+        VaultInfo v;
+        v.id = QStringLiteral("v1234567890abcdef");
+        QVERIFY(backup::isPathInsideVault(v.dir(), v));
+        QVERIFY(backup::isPathInsideVault(v.dir() + QStringLiteral("/sub/backup"), v));
+        QVERIFY(backup::isPathInsideVault(v.dir() + QStringLiteral("_backup"), v)); // still inside <dataRoot>/vaults/
+        QVERIFY(!backup::isPathInsideVault(vaults::dataRoot() + QStringLiteral("/vaults_backup"), v));
+    }
+
+    void backupIncrementalExportAndRestore() {
+        std::unique_ptr<Session> src(makeVault("Diary", true));
+        QVERIFY(src);
+        SyncEngine *e = src->engine();
+        const Folder daily = e->createFolder("Daily");
+        const Folder archive = e->createFolder("Archive");
+        const Tag tag = e->createTag("journal");
+        AddedFile file;
+        e->addFile("\x89PNG fake-img-bytes", "photo.png", "image/png", [&](AddedFile f) { file = f; });
+        QTRY_VERIFY(file.ok);
+
+        const Note n1 = e->createNote({.title = "Day 1", .body = QStringLiteral("hello\n\n![p](ivy://res/%1)\n").arg(file.id),
+                                       .folderId = daily.id, .tags = {tag.id}, .pinned = true, .createdAt = 1700000001000});
+        const Note n2 = e->createNote({.title = "Day 2", .body = QStringLiteral("link [d1](ivy://note/%1)").arg(n1.id),
+                                       .folderId = daily.id, .createdAt = 1700000002000});
+        const Note n3 = e->createNote({.title = "Draft", .body = "to be trashed", .folderId = archive.id, .createdAt = 1700000003000});
+
+        QTemporaryDir backupDir;
+        backup::RunRecord rec1;
+        QVERIFY(run(backup::exportMarkdownIncremental(src.get(), backupDir.path(), true, &rec1)));
+        QVERIFY(rec1.ok);
+        QCOMPARE(rec1.totalNotes, 3);
+        QCOMPARE(rec1.writtenNotes, 3);
+        QCOMPARE(rec1.unchangedNotes, 0);
+        QCOMPARE(rec1.removedNotes, 0);
+        QCOMPARE(rec1.totalAttachments, 1);
+        QCOMPARE(rec1.writtenAttachments, 1);
+        QCOMPARE(rec1.unchangedAttachments, 0);
+        QVERIFY(QFile::exists(backupDir.filePath("Daily/Day 1.md")));
+        QVERIFY(QFile::exists(backupDir.filePath("Daily/Day 2.md")));
+        QVERIFY(QFile::exists(backupDir.filePath("Archive/Draft.md")));
+        QVERIFY(QFile::exists(backupDir.filePath("_attachments/photo.png")));
+        QVERIFY(QFile::exists(backupDir.filePath(QString::fromLatin1(backup::kManifestFileName))));
+
+        // Create an untracked user file in the backup directory; incremental backup must never touch it.
+        {
+            QFile userFile(backupDir.filePath("my-personal-readme.txt"));
+            QVERIFY(userFile.open(QIODevice::WriteOnly));
+            userFile.write("keep me");
+        }
+
+        // Second run with no changes skips every note and attachment.
+        backup::RunRecord rec2;
+        QVERIFY(run(backup::exportMarkdownIncremental(src.get(), backupDir.path(), false, &rec2)));
+        QVERIFY(rec2.ok);
+        QCOMPARE(rec2.totalNotes, 3);
+        QCOMPARE(rec2.writtenNotes, 0);
+        QCOMPARE(rec2.unchangedNotes, 3);
+        QCOMPARE(rec2.removedNotes, 0);
+        QCOMPARE(rec2.writtenAttachments, 0);
+        QCOMPARE(rec2.unchangedAttachments, 1);
+        QVERIFY(QFile::exists(backupDir.filePath("my-personal-readme.txt")));
+
+        // Edit Day 2, trash Draft (leaving Archive empty), and add Day 3.
+        {
+            NotePatch p;
+            p.body = QStringLiteral("updated body [d1](ivy://note/%1)").arg(n1.id);
+            e->updateNote(n2.id, p);
+        }
+        {
+            NotePatch trash;
+            trash.trashed = true;
+            e->updateNote(n3.id, trash);
+        }
+        e->createNote({.title = "Day 3", .body = "brand new", .createdAt = 1700000004000});
+
+        backup::RunRecord rec3;
+        QVERIFY(run(backup::exportMarkdownIncremental(src.get(), backupDir.path(), true, &rec3)));
+        QVERIFY(rec3.ok);
+        QCOMPARE(rec3.totalNotes, 3);
+        QCOMPARE(rec3.writtenNotes, 2);     // Day 2 updated + Day 3 added
+        QCOMPARE(rec3.unchangedNotes, 1);   // Day 1 unchanged
+        QCOMPARE(rec3.removedNotes, 1);     // Archive/Draft.md removed
+        QCOMPARE(rec3.writtenAttachments, 0);
+        QCOMPARE(rec3.unchangedAttachments, 1);
+        QVERIFY(!QFile::exists(backupDir.filePath("Archive/Draft.md")));
+        QVERIFY(!QDir(backupDir.filePath("Archive")).exists()); // empty old folder pruned
+        QVERIFY(QFile::exists(backupDir.filePath("Day 3.md")));
+        QVERIFY(QFile::exists(backupDir.filePath("my-personal-readme.txt")));
+
+        // Manifest summary records history newest-first.
+        const backup::ManifestSummary summary = backup::readManifestSummary(backupDir.path());
+        QVERIFY(summary.exists);
+        QVERIFY(summary.lastBackupAt > 0);
+        QCOMPARE(summary.totalNotes, 3);
+        QCOMPARE(summary.totalAttachments, 1);
+        QCOMPARE(summary.history.size(), 3);
+
+        // Synchronous flush works cleanly too.
+        const backup::RunRecord syncRec = backup::runIncrementalSync(src.get(), backupDir.path(), false);
+        QVERIFY(syncRec.ok);
+        QCOMPARE(syncRec.writtenNotes, 0);
+        QCOMPARE(syncRec.unchangedNotes, 3);
+
+        // Backup folder can be directly restored via transfer::importMarkdown into a fresh vault.
+        std::unique_ptr<Session> restored(makeVault("Restored", false));
+        QVERIFY(run(transfer::importMarkdown(restored.get(), {backupDir.path()}, QString())));
+        SyncEngine *r = restored->engine();
+        const Note *r1 = byTitle(r, "Day 1");
+        const Note *r2 = byTitle(r, "Day 2");
+        const Note *r3 = byTitle(r, "Day 3");
+        QVERIFY(r1 && r2 && r3);
+        QVERIFY(r1->pinned);
+        QCOMPARE(r1->tags.size(), 1);
+        QVERIFY(r2->body.contains(QStringLiteral("updated body")));
+        QVERIFY(r2->body.contains(QStringLiteral("ivy://note/") + r1->id));
+        QCOMPARE(r->attachments().size(), 1);
+    }
+
+    void backupRejectsRemoteVaultAndManagerLifecycle() {
+        // Remote vault must be rejected by incremental backup and ignored by LocalBackupManager.
+        VaultInfo remoteInfo;
+        remoteInfo.name = QStringLiteral("CloudVault");
+        remoteInfo.kind = VaultInfo::Remote;
+        remoteInfo.server = QStringLiteral("https://example.invalid");
+        remoteInfo.username = QStringLiteral("alice");
+        QString err;
+        QVERIFY(vaults::create(remoteInfo, &err));
+        Session::OpenError oe = Session::OpenError::None;
+        std::unique_ptr<Session> remote(Session::open(remoteInfo, {}, &oe, &err));
+        QVERIFY(remote != nullptr);
+
+        QTemporaryDir dir;
+        backup::RunRecord remoteRec;
+        QVERIFY(!run(backup::exportMarkdownIncremental(remote.get(), dir.path(), true, &remoteRec)));
+        QVERIFY(!remoteRec.ok);
+        QVERIFY(!backup::runIncrementalSync(remote.get(), dir.path(), false).ok);
+
+        LocalBackupManager mgr;
+        QSignalSpy setupSpy(&mgr, &LocalBackupManager::needsInitialSetup);
+        mgr.setSession(remote.get());
+        QVERIFY(!mgr.isActive());
+        QTest::qWait(50);
+        QCOMPARE(setupSpy.count(), 0);
+
+        // Local vault activates manager, defaults to enabled=true with auto-selected directory, and runs cleanly.
+        std::unique_ptr<Session> local(makeVault("MyLocalVault", false));
+        QVERIFY(local != nullptr);
+        local->engine()->createNote({.title = "Hello", .body = "world"});
+        const QString localId = local->info().id;
+
+        mgr.setSession(local.get());
+        QVERIFY(mgr.isActive());
+        QVERIFY(mgr.config().enabled);
+        QVERIFY(!mgr.config().configured);
+        QVERIFY(!mgr.config().directory.isEmpty());
+
+        backup::Config cfg = mgr.config();
+        cfg.directory = dir.filePath("local_bak");
+        cfg.configured = true;
+        mgr.updateConfig(cfg);
+        QCOMPARE(backup::loadConfig(local->info()).directory, cfg.directory);
+        QVERIFY(backup::loadConfig(local->info()).configured);
+
+        QSignalSpy finishedSpy(&mgr, &LocalBackupManager::backupFinished);
+        mgr.runNow(true);
+        QTRY_COMPARE(finishedSpy.count(), 1);
+        QVERIFY(QFile::exists(QDir(cfg.directory).filePath("Hello.md")));
+
+        // Removing the vault removes its QSettings backup config, while preserving exported Markdown files on disk.
+        mgr.setSession(nullptr);
+        local->close();
+        local.reset();
+        vaults::remove(localId);
+        QVERIFY(!QSettings().contains(QStringLiteral("backup/%1/directory").arg(localId)));
+        QVERIFY(QFile::exists(QDir(cfg.directory).filePath("Hello.md")));
     }
 };
 
