@@ -152,19 +152,6 @@ NotePane::NotePane(QWidget *parent) : QWidget(parent) {
     connect(m_dueButton, &QToolButton::clicked, this, [this] { m_editor->openDuePicker(); });
     top->addWidget(m_dueButton);
 
-    m_readButton = new IconButton(QStringLiteral("book"), T("阅读模式") + QStringLiteral(" (Ctrl+Shift+E)"), m_topBar);
-    m_readButton->setObjectName(QStringLiteral("readButton"));
-    m_readButton->setCheckable(true);
-    connect(m_readButton, &QToolButton::clicked, this, &NotePane::toggleReading);
-    top->addWidget(m_readButton);
-
-    m_diffButton = new IconButton(QStringLiteral("diff"), T("对比差异 (Diff)"), m_topBar);
-    m_diffButton->setObjectName(QStringLiteral("diffButton"));
-    connect(m_diffButton, &QToolButton::clicked, this, [this] {
-        if (!m_id.isEmpty()) emit diffRequested(m_id, m_conflictTargetId);
-    });
-    top->addWidget(m_diffButton);
-
     m_shareButton = new IconButton(QStringLiteral("share"), T("分享"), m_topBar);
     m_outlineButton = new IconButton(QStringLiteral("outline"), T("大纲"), m_topBar);
     m_outlineButton->setCheckable(true);
@@ -1051,12 +1038,6 @@ void NotePane::applyViewState() {
     m_title->setReadOnly(!editable);
     m_insertButton->setVisible(editable);
     m_dueButton->setVisible(editable);
-    m_readButton->setVisible(has && !m_locked);
-    m_readButton->setChecked(m_reading);
-    m_readButton->setIconName(m_reading ? QStringLiteral("edit") : QStringLiteral("book"));
-    m_readButton->setToolTip(m_reading ? T("退出阅读模式") + QStringLiteral(" (Ctrl+Shift+E)")
-                                       : T("阅读模式") + QStringLiteral(" (Ctrl+Shift+E)"));
-    m_diffButton->setVisible(has && !m_locked);
     m_replaceOne->setEnabled(editable);
     m_replaceAll->setEnabled(editable);
     if (!editable && m_replaceRow->isVisible()) {
@@ -1381,6 +1362,16 @@ void NotePane::setReading(bool reading) {
     emit readingChanged(m_reading);
 }
 
+void NotePane::prepareOpenMode(EditorMode mode, bool reading) {
+    const bool modeChanged = m_mode != mode;
+    const bool readChanged = m_reading != reading;
+    m_mode = mode;
+    m_reading = reading;
+    m_editor->setMode(mode == EditorMode::Live ? MarkdownHighlighter::Live : MarkdownHighlighter::Source);
+    if (modeChanged) emit editorModeChanged(m_mode);
+    if (readChanged) emit readingChanged(m_reading);
+}
+
 void NotePane::setFontSize(int px) {
     m_editor->setFontSize(px);
     m_preview->setBaseSize(px);
@@ -1552,7 +1543,9 @@ void NotePane::showMoreMenu() {
     const QString id = m_id;
     menu.addAction(icons::themed("info"), T("笔记信息"), this, &NotePane::showInfo);
     if (!m_locked) {
-        QAction *readAct = menu.addAction(icons::themed(m_reading ? "edit" : "book"), T("阅读模式"), this, &NotePane::toggleReading);
+        QAction *readAct = menu.addAction(icons::themed(m_reading ? "edit" : "book"),
+                                          m_reading ? T("退出阅读模式") : T("阅读模式"),
+                                          this, &NotePane::toggleReading);
         readAct->setCheckable(true);
         readAct->setChecked(m_reading);
         menu.addAction(icons::themed("diff"), T("对比差异 (Diff)"), this, [this, id] { emit diffRequested(id, m_conflictTargetId); });
@@ -1560,7 +1553,7 @@ void NotePane::showMoreMenu() {
     // The three editor modes are rarely switched, so they live here.
     QMenu *modes = menu.addMenu(icons::themed("eye"), T("编辑模式"));
     auto *modeGroup = new QActionGroup(modes);
-    const struct { EditorMode mode; const char *label; } entries[] = {{EditorMode::Live, "即时渲染"}, {EditorMode::Source, "源码"}, {EditorMode::Split, "双栏"}};
+    const struct { EditorMode mode; const char *label; } entries[] = {{EditorMode::Live, "所见即所得"}, {EditorMode::Source, "源码"}, {EditorMode::Split, "双栏"}};
     for (const auto &entry : entries) {
         QAction *a = modes->addAction(T(entry.label));
         a->setCheckable(true);

@@ -46,7 +46,7 @@ Prefs *Prefs::instance() {
 int Prefs::theme() const { return QSettings().value(QStringLiteral("ui/theme"), 0).toInt(); }
 int Prefs::lang() const { return QSettings().value(QStringLiteral("ui/lang"), int(i18n::systemLang())).toInt(); }
 int Prefs::fontSize() const { return std::clamp(QSettings().value(QStringLiteral("ui/fontSize"), 16).toInt(), 13, 22); }
-int Prefs::editorMode() const { return std::clamp(QSettings().value(QStringLiteral("ui/editorMode"), 0).toInt(), 0, 2); }
+int Prefs::editorMode() const { return std::clamp(QSettings().value(QStringLiteral("ui/editorMode"), 0).toInt(), 0, 3); }
 bool Prefs::reduceMotion() const { return QSettings().value(QStringLiteral("ui/reduceMotion"), false).toBool(); }
 QString Prefs::defaultNoteFolder() const { return QSettings().value(QStringLiteral("ui/defaultNoteFolder"), QString()).toString(); }
 QString Prefs::defaultNoteTitle() const { return QSettings().value(QStringLiteral("ui/defaultNoteTitle"), QString()).toString(); }
@@ -54,7 +54,7 @@ QString Prefs::defaultNoteTitle() const { return QSettings().value(QStringLitera
 void Prefs::setTheme(int v) { QSettings().setValue(QStringLiteral("ui/theme"), v); emit changed(); }
 void Prefs::setLang(int v) { QSettings().setValue(QStringLiteral("ui/lang"), v); emit changed(); }
 void Prefs::setFontSize(int v) { QSettings().setValue(QStringLiteral("ui/fontSize"), std::clamp(v, 13, 22)); emit changed(); }
-void Prefs::setEditorMode(int v) { QSettings().setValue(QStringLiteral("ui/editorMode"), v); emit changed(); }
+void Prefs::setEditorMode(int v) { QSettings().setValue(QStringLiteral("ui/editorMode"), std::clamp(v, 0, 3)); emit changed(); }
 void Prefs::setReduceMotion(bool v) { QSettings().setValue(QStringLiteral("ui/reduceMotion"), v); emit changed(); }
 void Prefs::setDefaultNoteFolder(const QString &v) { QSettings().setValue(QStringLiteral("ui/defaultNoteFolder"), v); emit changed(); }
 void Prefs::setDefaultNoteTitle(const QString &v) { QSettings().setValue(QStringLiteral("ui/defaultNoteTitle"), v); emit changed(); }
@@ -67,7 +67,7 @@ QLabel *note(const QString &text, QWidget *parent) {
     return l;
 }
 
-const char *kModes[] = {"live", "source", "split"};
+const char *kModes[] = {"live", "source", "split", "read"};
 
 // Cross-device preferences, aligned with web/Tauri /me/prefs schema.
 void pushPrefs(Session *s) {
@@ -159,13 +159,14 @@ QWidget *SettingsDialog::generalTab() {
     form->addRow(T("正文字号"), size);
 
     auto *mode = new QComboBox(w);
-    mode->addItems({T("即时渲染"), T("源码"), T("双栏")});
+    mode->setObjectName(QStringLiteral("defaultOpenModeBox"));
+    mode->addItems({T("所见即所得"), T("源码"), T("双栏"), T("阅读模式")});
     mode->setCurrentIndex(p->editorMode());
     connect(mode, &QComboBox::currentIndexChanged, this, [this, p](int v) {
         p->setEditorMode(v);
         pushPrefs(m_session);
     });
-    form->addRow(T("默认编辑模式"), mode);
+    form->addRow(T("默认打开模式"), mode);
 
     auto *motion = new QCheckBox(T("减少动态效果"), w);
     motion->setChecked(p->reduceMotion());

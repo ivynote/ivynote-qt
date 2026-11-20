@@ -44,6 +44,7 @@ private:
     void addVault(bool server = false);
     void newNote(const QString &folderId);
     void openNote(const QString &id);
+    void openNoteInMode(const QString &id, bool forEditing);
     void openDiff(const QString &baseId, const QString &otherId = QString());
     void moveNote(const QString &id);
     void moveNotes(const QStringList &ids);
@@ -56,6 +57,7 @@ private:
     void signIn();
     void toggleShelf();
     void applyPrefs();
+    void applyOpenMode(int mode);
     void importMarkdown();
     void importVault();
     void exportMarkdown();
@@ -85,6 +87,7 @@ private:
     QAction *m_railSettings = nullptr;
     int m_agendaBadgeCount = 0;
     bool m_agendaBadgeOverdue = false;
+    int m_appliedOpenMode = -1;
     Page m_page = NotesPage;
     QStackedWidget *m_stack;
     NotePane *m_pane;

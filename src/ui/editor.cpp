@@ -135,6 +135,25 @@ public:
     }
 };
 
+class InlinePopupFrame : public QFrame {
+public:
+    explicit InlinePopupFrame(QWidget *parent = nullptr) : QFrame(parent) {
+        setFrameShape(QFrame::NoFrame);
+        setAutoFillBackground(false);
+    }
+
+protected:
+    void paintEvent(QPaintEvent *) override {
+        QPainter p(this);
+        p.setRenderHint(QPainter::Antialiasing);
+        const Tokens &k = Theme::t();
+        const QRectF r = QRectF(rect()).adjusted(0.5, 0.5, -0.5, -0.5);
+        p.setPen(QPen(k.line, 1));
+        p.setBrush(k.surface);
+        p.drawRoundedRect(r, 8, 8);
+    }
+};
+
 } // namespace
 
 MarkdownEditor::MarkdownEditor(QWidget *parent)
@@ -161,27 +180,40 @@ MarkdownEditor::MarkdownEditor(QWidget *parent)
     setCursorWidth(2);
     setPlaceholderText(T("开始书写… 输入 / 插入元素，输入 [[ 链接其他笔记"));
 
-    m_popup = new QFrame(this);
+    m_popup = new InlinePopupFrame(this);
     m_popup->setObjectName(QStringLiteral("editorInlinePopup"));
     m_popup->setFocusPolicy(Qt::NoFocus);
     m_popup->hide();
     auto *popLayout = new QVBoxLayout(m_popup);
-    popLayout->setContentsMargins(4, 4, 4, 4);
+    popLayout->setContentsMargins(4, 5, 4, 5);
     popLayout->setSpacing(0);
     m_popupList = new QListWidget(m_popup);
     m_popupList->setFocusPolicy(Qt::NoFocus);
     m_popupList->setFrameShape(QFrame::NoFrame);
     m_popupList->setHorizontalScrollBarPolicy(Qt::ScrollBarAlwaysOff);
+    m_popupList->setVerticalScrollMode(QAbstractItemView::ScrollPerPixel);
     m_popupList->setMouseTracking(true);
     m_popupList->setSelectionMode(QAbstractItemView::SingleSelection);
     m_popupList->setItemDelegate(new InlinePopupDelegate(m_popupList));
     popLayout->addWidget(m_popupList);
     auto restylePopup = [this] {
         const Tokens &k = Theme::t();
-        m_popup->setStyleSheet(QStringLiteral(
-            "#editorInlinePopup{background:%1;border:1px solid %2;border-radius:8px;}"
-            "#editorInlinePopup QListWidget{background:transparent;border:none;outline:none;}")
-            .arg(k.surface.name(), k.line.name()));
+        QPalette lp = m_popupList->palette();
+        lp.setColor(QPalette::Base, k.surface);
+        lp.setColor(QPalette::Window, k.surface);
+        lp.setColor(QPalette::AlternateBase, k.surface);
+        lp.setColor(QPalette::Text, k.ink);
+        m_popupList->setPalette(lp);
+        m_popupList->viewport()->setPalette(lp);
+        if (QScrollBar *sb = m_popupList->verticalScrollBar()) {
+            QPalette sp = sb->palette();
+            sp.setColor(QPalette::Window, k.surface);
+            sp.setColor(QPalette::Base, k.surface);
+            sp.setColor(QPalette::Button, k.surface);
+            sb->setPalette(sp);
+        }
+        m_popup->update();
+        m_popupList->viewport()->update();
     };
     restylePopup();
     connect(m_popupList, &QListWidget::itemClicked, this, &MarkdownEditor::acceptInlinePopupItem);

@@ -169,6 +169,8 @@ inline constexpr Pair kEnglish[] = {
     {"命令面板…", "Command palette…"},
     {"编辑模式", "Editor mode"},
     {"默认编辑模式", "Default editor mode"},
+    {"默认打开模式", "Default open mode"},
+    {"所见即所得", "WYSIWYG"},
     {"篇笔记已导出", "notes exported"},
     {"篇笔记已导入", "notes imported"},
     {"浅色", "Light"},

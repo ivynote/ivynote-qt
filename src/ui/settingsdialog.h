@@ -10,6 +10,8 @@ class QLabel;
 class QPushButton;
 class QTabWidget;
 
+enum class OpenMode { Live = 0, Source = 1, Split = 2, Read = 3 };
+
 // Device-wide preferences, kept in QSettings.
 class Prefs : public QObject {
     Q_OBJECT
@@ -18,7 +20,7 @@ public:
     int theme() const;        // Theme::Mode
     int lang() const;         // i18n::Lang
     int fontSize() const;     // 13-22
-    int editorMode() const;   // EditorMode
+    int editorMode() const;   // OpenMode (0=Live, 1=Source, 2=Split, 3=Read)
     bool reduceMotion() const;
     QString defaultNoteFolder() const;
     QString defaultNoteTitle() const;

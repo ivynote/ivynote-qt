@@ -297,7 +297,7 @@ bool MainWindow::openVault(const QString &id) {
     m_media->setSession(s);
     m_sync->setSession(s);
     m_pane->setSession(s);
-    m_pane->setEditorMode(EditorMode(Prefs::instance()->editorMode()));
+    applyOpenMode(Prefs::instance()->editorMode());
     m_pane->setFontSize(Prefs::instance()->fontSize());
     connect(s->engine(), &SyncEngine::conflict, this, [this](const QString &origId, const QString &copyId) {
         Toaster::show(T("同一处被两台设备修改，另一份内容已存为冲突副本"), false, T("对比差异"), [this, origId, copyId] { openDiff(origId, copyId); });
@@ -395,7 +395,7 @@ void MainWindow::syncPrefsFromServer() {
         const QString mode = o.value(QLatin1String("editorMode")).toString();
         const int size = o.value(QLatin1String("fontSize")).toInt();
         Prefs *p = Prefs::instance();
-        const QStringList modes{QStringLiteral("live"), QStringLiteral("source"), QStringLiteral("split")};
+        const QStringList modes{QStringLiteral("live"), QStringLiteral("source"), QStringLiteral("split"), QStringLiteral("read")};
         if (modes.contains(mode) && modes.indexOf(mode) != p->editorMode()) p->setEditorMode(int(modes.indexOf(mode)));
         if (size >= 13 && size <= 22 && size != p->fontSize()) p->setFontSize(size);
         if (o.contains(QLatin1String("defaultNoteFolder")) && o.value(QLatin1String("defaultNoteFolder")).isString()) {
@@ -409,13 +409,26 @@ void MainWindow::syncPrefsFromServer() {
     });
 }
 
+void MainWindow::applyOpenMode(int mode) {
+    if (mode == int(OpenMode::Read)) {
+        if (m_pane->editorMode() != EditorMode::Live) m_pane->setEditorMode(EditorMode::Live);
+        m_pane->setReading(true);
+    } else {
+        const auto em = EditorMode(std::clamp(mode, 0, 2));
+        if (m_pane->editorMode() != em || m_pane->isReading()) m_pane->setEditorMode(em);
+    }
+}
+
 void MainWindow::applyPrefs() {
     Prefs *p = Prefs::instance();
     Theme::setReducedMotion(p->reduceMotion());
     if (Theme::instance()->mode() != Theme::Mode(p->theme())) Theme::instance()->setMode(Theme::Mode(p->theme()));
     i18n::setLang(i18n::Lang(p->lang()));
     m_pane->setFontSize(p->fontSize());
-    if (m_pane->editorMode() != EditorMode(p->editorMode())) m_pane->setEditorMode(EditorMode(p->editorMode()));
+    if (p->editorMode() != m_appliedOpenMode) {
+        m_appliedOpenMode = p->editorMode();
+        applyOpenMode(m_appliedOpenMode);
+    }
 }
 
 // --- menus ---
@@ -492,21 +505,22 @@ void MainWindow::buildMenus() {
 
     QMenu *view = bar->addMenu(T("视图(&V)"));
     m_modeGroup = new QActionGroup(this);
-    const QList<QPair<EditorMode, const char *>> modes{{EditorMode::Live, "即时渲染"}, {EditorMode::Source, "源码"}, {EditorMode::Split, "双栏"}};
+    const QList<QPair<EditorMode, const char *>> modes{{EditorMode::Live, "所见即所得"}, {EditorMode::Source, "源码"}, {EditorMode::Split, "双栏"}};
+    const int initialPref = Prefs::instance()->editorMode();
     for (const auto &[mode, label] : modes) {
         QAction *a = view->addAction(T(label));
         a->setCheckable(true);
-        a->setChecked(int(mode) == Prefs::instance()->editorMode());
+        a->setChecked(int(mode) == (initialPref == int(OpenMode::Read) ? int(EditorMode::Live) : initialPref));
         m_modeGroup->addAction(a);
         connect(a, &QAction::triggered, this, [this, m = mode] {
             m_pane->setEditorMode(m);
-            Prefs::instance()->setEditorMode(int(m));
         });
     }
     m_readAction = view->addAction(T("阅读模式"), QKeySequence(QStringLiteral("Ctrl+Shift+E")), this, [this](bool checked) {
         if (!m_pane->noteId().isEmpty()) m_pane->setReading(checked);
     });
     m_readAction->setCheckable(true);
+    m_readAction->setChecked(initialPref == int(OpenMode::Read));
     m_noteActions << m_readAction;
     view->addSeparator();
     QAction *outline = view->addAction(T("大纲"), this, [this] { m_pane->toggleOutline(); });
@@ -694,9 +708,26 @@ void MainWindow::signIn() {
 // --- notes ---
 
 void MainWindow::openNote(const QString &id) {
+    openNoteInMode(id, false);
+}
+
+void MainWindow::openNoteInMode(const QString &id, bool forEditing) {
     if (!m_session) return;
     const Note *note = m_session->engine()->note(id);
     const bool has = note && !note->deleted;
+    const bool switching = has && m_pane->noteId() != id;
+    if (switching) {
+        m_pane->flush();
+        const int pref = Prefs::instance()->editorMode();
+        if (pref == int(OpenMode::Read) && !forEditing) {
+            m_pane->prepareOpenMode(EditorMode::Live, true);
+        } else {
+            const auto em = pref == int(OpenMode::Read) ? EditorMode::Live : EditorMode(std::clamp(pref, 0, 2));
+            m_pane->prepareOpenMode(em, false);
+        }
+    } else if (has && forEditing && m_pane->isReading()) {
+        m_pane->setReading(false);
+    }
     if (m_pane->noteId() != id || !has) m_pane->setNote(has ? id : QString());
     QWidget *page = has ? static_cast<QWidget *>(m_pane) : m_empty;
     if (m_stack->currentWidget() != page) {
@@ -741,7 +772,7 @@ void MainWindow::refreshNoteTabs() {
 void MainWindow::openTask(const QString &noteId, int line) {
     if (!m_session) return;
     m_pane->flush();
-    openNote(noteId);
+    openNoteInMode(noteId, true);
     const auto block = m_pane->editor()->document()->findBlockByNumber(line);
     if (block.isValid()) {
         m_pane->editor()->setTextCursor(QTextCursor(block));
@@ -906,7 +937,7 @@ void MainWindow::newNote(const QString &folderId) {
     if (!titleTpl.trimmed().isEmpty())
         init.title = fmt::formatNoteTitle(titleTpl, QDateTime::currentDateTime(), i18n::isZh());
     const Note n = m_session->engine()->createNote(init);
-    openNote(n.id);
+    openNoteInMode(n.id, true);
     m_draftId = n.id;
     m_draftTitle = init.title;
     if (init.title.trimmed().isEmpty()) m_pane->focusTitle();
@@ -972,9 +1003,9 @@ void MainWindow::showSearch(const QString &initial) {
         {T("收起或展开书架"), QStringLiteral("Ctrl+\\"), QStringLiteral("sidebar"), [this] { toggleShelf(); }},
         {T("日程"), QStringLiteral("Ctrl+2"), QStringLiteral("calendar"), [this] { showPage(AgendaPage, false); }},
         {T("媒体库"), QStringLiteral("Ctrl+3"), QStringLiteral("image"), [this] { showPage(MediaPage, false); }},
-        {T("即时渲染"), QString(), QStringLiteral("eye"), [] { Prefs::instance()->setEditorMode(0); }},
-        {T("源码"), QString(), QStringLiteral("code"), [] { Prefs::instance()->setEditorMode(1); }},
-        {T("双栏"), QString(), QStringLiteral("split"), [] { Prefs::instance()->setEditorMode(2); }},
+        {T("所见即所得"), QString(), QStringLiteral("eye"), [this] { m_pane->setEditorMode(EditorMode::Live); }},
+        {T("源码"), QString(), QStringLiteral("code"), [this] { m_pane->setEditorMode(EditorMode::Source); }},
+        {T("双栏"), QString(), QStringLiteral("split"), [this] { m_pane->setEditorMode(EditorMode::Split); }},
         {T("阅读模式"), QStringLiteral("Ctrl+Shift+E"), QStringLiteral("book"), [this] {
              if (!m_pane->noteId().isEmpty()) m_pane->toggleReading();
          }},

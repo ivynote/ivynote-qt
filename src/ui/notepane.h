@@ -47,6 +47,7 @@ public:
     void setReading(bool reading);
     void toggleReading() { setReading(!m_reading); }
     bool isReading() const { return m_reading; }
+    void prepareOpenMode(EditorMode mode, bool reading);
     void setFontSize(int px);
     void toggleOutline();
     void insertFiles(const QStringList &paths);
@@ -126,7 +127,7 @@ private:
     QWidget *m_topBar;
     QLabel *m_pendingDot;
     QLabel *m_savedLabel;
-    IconButton *m_insertButton, *m_dueButton, *m_readButton, *m_diffButton, *m_shareButton, *m_outlineButton, *m_moreButton;
+    IconButton *m_insertButton, *m_dueButton, *m_shareButton, *m_outlineButton, *m_moreButton;
     QWidget *m_banner;
     QWidget *m_conflictBanner;
     QLabel *m_conflictLabel;

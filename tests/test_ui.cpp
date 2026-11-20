@@ -37,8 +37,10 @@
 
 #include <QApplication>
 #include <QClipboard>
+#include <QComboBox>
 #include <QListWidget>
 #include <QMimeData>
+#include <QSettings>
 #include <QTextBlock>
 #include <QTextBrowser>
 #include <QtTest>
@@ -922,6 +924,44 @@ private slots:
         QCOMPARE(list->count(), 5);
         panel.setShowDone(false);
         session->close();
+    }
+
+    void defaultOpenModeAndToolbarCleanup() {
+        // Slash popup uses native painting/palette (no QSS override on list/scrollbar).
+        MarkdownEditor editor;
+        auto *popup = editor.findChild<QWidget *>(QStringLiteral("editorInlinePopup"));
+        QVERIFY(popup);
+        QVERIFY(popup->styleSheet().isEmpty());
+
+        // Read mode and Diff buttons are tucked into More menu instead of top bar.
+        NotePane pane;
+        QVERIFY(!pane.findChild<QWidget *>(QStringLiteral("readButton")));
+        QVERIFY(!pane.findChild<QWidget *>(QStringLiteral("diffButton")));
+
+        // Default open mode setting supports Live (default), Source, Split, and Read.
+        const int savedMode = Prefs::instance()->editorMode();
+        QSettings().remove(QStringLiteral("ui/editorMode"));
+        QCOMPARE(Prefs::instance()->editorMode(), int(OpenMode::Live));
+
+        SettingsDialog dlg(nullptr);
+        auto *modeBox = dlg.findChild<QComboBox *>(QStringLiteral("defaultOpenModeBox"));
+        QVERIFY(modeBox);
+        QCOMPARE(modeBox->count(), 4);
+        QCOMPARE(modeBox->currentIndex(), int(OpenMode::Live));
+        QCOMPARE(modeBox->itemText(int(OpenMode::Live)), T("所见即所得"));
+        QCOMPARE(modeBox->itemText(int(OpenMode::Source)), T("源码"));
+        QCOMPARE(modeBox->itemText(int(OpenMode::Split)), T("双栏"));
+        QCOMPARE(modeBox->itemText(int(OpenMode::Read)), T("阅读模式"));
+
+        modeBox->setCurrentIndex(int(OpenMode::Read));
+        QCOMPARE(Prefs::instance()->editorMode(), int(OpenMode::Read));
+
+        // prepareOpenMode cleanly puts NotePane into Read mode before setNote.
+        pane.prepareOpenMode(EditorMode::Live, true);
+        QVERIFY(pane.isReading());
+        QCOMPARE(pane.editorMode(), EditorMode::Live);
+
+        Prefs::instance()->setEditorMode(savedMode);
     }
 };
 
