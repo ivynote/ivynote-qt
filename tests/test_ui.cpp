@@ -1012,9 +1012,24 @@ private slots:
         mgr.updateConfig(cfg);
 
         LocalBackupDialog dlg(local.get(), &mgr, true);
+        dlg.show();
+        QCoreApplication::processEvents();
         QCOMPARE(dlg.windowTitle(), T("本地笔记自动备份设置"));
         QCOMPARE(dlg.selectedDirectory(), cfg.directory);
         QVERIFY(dlg.currentSpaceCheck().valid);
+
+        auto *dirEdit = dlg.findChild<QLineEdit *>(QStringLiteral("backupDirEdit"));
+        auto *spaceLbl = dlg.findChild<QLabel *>(QStringLiteral("backupSpaceLabel"));
+        auto *hintLbl = dlg.findChild<QLabel *>(QStringLiteral("backupHintLabel"));
+        QVERIFY(dirEdit && spaceLbl && hintLbl);
+        QVERIFY2(dirEdit->width() >= 350, qPrintable(QStringLiteral("dirEdit width=%1").arg(dirEdit->width())));
+        QVERIFY2(spaceLbl->width() >= 350, qPrintable(QStringLiteral("spaceLbl width=%1").arg(spaceLbl->width())));
+        for (QLabel *lbl : {spaceLbl, hintLbl}) {
+            const int needed = lbl->heightForWidth(lbl->width());
+            QVERIFY2(lbl->height() >= needed,
+                     qPrintable(QStringLiteral("%1 clipped: height=%2 < needed=%3 (width=%4)")
+                                    .arg(lbl->objectName()).arg(lbl->height()).arg(needed).arg(lbl->width())));
+        }
 
         auto *backupNowBtn = dlg.findChild<QPushButton *>(QStringLiteral("backupNowBtn"));
         auto *historyList = dlg.findChild<QListWidget *>(QStringLiteral("backupHistoryList"));

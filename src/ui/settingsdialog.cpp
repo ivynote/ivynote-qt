@@ -22,6 +22,7 @@
 #include <QDialogButtonBox>
 #include <QDir>
 #include <QFormLayout>
+#include <QGridLayout>
 #include <QGroupBox>
 #include <QHBoxLayout>
 #include <QInputDialog>
@@ -324,9 +325,13 @@ QWidget *SettingsDialog::vaultTab() {
         const backup::ManifestSummary sum = backup::readManifestSummary(cfg.directory);
         const backup::SpaceCheck space = backup::checkSpace(cfg.directory, backup::estimateVaultBytes(info));
 
-        auto *bakForm = new QFormLayout;
-        bakForm->setContentsMargins(0, 0, 0, 0);
-        bakForm->setVerticalSpacing(6);
+        auto *bakGrid = new QGridLayout;
+        bakGrid->setContentsMargins(0, 0, 0, 0);
+        bakGrid->setHorizontalSpacing(12);
+        bakGrid->setVerticalSpacing(6);
+        bakGrid->setColumnStretch(1, 1);
+
+        int bRow = 0;
         QString statusText = cfg.enabled
             ? (i18n::isZh() ? QStringLiteral("已开启（每 %1 分钟增量备份）").arg(cfg.intervalMinutes)
                             : QStringLiteral("Enabled (incremental every %1 min)").arg(cfg.intervalMinutes))
@@ -337,25 +342,35 @@ QWidget *SettingsDialog::vaultTab() {
         }
         auto *statusLbl = new QLabel(statusText, bak);
         statusLbl->setWordWrap(true);
-        bakForm->addRow(T("状态"), statusLbl);
+        statusLbl->setSizePolicy(QSizePolicy::Expanding, QSizePolicy::Minimum);
+        statusLbl->setAlignment(Qt::AlignLeft | Qt::AlignTop);
+        bakGrid->addWidget(new QLabel(T("状态"), bak), bRow, 0, Qt::AlignLeft | Qt::AlignTop);
+        bakGrid->addWidget(statusLbl, bRow++, 1);
 
         auto *bakDir = new QLabel(cfg.directory.isEmpty() ? T("未设置") : QDir::toNativeSeparators(cfg.directory), bak);
         bakDir->setWordWrap(true);
+        bakDir->setSizePolicy(QSizePolicy::Expanding, QSizePolicy::Minimum);
+        bakDir->setAlignment(Qt::AlignLeft | Qt::AlignTop);
         bakDir->setTextInteractionFlags(Qt::TextSelectableByMouse);
-        bakForm->addRow(T("备份目录"), bakDir);
+        bakGrid->addWidget(new QLabel(T("备份目录"), bak), bRow, 0, Qt::AlignLeft | Qt::AlignTop);
+        bakGrid->addWidget(bakDir, bRow++, 1);
 
         if (space.valid) {
             const QString spText = (i18n::isZh() ? QStringLiteral("可用 %1 / 总计 %2") : QStringLiteral("%1 free / %2 total"))
                                        .arg(fmt::bytes(space.bytesAvailable), fmt::bytes(space.bytesTotal));
             auto *spLbl = new QLabel(space.lowSpace ? QStringLiteral("⚠ ") + spText : spText, bak);
+            spLbl->setWordWrap(true);
+            spLbl->setSizePolicy(QSizePolicy::Expanding, QSizePolicy::Minimum);
+            spLbl->setAlignment(Qt::AlignLeft | Qt::AlignTop);
             if (space.lowSpace) {
                 QPalette pal = spLbl->palette();
                 pal.setColor(QPalette::WindowText, Theme::t().danger);
                 spLbl->setPalette(pal);
             }
-            bakForm->addRow(T("磁盘空间"), spLbl);
+            bakGrid->addWidget(new QLabel(T("磁盘空间"), bak), bRow, 0, Qt::AlignLeft | Qt::AlignTop);
+            bakGrid->addWidget(spLbl, bRow++, 1);
         }
-        bakCol->addLayout(bakForm);
+        bakCol->addLayout(bakGrid);
 
         auto *bakRow = new QHBoxLayout;
         auto *manageBtn = new QPushButton(T("本地备份管理…"), bak);

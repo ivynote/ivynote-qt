@@ -14,7 +14,7 @@
 #include <QDir>
 #include <QFileDialog>
 #include <QFileInfo>
-#include <QFormLayout>
+#include <QGridLayout>
 #include <QGroupBox>
 #include <QHBoxLayout>
 #include <QLabel>
@@ -31,6 +31,8 @@ namespace {
 QLabel *hintLabel(const QString &text, QWidget *parent) {
     auto *l = mutedLabel(text, parent, 12);
     l->setWordWrap(true);
+    l->setSizePolicy(QSizePolicy::Expanding, QSizePolicy::Minimum);
+    l->setAlignment(Qt::AlignLeft | Qt::AlignTop);
     return l;
 }
 
@@ -48,7 +50,7 @@ const QList<QPair<int, const char *>> kIntervals{
 LocalBackupDialog::LocalBackupDialog(Session *session, LocalBackupManager *manager, bool firstRun, QWidget *parent)
     : QDialog(parent), m_session(session), m_manager(manager), m_firstRun(firstRun) {
     setWindowTitle(firstRun ? T("本地笔记自动备份设置") : T("本地备份管理"));
-    setMinimumSize(600, firstRun ? 520 : 580);
+    setMinimumWidth(640);
 
     const backup::Config cfg = manager ? manager->config()
                                        : (session ? backup::loadConfig(session->info()) : backup::Config{});
@@ -63,53 +65,66 @@ LocalBackupDialog::LocalBackupDialog(Session *session, LocalBackupManager *manag
               "备份目录中的 .md 文件与附件可直接查看、二次处理，或在异常时重新导入。"),
             this);
         intro->setWordWrap(true);
+        intro->setSizePolicy(QSizePolicy::Expanding, QSizePolicy::Minimum);
         intro->setFont(Theme::uiFont(13));
         col->addWidget(intro);
     }
 
     // --- Backup settings ---
     auto *cfgGroup = new QGroupBox(T("备份设置"), this);
-    auto *form = new QFormLayout(cfgGroup);
-    form->setVerticalSpacing(10);
+    auto *cfgCol = new QVBoxLayout(cfgGroup);
+    cfgCol->setSpacing(10);
 
+    auto *grid = new QGridLayout;
+    grid->setHorizontalSpacing(12);
+    grid->setVerticalSpacing(10);
+    grid->setColumnStretch(1, 1);
+
+    int row = 0;
     m_enabled = new QCheckBox(T("开启定时增量备份"), cfgGroup);
     m_enabled->setObjectName(QStringLiteral("backupEnabledCheck"));
     m_enabled->setChecked(cfg.enabled);
-    form->addRow(QString(), m_enabled);
+    grid->addWidget(m_enabled, row++, 1, Qt::AlignLeft);
 
-    auto *dirRow = new QHBoxLayout;
-    dirRow->setSpacing(6);
+    auto *dirTitle = new QLabel(T("备份目录"), cfgGroup);
+    auto *dirCol = new QVBoxLayout;
+    dirCol->setContentsMargins(0, 0, 0, 0);
+    dirCol->setSpacing(6);
     m_dirEdit = new QLineEdit(QDir::toNativeSeparators(cfg.directory), cfgGroup);
     m_dirEdit->setObjectName(QStringLiteral("backupDirEdit"));
     m_dirEdit->setReadOnly(true);
     m_dirEdit->setToolTip(m_dirEdit->text());
+    m_dirEdit->setSizePolicy(QSizePolicy::Expanding, QSizePolicy::Fixed);
+    dirCol->addWidget(m_dirEdit);
+
+    auto *dirBtnRow = new QHBoxLayout;
+    dirBtnRow->setContentsMargins(0, 0, 0, 0);
+    dirBtnRow->setSpacing(6);
     m_browseBtn = new QPushButton(T("浏览…"), cfgGroup);
     m_browseBtn->setObjectName(QStringLiteral("backupBrowseBtn"));
     m_autoBtn = new QPushButton(T("自动选最大盘"), cfgGroup);
     m_autoBtn->setObjectName(QStringLiteral("backupAutoDirBtn"));
     m_openBtn = new QPushButton(T("打开目录"), cfgGroup);
     m_openBtn->setObjectName(QStringLiteral("backupOpenDirBtn"));
-    dirRow->addWidget(m_dirEdit, 1);
-    dirRow->addWidget(m_browseBtn);
-    dirRow->addWidget(m_autoBtn);
-    dirRow->addWidget(m_openBtn);
-    form->addRow(T("备份目录"), dirRow);
+    dirBtnRow->addWidget(m_browseBtn);
+    dirBtnRow->addWidget(m_autoBtn);
+    dirBtnRow->addWidget(m_openBtn);
+    dirBtnRow->addStretch(1);
+    dirCol->addLayout(dirBtnRow);
 
+    grid->addWidget(dirTitle, row, 0, Qt::AlignLeft | Qt::AlignTop);
+    grid->addLayout(dirCol, row++, 1);
+
+    auto *spaceTitle = new QLabel(T("磁盘空间"), cfgGroup);
     m_spaceLabel = mutedLabel(QString(), cfgGroup, 12);
     m_spaceLabel->setObjectName(QStringLiteral("backupSpaceLabel"));
     m_spaceLabel->setWordWrap(true);
-    form->addRow(T("磁盘空间"), m_spaceLabel);
+    m_spaceLabel->setSizePolicy(QSizePolicy::Expanding, QSizePolicy::Minimum);
+    m_spaceLabel->setAlignment(Qt::AlignLeft | Qt::AlignTop);
+    grid->addWidget(spaceTitle, row, 0, Qt::AlignLeft | Qt::AlignTop);
+    grid->addWidget(m_spaceLabel, row++, 1);
 
-    m_spaceWarning = new QLabel(cfgGroup);
-    m_spaceWarning->setObjectName(QStringLiteral("backupSpaceWarning"));
-    m_spaceWarning->setWordWrap(true);
-    m_spaceWarning->setFont(Theme::uiFont(12.5, QFont::Medium));
-    QPalette wp = m_spaceWarning->palette();
-    wp.setColor(QPalette::WindowText, Theme::t().danger);
-    m_spaceWarning->setPalette(wp);
-    m_spaceWarning->hide();
-    form->addRow(QString(), m_spaceWarning);
-
+    auto *intervalTitle = new QLabel(T("备份频率"), cfgGroup);
     m_intervalBox = new QComboBox(cfgGroup);
     m_intervalBox->setObjectName(QStringLiteral("backupIntervalBox"));
     int selectedIdx = 1; // 30 min default
@@ -118,8 +133,26 @@ LocalBackupDialog::LocalBackupDialog(Session *session, LocalBackupManager *manag
         if (kIntervals[i].first == cfg.intervalMinutes) selectedIdx = i;
     }
     m_intervalBox->setCurrentIndex(selectedIdx);
-    form->addRow(T("备份频率"), m_intervalBox);
-    form->addRow(QString(), hintLabel(T("采用增量导出：仅写入发生变化的笔记与附件，未改动文件直接跳过；不会删除你在备份目录中自行存放的其他文件。"), cfgGroup));
+    grid->addWidget(intervalTitle, row, 0, Qt::AlignLeft | Qt::AlignVCenter);
+    grid->addWidget(m_intervalBox, row++, 1, Qt::AlignLeft);
+
+    cfgCol->addLayout(grid);
+
+    m_spaceWarning = new QLabel(cfgGroup);
+    m_spaceWarning->setObjectName(QStringLiteral("backupSpaceWarning"));
+    m_spaceWarning->setWordWrap(true);
+    m_spaceWarning->setSizePolicy(QSizePolicy::Expanding, QSizePolicy::Minimum);
+    m_spaceWarning->setAlignment(Qt::AlignLeft | Qt::AlignTop);
+    m_spaceWarning->setFont(Theme::uiFont(12.5, QFont::Medium));
+    QPalette wp = m_spaceWarning->palette();
+    wp.setColor(QPalette::WindowText, Theme::t().danger);
+    m_spaceWarning->setPalette(wp);
+    m_spaceWarning->hide();
+    cfgCol->addWidget(m_spaceWarning);
+
+    auto *hint = hintLabel(T("采用增量导出：仅写入发生变化的笔记与附件，未改动文件直接跳过；不会删除你在备份目录中自行存放的其他文件。"), cfgGroup);
+    hint->setObjectName(QStringLiteral("backupHintLabel"));
+    cfgCol->addWidget(hint);
     col->addWidget(cfgGroup);
 
     // --- Status & quick actions ---
@@ -130,6 +163,7 @@ LocalBackupDialog::LocalBackupDialog(Session *session, LocalBackupManager *manag
     m_statusLabel = new QLabel(statusGroup);
     m_statusLabel->setObjectName(QStringLiteral("backupStatusLabel"));
     m_statusLabel->setWordWrap(true);
+    m_statusLabel->setSizePolicy(QSizePolicy::Expanding, QSizePolicy::Minimum);
     statusCol->addWidget(m_statusLabel);
 
     m_progress = new QProgressBar(statusGroup);
@@ -155,7 +189,7 @@ LocalBackupDialog::LocalBackupDialog(Session *session, LocalBackupManager *manag
     auto *histCol = new QVBoxLayout(histGroup);
     m_historyList = new QListWidget(histGroup);
     m_historyList->setObjectName(QStringLiteral("backupHistoryList"));
-    m_historyList->setMinimumHeight(firstRun ? 90 : 140);
+    m_historyList->setMinimumHeight(firstRun ? 88 : 130);
     m_historyList->setSelectionMode(QAbstractItemView::NoSelection);
     histCol->addWidget(m_historyList);
     col->addWidget(histGroup, 1);
@@ -276,6 +310,7 @@ LocalBackupDialog::LocalBackupDialog(Session *session, LocalBackupManager *manag
 
     refreshSpaceInfo(false);
     refreshStatusAndHistory();
+    adjustSize();
 }
 
 QString LocalBackupDialog::selectedDirectory() const {
