@@ -12,23 +12,28 @@
 
 #include <QCheckBox>
 #include <QComboBox>
-#include <QJsonArray>
-#include <QNetworkAccessManager>
-#include <QSettings>
-#include <QTimeZone>
+#include <QDir>
+#include <QFileDialog>
 #include <QFormLayout>
+#include <QFutureWatcher>
 #include <QHBoxLayout>
+#include <QJsonArray>
 #include <QJsonObject>
 #include <QLabel>
 #include <QLineEdit>
+#include <QListWidget>
 #include <QMessageBox>
+#include <QNetworkAccessManager>
 #include <QPainter>
 #include <QPointer>
 #include <QPushButton>
+#include <QSettings>
 #include <QStackedWidget>
 #include <QTabBar>
+#include <QTimeZone>
 #include <QToolButton>
 #include <QVBoxLayout>
+#include <QtConcurrent>
 
 namespace {
 
@@ -110,7 +115,7 @@ QString authErrorText(int status, const QString &error) {
 
 VaultDialog::VaultDialog(QWidget *parent, bool startWithServer) : QDialog(parent) {
     setWindowTitle(T("新建或接入笔记库"));
-    setMinimumWidth(440);
+    setMinimumWidth(480);
     auto *outer = new QVBoxLayout(this);
     outer->setContentsMargins(28, 24, 28, 24);
     m_pages = new QStackedWidget(this);
@@ -129,11 +134,17 @@ VaultDialog::VaultDialog(QWidget *parent, bool startWithServer) : QDialog(parent
         sub->setAlignment(Qt::AlignHCenter);
         col->addWidget(sub);
         col->addSpacing(8);
-        auto *local = new OptionCard(QStringLiteral("database"), T("本地笔记库"), T("只保存在这台电脑上，不需要服务器，打开即可使用。"), page);
+        auto *local = new OptionCard(QStringLiteral("database"), T("新建本地笔记库"), T("只保存在这台电脑上，不需要服务器，打开即可使用。"), page);
+        local->setObjectName(QStringLiteral("cardCreateLocal"));
+        auto *existing = new OptionCard(QStringLiteral("folder"), T("打开已有本地笔记库"), T("选择之前保存过的笔记库文件夹，或自动扫描找回。"), page);
+        existing->setObjectName(QStringLiteral("cardOpenExisting"));
         auto *server = new OptionCard(QStringLiteral("cloud"), T("连接 Ivynote 服务器"), T("登录自托管的 Ivynote，在多台设备之间可靠同步。"), page);
+        server->setObjectName(QStringLiteral("cardConnectServer"));
         connect(local, &QToolButton::clicked, this, [this] { go(Local); });
+        connect(existing, &QToolButton::clicked, this, [this] { go(OpenExisting); });
         connect(server, &QToolButton::clicked, this, [this] { go(Server); });
         col->addWidget(local);
+        col->addWidget(existing);
         col->addWidget(server);
         col->addStretch(1);
         m_pages->addWidget(page);
@@ -143,9 +154,10 @@ VaultDialog::VaultDialog(QWidget *parent, bool startWithServer) : QDialog(parent
         auto *page = new QWidget;
         auto *col = new QVBoxLayout(page);
         col->setSpacing(10);
-        col->addWidget(title(T("本地笔记库"), page));
+        col->addWidget(title(T("新建本地笔记库"), page));
         col->addSpacing(6);
         m_localName = field(T("笔记库名称"), page);
+        m_localName->setObjectName(QStringLiteral("localNameEdit"));
         m_localName->setText(T("我的笔记"));
         col->addWidget(m_localName);
         m_localEncrypt = new QCheckBox(T("加密本机数据"), page);
@@ -153,6 +165,68 @@ VaultDialog::VaultDialog(QWidget *parent, bool startWithServer) : QDialog(parent
         auto *hint = mutedLabel(T("密钥保存在系统钥匙串中，并会给你一把恢复密钥。丢失两者将无法打开笔记库。"), page, 12);
         hint->setWordWrap(true);
         col->addWidget(hint);
+
+        // Collapsible advanced configuration (collapsed by default so normal creation stays effortless).
+        m_localAdvToggle = new QToolButton(page);
+        m_localAdvToggle->setObjectName(QStringLiteral("localAdvancedToggle"));
+        m_localAdvToggle->setCheckable(true);
+        m_localAdvToggle->setChecked(false);
+        m_localAdvToggle->setAutoRaise(true);
+        m_localAdvToggle->setToolButtonStyle(Qt::ToolButtonTextBesideIcon);
+        m_localAdvToggle->setIconSize(QSize(14, 14));
+        m_localAdvToggle->setIcon(icons::themed(QStringLiteral("chevron-right")));
+        m_localAdvToggle->setText(T("高级设置"));
+        m_localAdvToggle->setCursor(Qt::PointingHandCursor);
+        col->addWidget(m_localAdvToggle, 0, Qt::AlignLeft);
+
+        m_localAdvBox = new QWidget(page);
+        m_localAdvBox->setObjectName(QStringLiteral("localAdvancedBox"));
+        auto *advCol = new QVBoxLayout(m_localAdvBox);
+        advCol->setContentsMargins(12, 4, 0, 4);
+        advCol->setSpacing(6);
+        advCol->addWidget(new QLabel(T("笔记库位置"), m_localAdvBox));
+        auto *pathRow = new QHBoxLayout;
+        pathRow->setSpacing(6);
+        m_localPath = new QLineEdit(m_localAdvBox);
+        m_localPath->setObjectName(QStringLiteral("localPathEdit"));
+        m_localPath->setReadOnly(true);
+        m_localPath->setPlaceholderText(T("默认位置（自动管理）"));
+        auto *browseBtn = new QPushButton(T("选择位置…"), m_localAdvBox);
+        browseBtn->setObjectName(QStringLiteral("localBrowseBtn"));
+        m_localResetPath = new QPushButton(T("恢复默认"), m_localAdvBox);
+        m_localResetPath->setObjectName(QStringLiteral("localResetPathBtn"));
+        m_localResetPath->setEnabled(false);
+        pathRow->addWidget(m_localPath, 1);
+        pathRow->addWidget(browseBtn);
+        pathRow->addWidget(m_localResetPath);
+        advCol->addLayout(pathRow);
+        m_localPathHint = mutedLabel(QString(), m_localAdvBox, 12);
+        m_localPathHint->setWordWrap(true);
+        m_localPathHint->setSizePolicy(QSizePolicy::Expanding, QSizePolicy::Minimum);
+        advCol->addWidget(m_localPathHint);
+        m_localAdvBox->hide();
+        col->addWidget(m_localAdvBox);
+        updateLocalPathUi();
+
+        connect(m_localAdvToggle, &QToolButton::toggled, this, [this](bool expanded) {
+            m_localAdvBox->setVisible(expanded);
+            m_localAdvToggle->setIcon(icons::themed(expanded ? QStringLiteral("chevron-down") : QStringLiteral("chevron-right")));
+            adjustSize();
+        });
+        connect(browseBtn, &QPushButton::clicked, this, [this] {
+            const QString startDir = m_localCustomPath.isEmpty() ? QDir::homePath() : m_localCustomPath;
+            const QString dir = QFileDialog::getExistingDirectory(this, T("选择笔记库位置"), startDir);
+            if (dir.isEmpty()) return;
+            m_localCustomPath = QDir::cleanPath(dir);
+            m_localError->hide();
+            updateLocalPathUi();
+        });
+        connect(m_localResetPath, &QPushButton::clicked, this, [this] {
+            m_localCustomPath.clear();
+            m_localError->hide();
+            updateLocalPathUi();
+        });
+
         m_localError = errorLabel(page);
         col->addWidget(m_localError);
         col->addStretch(1);
@@ -165,6 +239,95 @@ VaultDialog::VaultDialog(QWidget *parent, bool startWithServer) : QDialog(parent
         row->addWidget(back);
         row->addStretch(1);
         row->addWidget(create);
+        col->addLayout(row);
+        m_pages->addWidget(page);
+    }
+    // OpenExisting.
+    {
+        auto *page = new QWidget;
+        auto *col = new QVBoxLayout(page);
+        col->setSpacing(10);
+        col->addWidget(title(T("打开已有本地笔记库"), page));
+        auto *sub = mutedLabel(T("选择之前保存过的笔记库文件夹，或自动扫描本机已有的 Ivynote 笔记库。"), page, 12.5);
+        sub->setWordWrap(true);
+        sub->setAlignment(Qt::AlignHCenter);
+        col->addWidget(sub);
+        col->addSpacing(4);
+
+        auto *pickRow = new QHBoxLayout;
+        pickRow->setSpacing(6);
+        m_existingPath = field(T("选择或输入笔记库文件夹路径"), page);
+        m_existingPath->setObjectName(QStringLiteral("existingPathEdit"));
+        auto *browse = new QPushButton(T("选择文件夹…"), page);
+        browse->setObjectName(QStringLiteral("existingBrowseBtn"));
+        m_existingScan = new QPushButton(T("自动扫描"), page);
+        m_existingScan->setObjectName(QStringLiteral("existingScanBtn"));
+        pickRow->addWidget(m_existingPath, 1);
+        pickRow->addWidget(browse);
+        pickRow->addWidget(m_existingScan);
+        col->addLayout(pickRow);
+
+        m_existingStatus = mutedLabel(QString(), page, 12);
+        m_existingStatus->setObjectName(QStringLiteral("existingStatusLabel"));
+        m_existingStatus->setWordWrap(true);
+        m_existingStatus->setSizePolicy(QSizePolicy::Expanding, QSizePolicy::Minimum);
+        m_existingStatus->hide();
+        col->addWidget(m_existingStatus);
+
+        m_scanStatus = mutedLabel(T("点击「自动扫描」查找本机已有的本地笔记库。"), page, 12);
+        m_scanStatus->setObjectName(QStringLiteral("scanStatusLabel"));
+        m_scanStatus->setWordWrap(true);
+        col->addWidget(m_scanStatus);
+
+        m_discoveredList = new QListWidget(page);
+        m_discoveredList->setObjectName(QStringLiteral("discoveredVaultsList"));
+        m_discoveredList->setMinimumHeight(140);
+        m_discoveredList->setMaximumHeight(220);
+        m_discoveredList->setWordWrap(true);
+        col->addWidget(m_discoveredList);
+
+        m_existingError = errorLabel(page);
+        col->addWidget(m_existingError);
+
+        auto *row = new QHBoxLayout;
+        auto *back = new PillButton(T("返回"), PillButton::Ghost, page);
+        m_openExisting = new PillButton(T("打开笔记库"), PillButton::Primary, page);
+        m_openExisting->setObjectName(QStringLiteral("openExistingBtn"));
+        m_openExisting->setEnabled(false);
+        connect(back, &QToolButton::clicked, this, [this] { go(Choose); });
+        connect(m_openExisting, &QToolButton::clicked, this, &VaultDialog::openExisting);
+        connect(m_existingPath, &QLineEdit::textChanged, this, [this] { verifyExistingPath(); });
+        connect(m_existingPath, &QLineEdit::returnPressed, this, [this] {
+            if (m_existingValid) openExisting();
+        });
+        connect(browse, &QPushButton::clicked, this, [this] {
+            const QString startDir = m_existingPath->text().trimmed().isEmpty() ? QDir::homePath() : m_existingPath->text().trimmed();
+            const QString dir = QFileDialog::getExistingDirectory(this, T("选择已有笔记库文件夹"), startDir);
+            if (!dir.isEmpty()) m_existingPath->setText(QDir::toNativeSeparators(QDir::cleanPath(dir)));
+        });
+        connect(m_existingScan, &QPushButton::clicked, this, &VaultDialog::startScan);
+        connect(m_discoveredList, &QListWidget::itemClicked, this, [this](QListWidgetItem *item) {
+            if (!item) return;
+            const QString dir = item->data(Qt::UserRole).toString();
+            if (!dir.isEmpty()) m_existingPath->setText(QDir::toNativeSeparators(dir));
+        });
+        connect(m_discoveredList, &QListWidget::itemDoubleClicked, this, [this](QListWidgetItem *item) {
+            if (!item) return;
+            const QString dir = item->data(Qt::UserRole).toString();
+            if (dir.isEmpty()) return;
+            m_existingPath->setText(QDir::toNativeSeparators(dir));
+            if (m_existingValid) openExisting();
+        });
+
+        m_scanWatcher = new QFutureWatcher<QList<DiscoveredVault>>(this);
+        connect(m_scanWatcher, &QFutureWatcher<QList<DiscoveredVault>>::finished, this, [this] {
+            m_existingScan->setEnabled(true);
+            applyScanResults(m_scanWatcher->result());
+        });
+
+        row->addWidget(back);
+        row->addStretch(1);
+        row->addWidget(m_openExisting);
         col->addLayout(row);
         m_pages->addWidget(page);
     }
@@ -306,10 +469,21 @@ VaultDialog::VaultDialog(QWidget *parent, bool startWithServer) : QDialog(parent
     go(startWithServer ? Server : Choose);
 }
 
+void VaultDialog::showLocalCreate() { go(Local); }
+
+void VaultDialog::showOpenExisting() { go(OpenExisting); }
+
 void VaultDialog::go(Page p) {
     m_pages->setCurrentIndex(p);
     rise(m_pages->currentWidget(), 260);
     if (p == Local) m_localName->setFocus(), m_localName->selectAll();
+    if (p == OpenExisting) {
+        m_existingPath->setFocus();
+        if (!m_scannedOnce) {
+            m_scannedOnce = true;
+            startScan();
+        }
+    }
     if (p == Server) m_server->setFocus();
     adjustSize();
 }
@@ -325,13 +499,24 @@ void VaultDialog::setBusy(bool busy) {
     setCursor(busy ? Qt::BusyCursor : Qt::ArrowCursor);
 }
 
+void VaultDialog::updateLocalPathUi() {
+    const bool custom = !m_localCustomPath.isEmpty();
+    m_localPath->setText(custom ? QDir::toNativeSeparators(m_localCustomPath) : QString());
+    m_localResetPath->setEnabled(custom);
+    m_localPathHint->setText(custom
+        ? T("所选文件夹将直接作为笔记库目录（不会在其中再创建子文件夹）。")
+        : T("默认保存在应用数据目录中。如需存放到其他位置，请点击「选择位置…」。"));
+}
+
 void VaultDialog::createLocal() {
     const QString name = m_localName->text().trimmed();
     if (name.isEmpty()) return showError(m_localError, T("请填写名称。"));
+    showError(m_localError, QString());
     VaultInfo v;
     v.name = name.left(60);
     v.kind = VaultInfo::Local;
     v.encrypted = m_localEncrypt->isChecked();
+    v.path = m_localCustomPath;
     QString err;
     if (!vaults::create(v, &err)) return showError(m_localError, err);
     if (v.encrypted) {
@@ -340,6 +525,89 @@ void VaultDialog::createLocal() {
         dialogs::showRecoveryKey(this, v.name, VaultCipher::encodeRecoveryKey(key), true);
     }
     m_vaultId = v.id;
+    accept();
+}
+
+void VaultDialog::verifyExistingPath() {
+    showError(m_existingError, QString());
+    const QString raw = m_existingPath->text().trimmed();
+    if (raw.isEmpty()) {
+        m_existingValid = false;
+        m_openExisting->setEnabled(false);
+        m_existingStatus->hide();
+        return;
+    }
+    const DiscoveredVault d = vaults::inspectDir(raw);
+    QPalette pal = m_existingStatus->palette();
+    if (!d.valid) {
+        m_existingValid = false;
+        m_openExisting->setEnabled(false);
+        pal.setColor(QPalette::WindowText, Theme::t().danger);
+        m_existingStatus->setPalette(pal);
+        m_existingStatus->setText(T("未在该文件夹检测到有效的 Ivynote 笔记库（缺少有效的 vault.db）。"));
+        m_existingStatus->show();
+        return;
+    }
+    if (d.isRemote) {
+        m_existingValid = false;
+        m_openExisting->setEnabled(false);
+        pal.setColor(QPalette::WindowText, Theme::t().warnInk);
+        m_existingStatus->setPalette(pal);
+        m_existingStatus->setText(T("该目录是同步笔记库的本地缓存，不能作为本地笔记库直接打开。"));
+        m_existingStatus->show();
+        return;
+    }
+    m_existingValid = true;
+    m_openExisting->setEnabled(true);
+    pal.setColor(QPalette::WindowText, Theme::t().ivy);
+    m_existingStatus->setPalette(pal);
+    const QString countText = (i18n::isZh() ? QStringLiteral("%1 条笔记记录") : QStringLiteral("%1 note records")).arg(d.noteRecords);
+    const QString encText = d.encrypted ? T("已加密") : T("未加密");
+    QString msg = QStringLiteral("✓ ") + d.name + QStringLiteral(" · ") + countText + QStringLiteral(" · ") + encText;
+    if (!d.registeredId.isEmpty()) msg += QStringLiteral(" · ") + T("已在列表中，可直接打开");
+    m_existingStatus->setText(msg);
+    m_existingStatus->show();
+}
+
+void VaultDialog::startScan() {
+    if (!m_scanWatcher || m_scanWatcher->isRunning()) return;
+    m_existingScan->setEnabled(false);
+    m_scanStatus->setText(T("正在扫描本机笔记库…"));
+    m_scanWatcher->setFuture(QtConcurrent::run([] { return vaults::scanForVaults(); }));
+}
+
+void VaultDialog::applyScanResults(const QList<DiscoveredVault> &found) {
+    m_discoveredList->clear();
+    if (found.isEmpty()) {
+        m_scanStatus->setText(T("未自动扫描到其他本地笔记库，你可以点击「选择文件夹…」手动指定。"));
+        return;
+    }
+    m_scanStatus->setText((i18n::isZh()
+        ? QStringLiteral("扫描到 %1 个本地笔记库（点击选择，双击直接打开）：")
+        : QStringLiteral("Found %1 local vaults (click to select, double-click to open):")).arg(found.size()));
+    for (const DiscoveredVault &d : found) {
+        const QString countText = (i18n::isZh() ? QStringLiteral("%1 条笔记") : QStringLiteral("%1 notes")).arg(d.noteRecords);
+        const QString encText = d.encrypted ? T("已加密") : T("未加密");
+        QString head = d.name + QStringLiteral("  ·  ") + countText + QStringLiteral("  ·  ") + encText;
+        if (!d.registeredId.isEmpty()) head += QStringLiteral("  [") + T("已添加") + u']';
+        auto *item = new QListWidgetItem(icons::themed(QStringLiteral("database")),
+                                         head + u'\n' + QDir::toNativeSeparators(d.dir),
+                                         m_discoveredList);
+        item->setData(Qt::UserRole, d.dir);
+        item->setToolTip(QDir::toNativeSeparators(d.dir));
+    }
+}
+
+void VaultDialog::openExisting() {
+    const QString raw = m_existingPath->text().trimmed();
+    if (raw.isEmpty()) return showError(m_existingError, T("请选择笔记库文件夹。"));
+    showError(m_existingError, QString());
+    VaultInfo attached;
+    QString err;
+    if (!vaults::attachExisting(raw, QString(), &attached, &err)) {
+        return showError(m_existingError, err);
+    }
+    m_vaultId = attached.id;
     accept();
 }
 

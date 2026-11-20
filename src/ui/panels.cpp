@@ -5,6 +5,7 @@
 #include "core/i18n.h"
 #include "sync/engine.h"
 #include "ui/icons.h"
+#include "ui/taskpicker.h"
 #include "ui/theme.h"
 #include "ui/toast.h"
 #include "ui/widgets.h"
@@ -15,12 +16,15 @@
 #include <QComboBox>
 #include <QDateTime>
 #include <QHBoxLayout>
+#include <QKeyEvent>
 #include <QLabel>
 #include <QLineEdit>
 #include <QListWidget>
 #include <QMenu>
+#include <QMouseEvent>
 #include <QPainter>
 #include <QPainterPath>
+#include <QSettings>
 #include <QStackedLayout>
 #include <QStyledItemDelegate>
 #include <QVBoxLayout>
@@ -34,9 +38,21 @@ enum {
     IdRole,                      // note or attachment id
     LineRole,                    // task line
     KindRole,                    // attachment kind
+    RawLineRole,                 // original markdown line for safe task mutation
+    DoneRole,                    // bool: completed task
+    OverdueRole,                 // bool: overdue task
+    TodayRole,                   // bool: due today
+    DueDateRole,                 // QDate
+    DueTimeRole,                 // QString "HH:mm" or empty
+    RepeatRuleRole,              // QString raw repeat rule
+    BranchKeyRole,               // QString branch key on section rows
+    BranchOpenRole,              // bool branch expanded state
+    BranchKindRole,              // int AgendaBranch::Kind
+    BranchCountRole,             // int branch count badge
 };
 
 constexpr int kHeader = 40;
+constexpr int kCheckHitRight = 38; // x <= pill.left() + kCheckHitRight hits the checkbox
 
 // Rows with a title and a detail line, selected and hovered like the shelf's.
 class RowDelegate : public QStyledItemDelegate {
@@ -45,11 +61,12 @@ public:
 
     // Media rows lead with a 36 px tile holding a thumbnail or a type icon.
     bool tiles = false;
+    bool agenda = false;
     std::function<QImage(const QModelIndex &)> thumbnail;
 
     QSize sizeHint(const QStyleOptionViewItem &, const QModelIndex &index) const override {
-        if (index.data(SectionRole).toBool()) return {0, 30};
-        return {0, tiles ? 52 : 48};
+        if (index.data(SectionRole).toBool()) return {0, 32};
+        return {0, tiles ? 52 : 50};
     }
 
     void paint(QPainter *p, const QStyleOptionViewItem &opt, const QModelIndex &index) const override {
@@ -57,9 +74,43 @@ public:
         p->save();
         p->setRenderHint(QPainter::Antialiasing);
         if (index.data(SectionRole).toBool()) {
-            p->setPen(k.muted);
-            p->setFont(Theme::uiFont(12, QFont::Medium));
-            p->drawText(opt.rect.adjusted(14, 6, -8, 0), Qt::AlignVCenter | Qt::AlignLeft, index.data().toString());
+            if (!agenda) {
+                p->setPen(k.muted);
+                p->setFont(Theme::uiFont(12, QFont::Medium));
+                p->drawText(opt.rect.adjusted(14, 6, -8, 0), Qt::AlignVCenter | Qt::AlignLeft, index.data().toString());
+                p->restore();
+                return;
+            }
+            const QRect pill = opt.rect.adjusted(6, 2, -6, -1);
+            if (opt.state & (QStyle::State_MouseOver | QStyle::State_Selected)) {
+                p->setPen(Qt::NoPen);
+                p->setBrush(Theme::alpha(k.ink, 0.045));
+                p->drawRoundedRect(pill, Theme::radius, Theme::radius);
+            }
+            const int bkind = index.data(BranchKindRole).toInt();
+            const QColor accent = bkind == int(AgendaBranch::Overdue) ? k.danger
+                                  : bkind == int(AgendaBranch::Today) ? k.ivy
+                                                                      : k.muted;
+            const bool open = index.data(BranchOpenRole).toBool();
+            const qreal dpr = p->device()->devicePixelRatioF();
+            const QPixmap chev = icons::pixmap(open ? QStringLiteral("chevron-down") : QStringLiteral("chevron-right"), accent, 14, dpr);
+            p->drawPixmap(pill.left() + 6, pill.center().y() - 7, chev);
+
+            const int count = index.data(BranchCountRole).toInt();
+            const QString countText = QString::number(count);
+            const QFont countFont = Theme::uiFont(11, QFont::Medium);
+            const int countW = QFontMetrics(countFont).horizontalAdvance(countText) + 12;
+
+            p->setFont(Theme::uiFont(12, QFont::DemiBold));
+            p->setPen(accent);
+            const QRect labelRect(pill.left() + 24, pill.top(), pill.width() - 32 - countW, pill.height());
+            p->drawText(labelRect, Qt::AlignVCenter | Qt::AlignLeft,
+                        QFontMetrics(p->font()).elidedText(index.data().toString(), Qt::ElideRight, labelRect.width()));
+
+            p->setFont(countFont);
+            p->setPen(accent);
+            p->drawText(QRect(pill.right() - countW - 6, pill.top(), countW, pill.height()),
+                        Qt::AlignVCenter | Qt::AlignRight, countText);
             p->restore();
             return;
         }
@@ -71,7 +122,30 @@ public:
             p->drawRoundedRect(pill, Theme::radius, Theme::radius);
         }
         int left = pill.left() + 10;
-        if (tiles) {
+        if (agenda) {
+            const bool done = index.data(DoneRole).toBool();
+            const bool overdue = index.data(OverdueRole).toBool();
+            const bool today = index.data(TodayRole).toBool();
+            const QRectF box(pill.left() + 10.5, pill.center().y() - 7.5, 15.0, 15.0);
+            if (done) {
+                p->setPen(Qt::NoPen);
+                p->setBrush(k.ivy);
+                p->drawRoundedRect(box, 3.5, 3.5);
+                QPen ck(Qt::white, 1.7, Qt::SolidLine, Qt::RoundCap, Qt::RoundJoin);
+                p->setPen(ck);
+                QPainterPath mark;
+                mark.moveTo(box.left() + 3.5, box.center().y() + 0.3);
+                mark.lineTo(box.left() + 6.4, box.bottom() - 3.6);
+                mark.lineTo(box.right() - 3.3, box.top() + 4.0);
+                p->drawPath(mark);
+            } else {
+                const QColor border = overdue ? k.danger : today ? k.ivy : k.muted;
+                p->setPen(QPen(border, 1.5));
+                p->setBrush(Qt::NoBrush);
+                p->drawRoundedRect(box, 3.5, 3.5);
+            }
+            left = pill.left() + 34;
+        } else if (tiles) {
             const QRect tile(left, pill.center().y() - 18, 36, 36);
             p->setPen(Qt::NoPen);
             p->setBrush(k.sunken);
@@ -98,14 +172,16 @@ public:
             left = tile.right() + 10;
         }
         const QRect text(left, pill.top(), pill.right() - left - 8, pill.height());
-        const QFont titleFont = Theme::uiFont(13);
+        QFont titleFont = Theme::uiFont(13);
+        const bool done = agenda && index.data(DoneRole).toBool();
+        if (done) titleFont.setStrikeOut(true);
         const QFont subFont = Theme::uiFont(11.5);
         const QFontMetrics tm(titleFont), sm(subFont);
         const int gap = 2;
         const int block = tm.height() + gap + sm.height();
         const int top = text.top() + (text.height() - block) / 2;
         p->setFont(titleFont);
-        p->setPen(k.ink);
+        p->setPen(done ? k.muted : k.ink);
         p->drawText(QRect(text.left(), top, text.width(), tm.height()), Qt::AlignVCenter | Qt::AlignLeft,
                     tm.elidedText(index.data().toString(), Qt::ElideRight, text.width()));
         const QVariant color = index.data(SubColorRole);
@@ -117,8 +193,75 @@ public:
     }
 };
 
-QListWidget *makeList(QWidget *parent, RowDelegate *delegate) {
-    auto *list = new QListWidget(parent);
+class AgendaList : public QListWidget {
+public:
+    using QListWidget::QListWidget;
+
+    std::function<void(QListWidgetItem *)> onCheckClick;
+    std::function<void(QListWidgetItem *)> onTaskClick;
+    std::function<void(const QString &)> onBranchToggle;
+    std::function<void(const QString &, bool)> onBranchSet;
+
+protected:
+    void mousePressEvent(QMouseEvent *e) override {
+        if (e->button() == Qt::LeftButton) {
+            if (QListWidgetItem *item = itemAt(e->pos())) {
+                setCurrentItem(item);
+                if (item->data(SectionRole).toBool()) {
+                    if (onBranchToggle) onBranchToggle(item->data(BranchKeyRole).toString());
+                    e->accept();
+                    return;
+                }
+                const QRect r = visualItemRect(item);
+                if (e->pos().x() <= r.left() + kCheckHitRight) {
+                    if (onCheckClick) onCheckClick(item);
+                    e->accept();
+                    return;
+                }
+                if (onTaskClick) onTaskClick(item);
+                e->accept();
+                return;
+            }
+        }
+        QListWidget::mousePressEvent(e);
+    }
+
+    void keyPressEvent(QKeyEvent *e) override {
+        QListWidgetItem *item = currentItem();
+        if (item) {
+            const bool section = item->data(SectionRole).toBool();
+            if (e->key() == Qt::Key_Space) {
+                if (section) {
+                    if (onBranchToggle) onBranchToggle(item->data(BranchKeyRole).toString());
+                } else if (onCheckClick) {
+                    onCheckClick(item);
+                }
+                e->accept();
+                return;
+            }
+            if (e->key() == Qt::Key_Return || e->key() == Qt::Key_Enter) {
+                if (section) {
+                    if (onBranchToggle) onBranchToggle(item->data(BranchKeyRole).toString());
+                } else if (onTaskClick) {
+                    onTaskClick(item);
+                }
+                e->accept();
+                return;
+            }
+            if (section && (e->key() == Qt::Key_Left || e->key() == Qt::Key_Right)) {
+                const bool open = item->data(BranchOpenRole).toBool();
+                const bool wantOpen = (e->key() == Qt::Key_Right);
+                if (open != wantOpen && onBranchSet)
+                    onBranchSet(item->data(BranchKeyRole).toString(), wantOpen);
+                e->accept();
+                return;
+            }
+        }
+        QListWidget::keyPressEvent(e);
+    }
+};
+
+void styleList(QListWidget *list, RowDelegate *delegate) {
     list->setItemDelegate(delegate);
     list->setFrameShape(QFrame::NoFrame);
     list->setMouseTracking(true);
@@ -128,6 +271,11 @@ QListWidget *makeList(QWidget *parent, RowDelegate *delegate) {
     list->setAttribute(Qt::WA_MacShowFocusRect, false);
     list->setContextMenuPolicy(Qt::CustomContextMenu);
     list->viewport()->setAutoFillBackground(false);
+}
+
+QListWidget *makeList(QWidget *parent, RowDelegate *delegate) {
+    auto *list = new QListWidget(parent);
+    styleList(list, delegate);
     return list;
 }
 
@@ -145,6 +293,12 @@ QTimer *debounce(QTimer *t, QObject *owner, std::function<void()> fn) {
     t->setInterval(120);
     QObject::connect(t, &QTimer::timeout, owner, std::move(fn));
     return t;
+}
+
+QDate nextMonday(const QDate &from) {
+    const int dow = from.dayOfWeek(); // 1=Mon .. 7=Sun
+    const int delta = (8 - dow) % 7;
+    return from.addDays(delta == 0 ? 7 : delta);
 }
 
 } // namespace
@@ -174,13 +328,41 @@ QLayout *PanelHeader::actions() const { return layout(); }
 // --- agenda ---
 
 AgendaPanel::AgendaPanel(QWidget *parent) : QWidget(parent) {
+    loadState();
+
     auto *col = new QVBoxLayout(this);
     col->setContentsMargins(0, 0, 0, 0);
     col->setSpacing(0);
     m_header = new PanelHeader(T("日程"), this);
+    m_doneToggle = new IconButton(QStringLiteral("todo"), T("显示今天已完成"), m_header);
+    m_doneToggle->setCheckable(true);
+    m_doneToggle->setChecked(m_showDone);
+    connect(m_doneToggle, &QToolButton::toggled, this, &AgendaPanel::setShowDone);
+    m_header->actions()->addWidget(m_doneToggle);
     col->addWidget(m_header);
+
+    m_summary = mutedLabel(QString(), this, 11.5);
+    m_summary->setContentsMargins(14, 0, 12, 6);
+    m_summary->hide();
+    col->addWidget(m_summary);
+
     auto *delegate = new RowDelegate(this);
-    m_list = makeList(this, delegate);
+    delegate->agenda = true;
+    auto *alist = new AgendaList(this);
+    styleList(alist, delegate);
+    alist->onCheckClick = [this](QListWidgetItem *item) {
+        if (!item || item->data(SectionRole).toBool()) return;
+        emit taskToggled(item->data(IdRole).toString(), item->data(LineRole).toInt(), item->data(RawLineRole).toString());
+    };
+    alist->onTaskClick = [this](QListWidgetItem *item) {
+        if (!item || item->data(SectionRole).toBool()) return;
+        emit taskActivated(item->data(IdRole).toString(), item->data(LineRole).toInt());
+    };
+    alist->onBranchToggle = [this](const QString &key) { toggleBranch(key); };
+    alist->onBranchSet = [this](const QString &key, bool) { toggleBranch(key); };
+    m_list = alist;
+    connect(m_list, &QListWidget::customContextMenuRequested, this, &AgendaPanel::showTaskMenu);
+
     m_empty = makeEmpty(T("没有待办日程") + QStringLiteral("\n") + T("在笔记里写下“- [ ] 任务 📅 2026-01-31 09:00”就会出现在这里。"), this);
     auto *host = new QWidget(this);
     m_pages = new QStackedLayout(host);
@@ -188,18 +370,46 @@ AgendaPanel::AgendaPanel(QWidget *parent) : QWidget(parent) {
     m_pages->addWidget(m_empty);
     col->addWidget(host, 1);
 
+    m_encryptedHint = mutedLabel(QString(), this, 11.5);
+    m_encryptedHint->setContentsMargins(14, 6, 12, 8);
+    m_encryptedHint->setWordWrap(true);
+    m_encryptedHint->hide();
+    col->addWidget(m_encryptedHint);
+
     debounce(&m_refresh, this, [this] { refresh(); });
     auto *minute = new QTimer(this);
     connect(minute, &QTimer::timeout, this, &AgendaPanel::refresh);
     minute->start(60000);
     connect(Theme::instance(), &Theme::changed, this, &AgendaPanel::refresh);
+}
 
-    const auto activate = [this](QListWidgetItem *item) {
-        if (!item || item->data(SectionRole).toBool()) return;
-        emit taskActivated(item->data(IdRole).toString(), item->data(LineRole).toInt());
-    };
-    connect(m_list, &QListWidget::itemClicked, this, activate);
-    connect(m_list, &QListWidget::itemActivated, this, activate);
+void AgendaPanel::loadState() {
+    QSettings s;
+    m_showDone = s.value(QStringLiteral("agenda/showDone"), false).toBool();
+    const QStringList list = s.value(QStringLiteral("agenda/toggled")).toStringList();
+    m_toggledBranches = QSet<QString>(list.begin(), list.end());
+}
+
+void AgendaPanel::saveState() const {
+    QSettings s;
+    s.setValue(QStringLiteral("agenda/showDone"), m_showDone);
+    s.setValue(QStringLiteral("agenda/toggled"), QStringList(m_toggledBranches.begin(), m_toggledBranches.end()));
+}
+
+void AgendaPanel::setShowDone(bool show) {
+    if (m_showDone == show) return;
+    m_showDone = show;
+    if (m_doneToggle->isChecked() != show) m_doneToggle->setChecked(show);
+    saveState();
+    refresh();
+}
+
+void AgendaPanel::toggleBranch(const QString &key) {
+    if (key.isEmpty()) return;
+    if (m_toggledBranches.contains(key)) m_toggledBranches.remove(key);
+    else m_toggledBranches.insert(key);
+    saveState();
+    refresh();
 }
 
 void AgendaPanel::setSession(Session *session) {
@@ -210,44 +420,147 @@ void AgendaPanel::setSession(Session *session) {
 }
 
 void AgendaPanel::refresh() {
+    QString selectedKey;
+    if (QListWidgetItem *cur = m_list->currentItem()) {
+        if (cur->data(SectionRole).toBool())
+            selectedKey = QStringLiteral("b:") + cur->data(BranchKeyRole).toString();
+        else
+            selectedKey = QStringLiteral("t:%1:%2").arg(cur->data(IdRole).toString()).arg(cur->data(LineRole).toInt());
+    }
+
     m_list->clear();
     if (!m_session) {
         m_header->setCount(-1);
+        m_summary->hide();
+        m_encryptedHint->hide();
         m_pages->setCurrentWidget(m_empty);
+        emit badgeChanged(0, false);
         return;
     }
+
     const Tokens &k = Theme::t();
     const QDateTime now = QDateTime::currentDateTime();
-    const QDate today = now.date();
-    const auto tasks = agendaTasks(m_session->engine()->notes());
-    enum Bucket { Overdue, Today, Tomorrow, Later, Buckets };
-    const QString names[Buckets] = {T("已过期"), T("今天"), T("明天"), T("之后")};
-    QList<const AgendaTask *> groups[Buckets];
-    for (const AgendaTask &t : tasks) {
-        const QDate day = t.due.date();
-        const bool late = t.allDay ? day < today : t.due < now;
-        groups[late ? Overdue : day == today ? Today : day == today.addDays(1) ? Tomorrow : Later].append(&t);
+    const bool zh = i18n::isZh();
+    const AgendaTree tree = buildAgendaTree(m_session->engine()->notes(), m_showDone, now, zh);
+
+    // Summary line
+    QStringList stats;
+    if (tree.overdueCount > 0)
+        stats << (zh ? QStringLiteral("已过期 %1").arg(tree.overdueCount) : QStringLiteral("%1 overdue").arg(tree.overdueCount));
+    if (tree.todayCount > 0)
+        stats << (zh ? QStringLiteral("今天 %1").arg(tree.todayCount) : QStringLiteral("%1 today").arg(tree.todayCount));
+    if (!stats.isEmpty()) {
+        m_summary->setText(stats.join(QStringLiteral(" · ")));
+        QPalette pal = m_summary->palette();
+        pal.setColor(QPalette::WindowText, tree.overdueCount > 0 ? k.danger : k.ivy);
+        m_summary->setPalette(pal);
+        m_summary->show();
+    } else {
+        m_summary->hide();
     }
-    const QString dateFormat = i18n::isZh() ? QStringLiteral("M月d日") : QStringLiteral("MMM d");
-    for (int b = 0; b < Buckets; ++b) {
-        if (groups[b].isEmpty()) continue;
-        auto *section = new QListWidgetItem(names[b], m_list);
-        section->setFlags(Qt::NoItemFlags);
+
+    const QString dateFormat = zh ? QStringLiteral("M月d日") : QStringLiteral("MMM d");
+    int shownRows = 0;
+    for (const AgendaBranch &b : tree.branches) {
+        const bool isOpen = b.openByDefault() != m_toggledBranches.contains(b.key);
+        auto *section = new QListWidgetItem(b.label, m_list);
+        section->setFlags(Qt::ItemIsEnabled | Qt::ItemIsSelectable);
         section->setData(SectionRole, true);
-        for (const AgendaTask *t : groups[b]) {
-            auto *item = new QListWidgetItem(t->text.isEmpty() ? T("无标题") : t->text, m_list);
-            const QString when = t->allDay ? T("全天") : t->due.toString(QStringLiteral("HH:mm"));
-            const QString date = (b == Overdue || b == Later) ? t->due.date().toString(dateFormat) + QStringLiteral(" ") : QString();
-            const QString note = t->title.trimmed().isEmpty() ? T("无标题") : t->title;
-            item->setData(SubRole, date + when + QStringLiteral(" · ") + note);
-            if (b == Overdue) item->setData(SubColorRole, k.danger);
-            item->setData(IdRole, t->noteId);
-            item->setData(LineRole, t->line);
-            item->setToolTip(note);
+        section->setData(BranchKeyRole, b.key);
+        section->setData(BranchOpenRole, isOpen);
+        section->setData(BranchKindRole, int(b.kind));
+        section->setData(BranchCountRole, int(b.items.size()));
+        if (selectedKey == QStringLiteral("b:") + b.key) m_list->setCurrentItem(section);
+        ++shownRows;
+        if (!isOpen) continue;
+
+        const bool isOverdue = (b.kind == AgendaBranch::Overdue);
+        const bool isToday = (b.kind == AgendaBranch::Today);
+        const bool showDate = (b.kind == AgendaBranch::Overdue || b.kind == AgendaBranch::Month);
+
+        for (const AgendaTask &t : b.items) {
+            auto *item = new QListWidgetItem(t.text.isEmpty() ? T("无标题") : t.text, m_list);
+            const QString when = t.allDay ? T("全天") : t.due.toString(QStringLiteral("HH:mm"));
+            QString sub = showDate ? (t.due.date().toString(dateFormat) + (t.allDay ? QString() : QStringLiteral(" ") + when)) : when;
+            if (t.repeat) sub += QStringLiteral(" · 🔁 ") + tasks::describeRepeat(*t.repeat, zh);
+            const QString note = t.title.trimmed().isEmpty() ? T("无标题") : t.title;
+            sub += QStringLiteral(" · ") + note;
+
+            item->setData(SubRole, sub);
+            if (!t.done && isOverdue) item->setData(SubColorRole, k.danger);
+            else if (!t.done && isToday) item->setData(SubColorRole, k.ivy);
+            item->setData(IdRole, t.noteId);
+            item->setData(LineRole, t.line);
+            item->setData(RawLineRole, t.rawLine);
+            item->setData(DoneRole, t.done);
+            item->setData(OverdueRole, isOverdue);
+            item->setData(TodayRole, isToday);
+            item->setData(DueDateRole, t.due.date());
+            item->setData(DueTimeRole, t.allDay ? QTime() : t.due.time());
+            item->setData(RepeatRuleRole, t.repeat ? t.repeat->raw : QString());
+            item->setToolTip(note + u'\n' + t.rawLine.trimmed());
+            if (selectedKey == QStringLiteral("t:%1:%2").arg(t.noteId).arg(t.line)) m_list->setCurrentItem(item);
+            ++shownRows;
         }
     }
-    m_header->setCount(int(tasks.size()));
-    m_pages->setCurrentWidget(tasks.isEmpty() ? m_empty : static_cast<QWidget *>(m_list));
+
+    if (tree.encryptedCount > 0) {
+        m_encryptedHint->setText(
+            (zh ? QStringLiteral("已跳过 %1 篇加密笔记中的任务") : QStringLiteral("%1 encrypted notes skipped")).arg(tree.encryptedCount));
+        m_encryptedHint->show();
+    } else {
+        m_encryptedHint->hide();
+    }
+
+    m_header->setCount(tree.totalOpen);
+    m_pages->setCurrentWidget(shownRows == 0 ? static_cast<QWidget *>(m_empty) : static_cast<QWidget *>(m_list));
+    emit badgeChanged(tree.overdueCount + tree.todayCount, tree.overdueCount > 0);
+}
+
+void AgendaPanel::showTaskMenu(const QPoint &pos) {
+    QListWidgetItem *item = m_list->itemAt(pos);
+    if (!item || item->data(SectionRole).toBool() || !m_session) return;
+    m_list->setCurrentItem(item);
+
+    const QString noteId = item->data(IdRole).toString();
+    const int line = item->data(LineRole).toInt();
+    const QString rawLine = item->data(RawLineRole).toString();
+    const bool done = item->data(DoneRole).toBool();
+    const QDate dueDate = item->data(DueDateRole).toDate();
+    const QTime dueTime = item->data(DueTimeRole).toTime();
+    const QString repeatRaw = item->data(RepeatRuleRole).toString();
+
+    QMenu menu(this);
+    menu.addAction(icons::themed("check"), done ? T("取消完成") : T("标记完成"), this, [this, noteId, line, rawLine] {
+        emit taskToggled(noteId, line, rawLine);
+    });
+    menu.addSeparator();
+    menu.addAction(icons::themed("calendar"), T("改期与重复…"), this, [this, noteId, line, rawLine, dueDate, dueTime, repeatRaw] {
+        std::optional<tasks::Due> initDue;
+        if (dueDate.isValid()) initDue = tasks::Due{dueDate, dueTime};
+        std::optional<tasks::RepeatRule> initRep;
+        if (!repeatRaw.isEmpty()) initRep = tasks::parseRepeat(repeatRaw);
+        TaskDueDialog dlg(initDue, initRep, this);
+        dlg.exec();
+        if (dlg.action() == TaskDueDialog::Applied)
+            emit taskDueChanged(noteId, line, rawLine, dlg.selectedDue(), dlg.selectedRepeat());
+        else if (dlg.action() == TaskDueDialog::Removed)
+            emit taskDueChanged(noteId, line, rawLine, std::nullopt, QString());
+    });
+
+    const QDate today = QDate::currentDate();
+    const auto reschedule = [this, noteId, line, rawLine, dueTime, repeatRaw](const QDate &d) {
+        emit taskDueChanged(noteId, line, rawLine, tasks::Due{d, dueTime}, repeatRaw);
+    };
+    menu.addAction(T("改到今天"), this, [reschedule, today] { reschedule(today); });
+    menu.addAction(T("改到明天"), this, [reschedule, today] { reschedule(today.addDays(1)); });
+    menu.addAction(T("改到下周一"), this, [reschedule, today] { reschedule(nextMonday(today)); });
+
+    menu.addSeparator();
+    menu.addAction(icons::themed("note"), T("打开笔记"), this, [this, noteId, line] {
+        emit taskActivated(noteId, line);
+    });
+    menu.exec(m_list->viewport()->mapToGlobal(pos));
 }
 
 // --- media library ---

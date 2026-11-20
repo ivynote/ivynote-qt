@@ -13,6 +13,7 @@
 #include <QDesktopServices>
 #include <QDir>
 #include <QFileDialog>
+#include <QFileInfo>
 #include <QImageReader>
 #include <QJsonObject>
 #include <QNetworkInformation>
@@ -52,6 +53,7 @@ Session *Session::open(const VaultInfo &info, const QByteArray &keyOverride, Ope
         return nullptr;
     }
     if (!keyOverride.isEmpty()) secrets::set(info.vaultKeyKey(), keyOverride);
+    if (!QFileInfo::exists(info.dir() + QStringLiteral("/vault.json"))) vaults::writeMetadata(info);
     s->m_files = new VaultFiles(info.dir(), cipher);
     const QString device = vaults::deviceId();
     if (info.isRemote()) {

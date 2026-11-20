@@ -3,6 +3,7 @@
 #include <cmath>
 
 #include "core/models.h"
+#include "core/tasks.h"
 
 #include <QRegularExpression>
 #include <algorithm>
@@ -372,8 +373,10 @@ QString toggleTask(const QString &body, int index) {
     parser.text = [](MD_TEXTTYPE, const MD_CHAR *, MD_SIZE, void *) { return 0; };
     QByteArray source = body.toUtf8();
     if (md_parse(source.constData(), MD_SIZE(source.size()), &parser, &tasks) != 0 || tasks.offset < 0 || tasks.offset >= source.size()) return body;
-    source[tasks.offset] = source[tasks.offset] == ' ' ? 'x' : ' ';
-    return QString::fromUtf8(source);
+    int lineNo = 0;
+    for (qsizetype i = 0; i < tasks.offset; ++i)
+        if (source[i] == '\n') ++lineNo;
+    return tasks::toggleTaskLine(body, lineNo);
 }
 
 QString linkContext(const QString &body, const QString &title, int max) {

@@ -28,13 +28,25 @@
 #include <QTemporaryDir>
 #include <QTabBar>
 #include <QStackedWidget>
+#include "ui/backupdialog.h"
+#include "ui/diffdialog.h"
+#include "ui/panels.h"
 #include "ui/render.h"
+#include "ui/taskpicker.h"
 #include "ui/theme.h"
+#include "vault/backup.h"
+#include "vault/session.h"
 
 #include <QApplication>
+#include <QCheckBox>
 #include <QClipboard>
+#include <QComboBox>
+#include <QGroupBox>
+#include <QListWidget>
 #include <QMimeData>
+#include <QSettings>
 #include <QTextBlock>
+#include <QTextBrowser>
 #include <QtTest>
 
 namespace {
@@ -726,6 +738,462 @@ private slots:
         cancelBtn->click();
         QCoreApplication::processEvents();
         QVERIFY(!host.findChild<QObject *>(QStringLiteral("updateCheckSession"), Qt::FindDirectChildrenOnly));
+    }
+
+    void slashCommandMenuAndPinyin() {
+        MarkdownEditor editor;
+        editor.resize(700, 500);
+        editor.show();
+        editor.setMarkdown(QString());
+        QTest::keyClicks(&editor, QStringLiteral("/bg"));
+        QVERIFY(editor.inlinePopupVisible());
+        const QStringList ids = editor.inlinePopupItemIds();
+        QVERIFY(!ids.isEmpty());
+        QCOMPARE(ids.first(), QStringLiteral("table"));
+        QTest::keyClick(&editor, Qt::Key_Return);
+        QVERIFY(!editor.inlinePopupVisible());
+        QVERIFY(editor.markdown().contains(QStringLiteral("| ")));
+        QVERIFY(!editor.markdown().contains(QStringLiteral("/bg")));
+
+        // Suppressed inside fenced code blocks.
+        editor.setMarkdown(QStringLiteral("```md\n\n```"));
+        editor.setTextCursor(QTextCursor(editor.document()->findBlockByNumber(1)));
+        QTest::keyClicks(&editor, QStringLiteral("/bg"));
+        QVERIFY(!editor.inlinePopupVisible());
+
+        // showInsertMenu auto-inserts '/' and Escape reverts it.
+        editor.setMarkdown(QStringLiteral("hello"));
+        editor.moveCursor(QTextCursor::End);
+        editor.showInsertMenu();
+        QVERIFY(editor.inlinePopupVisible());
+        QTest::keyClick(&editor, Qt::Key_Escape);
+        QVERIFY(!editor.inlinePopupVisible());
+        QCOMPARE(editor.markdown(), QStringLiteral("hello"));
+    }
+
+    void atDateCompletionAndTaskRendering() {
+        MarkdownEditor editor;
+        editor.resize(700, 500);
+        editor.show();
+        editor.setMarkdown(QStringLiteral("- [ ] 周报 "));
+        editor.moveCursor(QTextCursor::End);
+        QInputMethodEvent ime;
+        ime.setCommitString(QStringLiteral("@明天 9点"));
+        QApplication::sendEvent(&editor, &ime);
+        QVERIFY(editor.inlinePopupVisible());
+        QTest::keyClick(&editor, Qt::Key_Return);
+        QVERIFY(!editor.inlinePopupVisible());
+        const QString expectedDate = QDate::currentDate().addDays(1).toString(Qt::ISODate);
+        QCOMPARE(editor.markdown(), QStringLiteral("- [ ] 周报 📅 %1 09:00").arg(expectedDate));
+
+        // Styled task chips in rendered HTML.
+        RenderOptions o;
+        o.forView = true;
+        const QString html = renderMarkdown(
+            QStringLiteral("- [ ] standup 📅 %1 09:00 🔁 every day\n- [x] done 📅 2026-01-01 ✅ 2026-01-01").arg(expectedDate), o);
+        QVERIFY(html.contains(QLatin1String("task-due")));
+        QVERIFY(html.contains(QLatin1String("task-repeat")));
+        QVERIFY(html.contains(QLatin1String("task-done")));
+    }
+
+    void readModeKeepsUndoAndSupportsFind() {
+        NotePane pane;
+        pane.resize(900, 650);
+        for (QWidget *child : pane.findChildren<QWidget *>(Qt::FindDirectChildrenOnly)) child->setEnabled(true);
+        pane.editor()->setReadOnly(false);
+        pane.editor()->setMarkdown(QStringLiteral("alpha Beta"));
+        pane.editor()->moveCursor(QTextCursor::End);
+        QTest::keyClicks(pane.editor(), QStringLiteral(" alpha"));
+        QVERIFY(pane.editor()->document()->isUndoAvailable());
+        pane.show();
+
+        QSignalSpy spy(&pane, &NotePane::readingChanged);
+        pane.setReading(true);
+        QVERIFY(pane.isReading());
+        QCOMPARE(spy.count(), 1);
+        QVERIFY(pane.preview()->isVisible());
+        QVERIFY(pane.editor()->isHidden());
+
+        // Find works in Read mode against MarkdownView without modifying source.
+        pane.showFind();
+        auto *input = pane.findChild<QLineEdit *>(QStringLiteral("noteFindText"));
+        QVERIFY(input);
+        input->setText(QStringLiteral("alpha"));
+        QCOMPARE(pane.preview()->textCursor().selectedText(), QStringLiteral("alpha"));
+        QCOMPARE(pane.preview()->extraSelections().size(), 2);
+
+        // Exiting Read mode restores editor with intact undo stack.
+        pane.setReading(false);
+        QVERIFY(!pane.isReading());
+        QVERIFY(pane.editor()->isVisible());
+        QVERIFY(pane.editor()->document()->isUndoAvailable());
+        pane.editor()->undo();
+        QCOMPARE(pane.editor()->markdown(), QStringLiteral("alpha Beta"));
+    }
+
+    void diffDialogCompareAndAppend() {
+        QTemporaryDir dir;
+        vaults::setDataRoot(dir.path());
+        VaultInfo info;
+        info.name = QStringLiteral("DiffTest");
+        info.kind = VaultInfo::Local;
+        QString msg;
+        QVERIFY(vaults::create(info, &msg));
+        Session::OpenError err = Session::OpenError::None;
+        std::unique_ptr<Session> session(Session::open(info, {}, &err, &msg));
+        QVERIFY(session != nullptr);
+
+        const Note base = session->engine()->createNote({.title = QStringLiteral("周报"), .body = QStringLiteral("line1\nold text\nline3")});
+        const Note copy = session->engine()->createNote({.title = QStringLiteral("周报 (冲突副本 2026-05-01)"), .body = QStringLiteral("line1\nnew text\nline3")});
+
+        NoteDiffDialog dlg(session.get(), base.id, QString());
+        dlg.show();
+        QCoreApplication::processEvents();
+        // Auto-picks the conflict counterpart and renders diff HTML.
+        auto *browser = dlg.findChild<QTextBrowser *>();
+        QVERIFY(browser && browser->isVisible());
+        const QString html = browser->toHtml();
+        QVERIFY(html.contains(QStringLiteral("old")));
+        QVERIFY(html.contains(QStringLiteral("new")));
+
+        // Append right content into base note.
+        QPushButton *appendBtn = nullptr;
+        for (QPushButton *b : dlg.findChildren<QPushButton *>()) {
+            if (b->text() == T("将右侧追加到当前")) {
+                appendBtn = b;
+                break;
+            }
+        }
+        QVERIFY(appendBtn && appendBtn->isEnabled());
+        appendBtn->click();
+        QCoreApplication::processEvents();
+        const Note *updated = session->engine()->note(base.id);
+        QVERIFY(updated);
+        QVERIFY(updated->body.contains(QStringLiteral("old text")));
+        QVERIFY(updated->body.contains(QStringLiteral("new text")));
+        Q_UNUSED(copy);
+        session->close();
+    }
+
+    void agendaPanelTreeToggleAndBadge() {
+        QTemporaryDir dir;
+        vaults::setDataRoot(dir.path());
+        VaultInfo info;
+        info.name = QStringLiteral("AgendaTest");
+        info.kind = VaultInfo::Local;
+        QString msg;
+        QVERIFY(vaults::create(info, &msg));
+        Session::OpenError err = Session::OpenError::None;
+        std::unique_ptr<Session> session(Session::open(info, {}, &err, &msg));
+        QVERIFY(session != nullptr);
+
+        const QString yesterday = QDate::currentDate().addDays(-1).toString(Qt::ISODate);
+        const QString today = QDate::currentDate().toString(Qt::ISODate);
+        const Note n = session->engine()->createNote({
+            .title = QStringLiteral("Tasks"),
+            .body = QStringLiteral("- [ ] overdue item 📅 %1\n- [ ] today item 📅 %2\n- [x] finished today 📅 %2 ✅ %2\n").arg(yesterday, today),
+        });
+        session->engine()->createNote({
+            .title = QStringLiteral("Locked"),
+            .body = QStringLiteral("```ivy-encrypted\nv: 1\n```"),
+        });
+
+        AgendaPanel panel;
+        panel.setShowDone(false);
+        panel.resize(320, 500);
+        panel.show();
+        QSignalSpy badgeSpy(&panel, &AgendaPanel::badgeChanged);
+        QSignalSpy toggleSpy(&panel, &AgendaPanel::taskToggled);
+
+        panel.setSession(session.get());
+        QVERIFY(badgeSpy.count() >= 1);
+        QCOMPARE(badgeSpy.last().at(0).toInt(), 2);     // 1 overdue + 1 today
+        QCOMPARE(badgeSpy.last().at(1).toBool(), true); // hasOverdue
+
+        auto *list = panel.findChild<QListWidget *>();
+        QVERIFY(list);
+        const int rowsBefore = list->count();
+        // Branches Overdue + Today are open by default: 2 headers + 2 open tasks = 4 rows.
+        QCOMPARE(rowsBefore, 4);
+
+        // Clicking the checkbox zone on the first task row (row 1) emits taskToggled.
+        const QRect itemRect = list->visualItemRect(list->item(1));
+        QTest::mousePress(list->viewport(), Qt::LeftButton, Qt::NoModifier, QPoint(itemRect.left() + 18, itemRect.center().y()));
+        QCOMPARE(toggleSpy.count(), 1);
+        QCOMPARE(toggleSpy.first().at(0).toString(), n.id);
+        QCOMPARE(toggleSpy.first().at(1).toInt(), 0);
+
+        // Enabling Show Done reveals the completed-today task (5 rows total).
+        panel.setShowDone(true);
+        QCOMPARE(list->count(), 5);
+        panel.setShowDone(false);
+        session->close();
+    }
+
+    void defaultOpenModeAndToolbarCleanup() {
+        // Slash popup uses native painting/palette (no QSS override on list/scrollbar).
+        MarkdownEditor editor;
+        auto *popup = editor.findChild<QWidget *>(QStringLiteral("editorInlinePopup"));
+        QVERIFY(popup);
+        QVERIFY(popup->styleSheet().isEmpty());
+
+        // Read mode and Diff buttons are tucked into More menu instead of top bar.
+        NotePane pane;
+        QVERIFY(!pane.findChild<QWidget *>(QStringLiteral("readButton")));
+        QVERIFY(!pane.findChild<QWidget *>(QStringLiteral("diffButton")));
+
+        // Default open mode setting supports Live (default), Source, Split, and Read.
+        const int savedMode = Prefs::instance()->editorMode();
+        QSettings().remove(QStringLiteral("ui/editorMode"));
+        QCOMPARE(Prefs::instance()->editorMode(), int(OpenMode::Live));
+
+        SettingsDialog dlg(nullptr);
+        auto *modeBox = dlg.findChild<QComboBox *>(QStringLiteral("defaultOpenModeBox"));
+        QVERIFY(modeBox);
+        QCOMPARE(modeBox->count(), 4);
+        QCOMPARE(modeBox->currentIndex(), int(OpenMode::Live));
+        QCOMPARE(modeBox->itemText(int(OpenMode::Live)), T("所见即所得"));
+        QCOMPARE(modeBox->itemText(int(OpenMode::Source)), T("源码"));
+        QCOMPARE(modeBox->itemText(int(OpenMode::Split)), T("双栏"));
+        QCOMPARE(modeBox->itemText(int(OpenMode::Read)), T("阅读模式"));
+
+        modeBox->setCurrentIndex(int(OpenMode::Read));
+        QCOMPARE(Prefs::instance()->editorMode(), int(OpenMode::Read));
+
+        // prepareOpenMode cleanly puts NotePane into Read mode before setNote.
+        pane.prepareOpenMode(EditorMode::Live, true);
+        QVERIFY(pane.isReading());
+        QCOMPARE(pane.editorMode(), EditorMode::Live);
+
+        Prefs::instance()->setEditorMode(savedMode);
+    }
+
+    void localBackupDialogAndSettingsVisibility() {
+        QTemporaryDir root;
+        vaults::setDataRoot(root.path());
+
+        VaultInfo localInfo;
+        localInfo.name = QStringLiteral("LocalDiary");
+        localInfo.kind = VaultInfo::Local;
+        QString msg;
+        QVERIFY(vaults::create(localInfo, &msg));
+        Session::OpenError err = Session::OpenError::None;
+        std::unique_ptr<Session> local(Session::open(localInfo, {}, &err, &msg));
+        QVERIFY(local != nullptr);
+        local->engine()->createNote({.title = QStringLiteral("First entry"), .body = QStringLiteral("Backup test content")});
+
+        VaultInfo remoteInfo;
+        remoteInfo.name = QStringLiteral("RemoteCloud");
+        remoteInfo.kind = VaultInfo::Remote;
+        remoteInfo.server = QStringLiteral("https://example.invalid");
+        remoteInfo.username = QStringLiteral("bob");
+        QVERIFY(vaults::create(remoteInfo, &msg));
+        std::unique_ptr<Session> remote(Session::open(remoteInfo, {}, &err, &msg));
+        QVERIFY(remote != nullptr);
+
+        // SettingsDialog shows local backup group for both local (enabled by default)
+        // and remote (disabled by default) vaults, and keeps the vault location link aligned.
+        {
+            SettingsDialog localSettings(local.get());
+            localSettings.showVaultTab();
+            localSettings.resize(700, 620);
+            localSettings.show();
+            QCoreApplication::processEvents();
+            QVERIFY(localSettings.findChild<QGroupBox *>(QStringLiteral("localBackupGroup")) != nullptr);
+            auto *locLbl = localSettings.findChild<QLabel *>(QStringLiteral("vaultLocationLabel"));
+            auto *rowTitle = localSettings.findChild<QLabel *>(QStringLiteral("vaultLocationTitle"));
+            auto *typeLbl = localSettings.findChild<QLabel *>(QStringLiteral("vaultTypeLabel"));
+            QVERIFY(locLbl && rowTitle && typeLbl);
+            QVERIFY2(qAbs(locLbl->y() - rowTitle->y()) <= 4,
+                     qPrintable(QStringLiteral("location row misaligned: label y=%1, field y=%2")
+                                    .arg(rowTitle->y()).arg(locLbl->y())));
+            const int hfw = locLbl->heightForWidth(locLbl->width());
+            QVERIFY2(locLbl->height() >= hfw && locLbl->height() <= hfw + 4,
+                     qPrintable(QStringLiteral("location label height mismatch: loc=%1x%2, hfw=%3")
+                                    .arg(locLbl->width()).arg(locLbl->height()).arg(hfw)));
+            // When wide enough to fit on one line, the label shrinks cleanly to single-line height.
+            localSettings.resize(1200, 620);
+            QCoreApplication::processEvents();
+            QVERIFY2(locLbl->height() <= typeLbl->height() + 4,
+                     qPrintable(QStringLiteral("single-line location bloated: loc=%1x%2, type=%3x%4, hfw=%5")
+                                    .arg(locLbl->width()).arg(locLbl->height())
+                                    .arg(typeLbl->width()).arg(typeLbl->height())
+                                    .arg(locLbl->heightForWidth(locLbl->width()))));
+        }
+        {
+            SettingsDialog remoteSettings(remote.get());
+            remoteSettings.showVaultTab();
+            QVERIFY(remoteSettings.findChild<QGroupBox *>(QStringLiteral("localBackupGroup")) != nullptr);
+            auto *statusLbl = remoteSettings.findChild<QLabel *>(QStringLiteral("localBackupStatusLabel"));
+            QVERIFY(statusLbl != nullptr);
+            QVERIFY(statusLbl->text().contains(T("已关闭")));
+        }
+
+        // LocalBackupDialog for a remote vault defaults to unchecked and supports manual enable + backup.
+        {
+            remote->engine()->createNote({.title = QStringLiteral("Remote entry"), .body = QStringLiteral("Cloud note body")});
+            LocalBackupManager remoteMgr;
+            remoteMgr.setSession(remote.get());
+            QTemporaryDir remoteBakDir;
+            backup::Config rcfg = remoteMgr.config();
+            QVERIFY(!rcfg.enabled);
+            rcfg.directory = remoteBakDir.filePath(QStringLiteral("remote_bak"));
+            remoteMgr.updateConfig(rcfg);
+
+            LocalBackupDialog rdlg(remote.get(), &remoteMgr, false);
+            auto *enCheck = rdlg.findChild<QCheckBox *>(QStringLiteral("backupEnabledCheck"));
+            auto *saveBtn = rdlg.findChild<QPushButton *>(QStringLiteral("backupSaveBtn"));
+            QVERIFY(enCheck && saveBtn);
+            QVERIFY(!enCheck->isChecked());
+            enCheck->setChecked(true);
+            saveBtn->click();
+            QVERIFY(backup::loadConfig(remoteInfo).enabled);
+
+            QSignalSpy rDone(&remoteMgr, &LocalBackupManager::backupFinished);
+            remoteMgr.runNow(true);
+            QTRY_COMPARE(rDone.count(), 1);
+            QVERIFY(QFile::exists(QDir(rcfg.directory).filePath(QStringLiteral("Remote entry.md"))));
+            remoteMgr.setSession(nullptr);
+        }
+
+        // LocalBackupDialog first-run setup & manual backup run.
+        LocalBackupManager mgr;
+        mgr.setSession(local.get());
+        QTemporaryDir bakDir;
+        backup::Config cfg = mgr.config();
+        cfg.directory = bakDir.filePath(QStringLiteral("bak"));
+        mgr.updateConfig(cfg);
+
+        LocalBackupDialog dlg(local.get(), &mgr, true);
+        dlg.show();
+        QCoreApplication::processEvents();
+        QCOMPARE(dlg.windowTitle(), T("本地笔记自动备份设置"));
+        QCOMPARE(dlg.selectedDirectory(), cfg.directory);
+        QVERIFY(dlg.currentSpaceCheck().valid);
+
+        auto *dirEdit = dlg.findChild<QLineEdit *>(QStringLiteral("backupDirEdit"));
+        auto *spaceLbl = dlg.findChild<QLabel *>(QStringLiteral("backupSpaceLabel"));
+        auto *hintLbl = dlg.findChild<QLabel *>(QStringLiteral("backupHintLabel"));
+        QVERIFY(dirEdit && spaceLbl && hintLbl);
+        QVERIFY2(dirEdit->width() >= 350, qPrintable(QStringLiteral("dirEdit width=%1").arg(dirEdit->width())));
+        QVERIFY2(spaceLbl->width() >= 350, qPrintable(QStringLiteral("spaceLbl width=%1").arg(spaceLbl->width())));
+        for (QLabel *lbl : {spaceLbl, hintLbl}) {
+            const int needed = lbl->heightForWidth(lbl->width());
+            QVERIFY2(lbl->height() >= needed,
+                     qPrintable(QStringLiteral("%1 clipped: height=%2 < needed=%3 (width=%4)")
+                                    .arg(lbl->objectName()).arg(lbl->height()).arg(needed).arg(lbl->width())));
+        }
+
+        auto *backupNowBtn = dlg.findChild<QPushButton *>(QStringLiteral("backupNowBtn"));
+        auto *historyList = dlg.findChild<QListWidget *>(QStringLiteral("backupHistoryList"));
+        QVERIFY(backupNowBtn && historyList);
+        QSignalSpy doneSpy(&mgr, &LocalBackupManager::backupFinished);
+        backupNowBtn->click();
+        QTRY_COMPARE(doneSpy.count(), 1);
+        QVERIFY(QFile::exists(QDir(cfg.directory).filePath(QStringLiteral("First entry.md"))));
+        QVERIFY(QFile::exists(QDir(cfg.directory).filePath(QString::fromLatin1(backup::kManifestFileName))));
+        QCOMPARE(historyList->count(), 1);
+
+        mgr.setSession(nullptr);
+        local->close();
+        remote->close();
+        backup::removeConfig(localInfo.id);
+        backup::removeConfig(remoteInfo.id);
+    }
+
+    void vaultDialogCustomLocationAndOpenExisting() {
+        QTemporaryDir root;
+        vaults::setDataRoot(root.path());
+
+        // Prepare an existing local vault on disk (unregistered) for OpenExisting verification.
+        QTemporaryDir external;
+        const QString existingDir = external.filePath(QStringLiteral("ExistingNotes"));
+        QString err;
+        VaultInfo seed;
+        seed.name = QStringLiteral("ExistingNotes");
+        seed.kind = VaultInfo::Local;
+        seed.path = existingDir;
+        QVERIFY2(vaults::create(seed, &err), qPrintable(err));
+        {
+            Session::OpenError oe = Session::OpenError::None;
+            std::unique_ptr<Session> s(Session::open(seed, {}, &oe, &err));
+            QVERIFY(s != nullptr);
+            s->engine()->createNote({.title = QStringLiteral("Old Entry"), .body = QStringLiteral("Still here")});
+            s->engine()->persistNow();
+            s->close();
+        }
+        vaults::remove(seed.id, false);
+        QVERIFY(vaults::list().isEmpty());
+
+        // 1. Choose page has 3 cards; Local create page has collapsed-by-default advanced location box.
+        {
+            VaultDialog dlg;
+            dlg.show();
+            QCoreApplication::processEvents();
+            QVERIFY(dlg.findChild<QToolButton *>(QStringLiteral("cardCreateLocal")) != nullptr);
+            QVERIFY(dlg.findChild<QToolButton *>(QStringLiteral("cardOpenExisting")) != nullptr);
+            QVERIFY(dlg.findChild<QToolButton *>(QStringLiteral("cardConnectServer")) != nullptr);
+
+            dlg.showLocalCreate();
+            QCoreApplication::processEvents();
+            auto *advToggle = dlg.findChild<QToolButton *>(QStringLiteral("localAdvancedToggle"));
+            auto *advBox = dlg.findChild<QWidget *>(QStringLiteral("localAdvancedBox"));
+            QVERIFY(advToggle && advBox);
+            QVERIFY(!advToggle->isChecked());
+            QVERIFY(advBox->isHidden());
+
+            advToggle->click();
+            QCoreApplication::processEvents();
+            QVERIFY(advToggle->isChecked());
+            QVERIFY(!advBox->isHidden());
+            QVERIFY(dlg.findChild<QLineEdit *>(QStringLiteral("localPathEdit")) != nullptr);
+            QVERIFY(dlg.findChild<QPushButton *>(QStringLiteral("localBrowseBtn")) != nullptr);
+            QVERIFY(dlg.findChild<QPushButton *>(QStringLiteral("localResetPathBtn")) != nullptr);
+        }
+
+        // 2. OpenExisting page verifies candidate folders live and attaches a valid local vault.
+        {
+            VaultDialog dlg;
+            dlg.show();
+            dlg.showOpenExisting();
+            QCoreApplication::processEvents();
+            auto *pathEdit = dlg.findChild<QLineEdit *>(QStringLiteral("existingPathEdit"));
+            auto *statusLbl = dlg.findChild<QLabel *>(QStringLiteral("existingStatusLabel"));
+            auto *openBtn = dlg.findChild<QToolButton *>(QStringLiteral("openExistingBtn"));
+            QVERIFY(pathEdit && statusLbl && openBtn);
+            QVERIFY(!openBtn->isEnabled());
+
+            const QString invalidDir = external.filePath(QStringLiteral("EmptyDir"));
+            QVERIFY(QDir().mkpath(invalidDir));
+            pathEdit->setText(invalidDir);
+            QCoreApplication::processEvents();
+            QVERIFY(!openBtn->isEnabled());
+            QVERIFY(!statusLbl->isHidden());
+
+            pathEdit->setText(existingDir);
+            QCoreApplication::processEvents();
+            QVERIFY(openBtn->isEnabled());
+            QVERIFY(statusLbl->text().contains(QStringLiteral("ExistingNotes")));
+
+            openBtn->click();
+            QCoreApplication::processEvents();
+            QCOMPARE(dlg.result(), int(QDialog::Accepted));
+            QVERIFY(!dlg.vaultId().isEmpty());
+            QCOMPARE(vaults::find(dlg.vaultId()).dir(), QDir::cleanPath(existingDir));
+        }
+
+        // 3. SettingsDialog does not expose relocating an existing vault.
+        {
+            const VaultInfo localInfo = vaults::list().first();
+            Session::OpenError oe = Session::OpenError::None;
+            std::unique_ptr<Session> local(Session::open(localInfo, {}, &oe, &err));
+            QVERIFY(local != nullptr);
+
+            SettingsDialog localSettings(local.get());
+            localSettings.showVaultTab();
+            QVERIFY(localSettings.findChild<QPushButton *>(QStringLiteral("changeVaultLocationBtn")) == nullptr);
+            local->close();
+        }
     }
 };
 

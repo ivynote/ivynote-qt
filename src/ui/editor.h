@@ -14,6 +14,9 @@
 #include <functional>
 
 class QCompleter;
+class QFrame;
+class QListWidget;
+class QListWidgetItem;
 class QPainter;
 class QLineEdit;
 class QStringListModel;
@@ -43,6 +46,9 @@ public:
     void insertBlockText(const QString &markdown); // on its own line at the cursor
     void scrollToLine(int line);
     void showInsertMenu();
+    void openDuePicker();
+    bool inlinePopupVisible() const;
+    QStringList inlinePopupItemIds() const;
     bool editTableCell(int row, int column); // table at the current cursor
     bool tableAction(const QString &action); // row/column actions on the active cell
     void commitPendingCell();
@@ -71,6 +77,7 @@ protected:
     void paintEvent(QPaintEvent *e) override;
     void resizeEvent(QResizeEvent *e) override;
     void keyPressEvent(QKeyEvent *e) override;
+    void inputMethodEvent(QInputMethodEvent *e) override;
     void mousePressEvent(QMouseEvent *e) override;
     void mouseMoveEvent(QMouseEvent *e) override;
     bool canInsertFromMimeData(const QMimeData *source) const override;
@@ -83,6 +90,7 @@ protected:
     void contextMenuEvent(QContextMenuEvent *e) override;
 
 private:
+    enum class PopupKind { None, Slash, Date };
     QTextCursor tableRange(const QTextBlock &block) const;
     bool tableCellAt(const QPoint &point, int *row, int *column, QTextBlock *header) const;
     void closeTableCell(bool save);
@@ -100,8 +108,16 @@ private:
     void updateMargins();
     void updateCompletion();
     void insertCompletion(const QString &title);
+    void updateInlinePopup();
+    void hideInlinePopup(bool revertAutoSlash = false);
+    void positionInlinePopup();
+    void moveInlinePopupSelection(int delta);
+    void acceptInlinePopupItem(QListWidgetItem *item);
+    void openDuePickerForBlock(const QTextBlock &block);
+    void toggleTaskAtBlock(const QTextBlock &block);
     bool continueList();
     const LinkSpan *linkAt(const QPoint &pos, QTextBlock *blockOut) const;
+    const TaskMarkerSpan *taskMarkerAt(const QPoint &pos, QTextBlock *blockOut) const;
     int taskAt(const QPoint &pos, QTextBlock *blockOut) const;
     QRectF charRect(const QTextBlock &block, int pos) const;
     void paintTableRow(QPainter &p, const QTextBlock &block, const QRectF &r) const;
@@ -113,6 +129,13 @@ private:
     MarkdownHighlighter *m_hl;
     QCompleter *m_completer;
     QStringListModel *m_titles;
+    QFrame *m_popup = nullptr;
+    QListWidget *m_popupList = nullptr;
+    PopupKind m_popupKind = PopupKind::None;
+    int m_popupFrom = -1;
+    int m_popupTo = -1;
+    bool m_slashAutoInserted = false;
+    int m_slashAutoStart = -1;
     bool m_loading = false;
     bool m_relayout = false;
     bool m_undoing = false;

@@ -144,6 +144,7 @@ signals:
     void searchRequested();
     void vaultMenuRequested(const QPoint &global);
     void emptyTrashRequested();
+    void diffRequested(const QString &noteId, const QString &otherId = QString());
 
 private:
     void onActivated(int row, bool keyboard);

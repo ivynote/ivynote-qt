@@ -2,6 +2,7 @@
 
 #include "core/markdown.h"
 
+#include <QDate>
 #include <QRegularExpression>
 #include <QUrl>
 #include <QTextDocumentFragment>
@@ -246,22 +247,71 @@ QString renderMarkdown(const QString &markdown, const RenderOptions &opts) {
     // Transform text nodes only: never touch attributes or code. In
     // particular, == in a URL must not turn into HTML inside its href.
     static const QRegularExpression mark(QStringLiteral(R"RE(==([^=\n<>][^=\n]*?)==)RE"));
+    static const QRegularExpression dueRe(QStringLiteral(R"RE(📅️?\s*(\d{4}-\d{2}-\d{2})(?:[ T](\d{1,2}:\d{2}))?)RE"));
+    static const QRegularExpression repeatRe(QStringLiteral(R"RE(🔁️?\s*([^📅✅⏳🛫➕⏫🔼🔽🔺⏬<\n]+?)(?=\s*(?:📅|✅|⏳|🛫|➕|⏫|🔼|🔽|🔺|⏬|$)))RE"));
+    static const QRegularExpression doneRe(QStringLiteral(R"RE(✅️?\s*(\d{4}-\d{2}-\d{2}))RE"));
     static const QRegularExpression tags(QStringLiteral(R"RE(<[^>]*>)RE"));
+    const QDate today = QDate::currentDate();
+    auto styleTaskMarkers = [&](QString &node, bool inDoneTask) {
+        if (!node.contains(QStringLiteral("📅")) && !node.contains(QStringLiteral("🔁")) && !node.contains(QStringLiteral("✅")))
+            return;
+        if (node.contains(QStringLiteral("📅"))) {
+            QString out;
+            qsizetype p = 0;
+            for (auto it = dueRe.globalMatch(node); it.hasNext();) {
+                const auto dm = it.next();
+                out += node.mid(p, dm.capturedStart() - p);
+                const QDate d = QDate::fromString(dm.captured(1), Qt::ISODate);
+                QString cls = QStringLiteral("task-due");
+                if (!inDoneTask && d.isValid()) {
+                    if (d < today) cls = QStringLiteral("task-due-overdue");
+                    else if (d == today) cls = QStringLiteral("task-due-today");
+                }
+                out += QStringLiteral("<span class=\"%1\">%2</span>").arg(cls, dm.captured(0).trimmed());
+                p = dm.capturedEnd();
+            }
+            out += node.mid(p);
+            node = out;
+        }
+        if (node.contains(QStringLiteral("🔁"))) {
+            node.replace(repeatRe, QStringLiteral("<span class=\"task-repeat\">\\0</span>"));
+        }
+        if (node.contains(QStringLiteral("✅"))) {
+            node.replace(doneRe, QStringLiteral("<span class=\"task-done\">\\0</span>"));
+        }
+    };
     result.clear();
     last = 0;
     int codeDepth = 0;
+    bool inTaskLi = false;
+    bool inDoneTask = false;
     for (auto it = tags.globalMatch(html); it.hasNext();) {
         const auto m = it.next();
         QString node = html.mid(last, m.capturedStart() - last);
-        if (!codeDepth) node.replace(mark, QStringLiteral("<span class=\"mark\">\\1</span>"));
+        if (!codeDepth) {
+            node.replace(mark, QStringLiteral("<span class=\"mark\">\\1</span>"));
+            if (inTaskLi) styleTaskMarkers(node, inDoneTask);
+        }
         const QString tag = m.captured(0);
         result += node + tag;
         if (tag.startsWith(QLatin1String("<code")) || tag == QLatin1String("<pre>")) ++codeDepth;
-        if (tag == QLatin1String("</code>") || tag == QLatin1String("</pre>")) codeDepth = std::max(0, codeDepth - 1);
+        else if (tag == QLatin1String("</code>") || tag == QLatin1String("</pre>")) codeDepth = std::max(0, codeDepth - 1);
+        else if (tag.startsWith(QLatin1String("<li")) && tag.contains(QLatin1String("task-list-item"))) {
+            inTaskLi = true;
+            inDoneTask = false;
+        } else if (tag == QLatin1String("</li>")) {
+            inTaskLi = false;
+            inDoneTask = false;
+        } else if (inTaskLi && (tag.contains(QLatin1String("ivy-check:1")) || tag.contains(QLatin1String("ivy-check:d1")) || tag.contains(QLatin1String("ivy-check:l1")))) {
+            inDoneTask = true;
+        }
         last = m.capturedEnd();
     }
     QString tail = html.mid(last);
-    if (!codeDepth) tail.replace(mark, QStringLiteral("<span class=\"mark\">\\1</span>"));
+    if (!codeDepth) {
+        tail.replace(mark, QStringLiteral("<span class=\"mark\">\\1</span>"));
+        if (inTaskLi) styleTaskMarkers(tail, inDoneTask);
+    }
     result += tail;
 
     // Heading anchors so [[Title#Heading]] and the outline can scroll there.

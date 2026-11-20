@@ -11,21 +11,32 @@ class ApiClient;
 class QLabel;
 class QLineEdit;
 class QCheckBox;
+class QListWidget;
+class QPushButton;
 class QStackedWidget;
 class QTabBar;
+class QToolButton;
 class PillButton;
+template <typename T> class QFutureWatcher;
 
 class VaultDialog : public QDialog {
     Q_OBJECT
 public:
     explicit VaultDialog(QWidget *parent = nullptr, bool startWithServer = false);
-    // The vault to open: a new one, or an existing one for the same account.
+    void showLocalCreate();
+    void showOpenExisting();
+    // The vault to open: a new one, an existing one opened from disk, or a reused remote one.
     QString vaultId() const { return m_vaultId; }
 
 private:
-    enum Page { Choose, Local, Server, Account };
+    enum Page { Choose, Local, OpenExisting, Server, Account };
     void go(Page p);
     void createLocal();
+    void updateLocalPathUi();
+    void verifyExistingPath();
+    void startScan();
+    void applyScanResults(const QList<DiscoveredVault> &found);
+    void openExisting();
     void checkServer();
     void submitAccount();
     void setBusy(bool busy);
@@ -36,7 +47,24 @@ private:
     // Local
     QLineEdit *m_localName;
     QCheckBox *m_localEncrypt;
+    QToolButton *m_localAdvToggle;
+    QWidget *m_localAdvBox;
+    QLineEdit *m_localPath;
+    QPushButton *m_localResetPath;
+    QLabel *m_localPathHint;
+    QString m_localCustomPath;
     QLabel *m_localError;
+    // OpenExisting
+    QLineEdit *m_existingPath;
+    QPushButton *m_existingScan;
+    QLabel *m_existingStatus;
+    QLabel *m_scanStatus;
+    QListWidget *m_discoveredList;
+    QLabel *m_existingError;
+    PillButton *m_openExisting;
+    QFutureWatcher<QList<DiscoveredVault>> *m_scanWatcher = nullptr;
+    bool m_scannedOnce = false;
+    bool m_existingValid = false;
     // Server
     QLineEdit *m_server;
     QLabel *m_serverError;

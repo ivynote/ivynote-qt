@@ -1,8 +1,11 @@
 #include "ui/editor.h"
 
 #include "core/i18n.h"
+#include "core/insertitems.h"
 #include "core/markdown.h"
+#include "core/tasks.h"
 #include "ui/remoteimages.h"
+#include "ui/taskpicker.h"
 #include "ui/theme.h"
 #include "ui/render.h"
 #include "ui/widgets.h"
@@ -18,9 +21,11 @@
 #include <QTextDocumentFragment>
 #include <QFileInfo>
 #include <QContextMenuEvent>
+#include <QFrame>
 #include <QKeyEvent>
 #include <QInputDialog>
 #include <QLineEdit>
+#include <QListWidget>
 #include <QCollator>
 #include <QDateTime>
 #include <QUrl>
@@ -31,10 +36,125 @@
 #include <QRegularExpression>
 #include <QScrollBar>
 #include <QStringListModel>
+#include <QStyledItemDelegate>
 #include <QTextBlock>
 #include <QTextDocument>
 #include <QTextLayout>
+#include <QVBoxLayout>
 #include <QVariantAnimation>
+
+namespace {
+
+enum PopupRole {
+    RoleId = Qt::UserRole + 1,
+    RoleIcon,
+    RoleHint,
+    RoleDesc,
+    RoleIsHeader,
+    RoleDueDate,
+    RoleDueTime,
+};
+
+bool inFrontmatter(const QTextBlock &block) {
+    const QTextDocument *doc = block.document();
+    if (!doc || block.blockNumber() <= 0) return false;
+    const QTextBlock first = doc->firstBlock();
+    if (first.text().trimmed() != QLatin1String("---")) return false;
+    int scanned = 0;
+    for (QTextBlock b = first.next(); b.isValid() && scanned < 80; b = b.next(), ++scanned) {
+        const QString t = b.text().trimmed();
+        if (t == QLatin1String("---") || t == QLatin1String("..."))
+            return block.blockNumber() < b.blockNumber();
+    }
+    return false;
+}
+
+bool inInlineCode(const QString &lineBeforeCursor) {
+    int ticks = 0;
+    for (qsizetype i = 0; i < lineBeforeCursor.size(); ++i) {
+        if (lineBeforeCursor[i] == u'`' && (i == 0 || lineBeforeCursor[i - 1] != u'\\')) ++ticks;
+    }
+    return (ticks % 2) == 1;
+}
+
+class InlinePopupDelegate : public QStyledItemDelegate {
+public:
+    using QStyledItemDelegate::QStyledItemDelegate;
+
+    QSize sizeHint(const QStyleOptionViewItem &, const QModelIndex &index) const override {
+        if (index.data(RoleIsHeader).toBool()) return QSize(260, 24);
+        return QSize(260, 34);
+    }
+
+    void paint(QPainter *p, const QStyleOptionViewItem &opt, const QModelIndex &index) const override {
+        const Tokens &k = Theme::t();
+        p->save();
+        p->setRenderHint(QPainter::Antialiasing);
+        const QRect r = opt.rect.adjusted(4, 1, -4, -1);
+        if (index.data(RoleIsHeader).toBool()) {
+            p->setFont(Theme::uiFont(11, QFont::Medium));
+            p->setPen(k.muted);
+            p->drawText(r.adjusted(8, 4, -8, 0), Qt::AlignVCenter | Qt::AlignLeft, index.data(Qt::DisplayRole).toString());
+            p->restore();
+            return;
+        }
+        const bool selected = opt.state.testFlag(QStyle::State_Selected);
+        const bool hover = opt.state.testFlag(QStyle::State_MouseOver);
+        if (selected || hover) {
+            p->setPen(Qt::NoPen);
+            p->setBrush(selected ? Theme::alpha(k.ivy, Theme::dark() ? 0.22 : 0.12) : k.hover);
+            p->drawRoundedRect(r, 6, 6);
+        }
+        const QString icon = index.data(RoleIcon).toString();
+        const QString label = index.data(Qt::DisplayRole).toString();
+        const QString hint = index.data(RoleHint).toString();
+
+        const QRect badge(r.left() + 6, r.center().y() - 10, 24, 20);
+        p->setPen(Qt::NoPen);
+        p->setBrush(selected ? Theme::alpha(k.ivy, 0.16) : k.sunken);
+        p->drawRoundedRect(badge, 4, 4);
+        p->setFont(Theme::mono(11));
+        p->setPen(selected ? k.ivy : k.muted);
+        p->drawText(badge, Qt::AlignCenter, icon);
+
+        const int rightPad = 8;
+        int hintW = 0;
+        if (!hint.isEmpty()) {
+            p->setFont(Theme::mono(11));
+            hintW = QFontMetrics(p->font()).horizontalAdvance(hint) + 8;
+            p->setPen(k.faint);
+            p->drawText(QRect(r.right() - rightPad - hintW, r.top(), hintW, r.height()),
+                        Qt::AlignVCenter | Qt::AlignRight, hint);
+        }
+        p->setFont(Theme::uiFont(13, selected ? QFont::Medium : QFont::Normal));
+        p->setPen(selected ? k.ink : k.ink2);
+        const QRect textRect(badge.right() + 8, r.top(), std::max(40, r.right() - badge.right() - 16 - hintW), r.height());
+        p->drawText(textRect, Qt::AlignVCenter | Qt::AlignLeft,
+                    QFontMetrics(p->font()).elidedText(label, Qt::ElideRight, textRect.width()));
+        p->restore();
+    }
+};
+
+class InlinePopupFrame : public QFrame {
+public:
+    explicit InlinePopupFrame(QWidget *parent = nullptr) : QFrame(parent) {
+        setFrameShape(QFrame::NoFrame);
+        setAutoFillBackground(false);
+    }
+
+protected:
+    void paintEvent(QPaintEvent *) override {
+        QPainter p(this);
+        p.setRenderHint(QPainter::Antialiasing);
+        const Tokens &k = Theme::t();
+        const QRectF r = QRectF(rect()).adjusted(0.5, 0.5, -0.5, -0.5);
+        p.setPen(QPen(k.line, 1));
+        p.setBrush(k.surface);
+        p.drawRoundedRect(r, 8, 8);
+    }
+};
+
+} // namespace
 
 MarkdownEditor::MarkdownEditor(QWidget *parent)
     : QTextEdit(parent), m_hl(new MarkdownHighlighter(document())), m_completer(new QCompleter(this)),
@@ -58,7 +178,48 @@ MarkdownEditor::MarkdownEditor(QWidget *parent)
     viewport()->setMouseTracking(true);
     document()->setDocumentMargin(2);
     setCursorWidth(2);
-    setPlaceholderText(T("开始书写… 输入 [[ 链接其他笔记"));
+    setPlaceholderText(T("开始书写… 输入 / 插入元素，输入 [[ 链接其他笔记"));
+
+    m_popup = new InlinePopupFrame(this);
+    m_popup->setObjectName(QStringLiteral("editorInlinePopup"));
+    m_popup->setFocusPolicy(Qt::NoFocus);
+    m_popup->hide();
+    auto *popLayout = new QVBoxLayout(m_popup);
+    popLayout->setContentsMargins(4, 5, 4, 5);
+    popLayout->setSpacing(0);
+    m_popupList = new QListWidget(m_popup);
+    m_popupList->setFocusPolicy(Qt::NoFocus);
+    m_popupList->setFrameShape(QFrame::NoFrame);
+    m_popupList->setHorizontalScrollBarPolicy(Qt::ScrollBarAlwaysOff);
+    m_popupList->setVerticalScrollMode(QAbstractItemView::ScrollPerPixel);
+    m_popupList->setMouseTracking(true);
+    m_popupList->setSelectionMode(QAbstractItemView::SingleSelection);
+    m_popupList->setItemDelegate(new InlinePopupDelegate(m_popupList));
+    popLayout->addWidget(m_popupList);
+    auto restylePopup = [this] {
+        const Tokens &k = Theme::t();
+        QPalette lp = m_popupList->palette();
+        lp.setColor(QPalette::Base, k.surface);
+        lp.setColor(QPalette::Window, k.surface);
+        lp.setColor(QPalette::AlternateBase, k.surface);
+        lp.setColor(QPalette::Text, k.ink);
+        m_popupList->setPalette(lp);
+        m_popupList->viewport()->setPalette(lp);
+        if (QScrollBar *sb = m_popupList->verticalScrollBar()) {
+            QPalette sp = sb->palette();
+            sp.setColor(QPalette::Window, k.surface);
+            sp.setColor(QPalette::Base, k.surface);
+            sp.setColor(QPalette::Button, k.surface);
+            sb->setPalette(sp);
+        }
+        m_popup->update();
+        m_popupList->viewport()->update();
+    };
+    restylePopup();
+    connect(m_popupList, &QListWidget::itemClicked, this, &MarkdownEditor::acceptInlinePopupItem);
+    connect(verticalScrollBar(), &QScrollBar::valueChanged, this, [this] {
+        if (m_popup->isVisible()) positionInlinePopup();
+    });
 
     m_hl->wikiExists = [this](const QString &t) { return !wikiExists || wikiExists(t); };
     m_hl->imageLoader = [this](const QString &id) { return imageFor(id); };
@@ -80,6 +241,7 @@ MarkdownEditor::MarkdownEditor(QWidget *parent)
 
     connect(this, &QTextEdit::cursorPositionChanged, this, [this] {
         updateActive();
+        if (m_popup->isVisible()) updateInlinePopup();
         const int line = textCursor().blockNumber();
         if (line != m_lastLine) {
             m_lastLine = line;
@@ -118,12 +280,13 @@ MarkdownEditor::MarkdownEditor(QWidget *parent)
         if (m_loading || (removed == 0 && added == 0)) return;
         emit edited();
     });
-    connect(Theme::instance(), &Theme::changed, this, [this] {
+    connect(Theme::instance(), &Theme::changed, this, [this, restylePopup] {
         QPalette p = palette();
         p.setColor(QPalette::Base, Theme::t().surface);
         p.setColor(QPalette::Window, Theme::t().surface);
         p.setColor(QPalette::Text, Theme::t().ink);
         setPalette(p);
+        restylePopup();
         viewport()->update();
     });
     QPalette p = palette();
@@ -142,6 +305,7 @@ MarkdownEditor::~MarkdownEditor() {
 }
 
 void MarkdownEditor::setMarkdown(const QString &text) {
+    hideInlinePopup(false);
     closeTableCell(false);
     m_loading = true;
     setUndoRedoEnabled(false);
@@ -347,6 +511,7 @@ void MarkdownEditor::resizeEvent(QResizeEvent *e) {
         m_hl->rehighlight();
     }
     positionTableCell();
+    if (m_popup->isVisible()) positionInlinePopup();
 }
 
 void MarkdownEditor::setWikiTitles(const QStringList &titles) { m_titles->setStringList(titles); }
@@ -364,7 +529,7 @@ void MarkdownEditor::refreshAttachment(const QString &id) {
 
 void MarkdownEditor::updateActive() {
     // Only the line being edited shows its source.
-    if (!hasFocus() && !m_completer->popup()->isVisible() && !textCursor().hasSelection()) {
+    if (!hasFocus() && !m_completer->popup()->isVisible() && !inlinePopupVisible() && !textCursor().hasSelection()) {
         setActiveLines(-1, -1);
         return;
     }
@@ -827,6 +992,24 @@ const LinkSpan *MarkdownEditor::linkAt(const QPoint &pos, QTextBlock *blockOut) 
     return nullptr;
 }
 
+const TaskMarkerSpan *MarkdownEditor::taskMarkerAt(const QPoint &pos, QTextBlock *blockOut) const {
+    const QTextCursor c = cursorForPosition(pos);
+    const QTextBlock b = c.block();
+    const auto *info = static_cast<BlockInfo *>(b.userData());
+    if (!info || info->taskMarkers.isEmpty()) return nullptr;
+    const int p = c.positionInBlock();
+    for (const TaskMarkerSpan &m : info->taskMarkers) {
+        if (m.kind == TaskMarkerSpan::Done) continue;
+        if (p >= m.start && p <= m.end) {
+            const QRectF cr = charRect(b, std::clamp(p > m.start ? p - 1 : m.start, m.start, std::max(m.start, m.end - 1)));
+            if (std::abs(cr.center().y() - pos.y()) > cr.height()) return nullptr;
+            *blockOut = b;
+            return &m;
+        }
+    }
+    return nullptr;
+}
+
 int MarkdownEditor::taskAt(const QPoint &pos, QTextBlock *blockOut) const {
     const QTextCursor c = cursorForPosition(pos);
     const QTextBlock b = c.block();
@@ -845,7 +1028,60 @@ int MarkdownEditor::taskAt(const QPoint &pos, QTextBlock *blockOut) const {
     return -1;
 }
 
+void MarkdownEditor::toggleTaskAtBlock(const QTextBlock &block) {
+    if (isReadOnly() || !block.isValid()) return;
+    const QString before = toPlainText();
+    const QString after = tasks::toggleTaskLine(before, block.blockNumber());
+    if (after == before) return;
+    qsizetype prefix = 0;
+    const qsizetype max = std::min(before.size(), after.size());
+    while (prefix < max && before[prefix] == after[prefix]) ++prefix;
+    qsizetype suffix = 0;
+    while (suffix < max - prefix && before[before.size() - 1 - suffix] == after[after.size() - 1 - suffix]) ++suffix;
+    QTextCursor c(document());
+    c.beginEditBlock();
+    c.setPosition(int(prefix));
+    c.setPosition(int(before.size() - suffix), QTextCursor::KeepAnchor);
+    c.insertText(after.mid(prefix, after.size() - suffix - prefix));
+    c.endEditBlock();
+}
+
+void MarkdownEditor::openDuePicker() {
+    if (isReadOnly()) return;
+    openDuePickerForBlock(textCursor().block());
+}
+
+void MarkdownEditor::openDuePickerForBlock(const QTextBlock &block) {
+    if (isReadOnly() || !block.isValid()) return;
+    hideInlinePopup(false);
+    const QString line = block.text();
+    const auto parsed = tasks::parseTaskLine(line, block.blockNumber());
+    TaskDueDialog dlg(parsed ? parsed->due : std::nullopt,
+                      parsed ? parsed->repeat : std::nullopt,
+                      this);
+    if (dlg.exec() != QDialog::Accepted) return;
+    QString updated;
+    if (dlg.action() == TaskDueDialog::Removed) {
+        updated = tasks::setTaskDue(line, std::nullopt, QString());
+    } else if (dlg.action() == TaskDueDialog::Applied) {
+        const QString asTask = tasks::isTaskLine(line) ? line : tasks::lineAsTask(line);
+        updated = tasks::setTaskDue(asTask, dlg.selectedDue(), dlg.selectedRepeat());
+    } else {
+        return;
+    }
+    if (updated == line) return;
+    QTextCursor c(block);
+    c.beginEditBlock();
+    c.movePosition(QTextCursor::StartOfBlock);
+    c.movePosition(QTextCursor::EndOfBlock, QTextCursor::KeepAnchor);
+    c.insertText(updated);
+    c.endEditBlock();
+    setTextCursor(c);
+    setFocus();
+}
+
 void MarkdownEditor::mousePressEvent(QMouseEvent *e) {
+    if (m_popup->isVisible()) hideInlinePopup(false);
     if (e->button() == Qt::LeftButton && !isReadOnly() && mode() == MarkdownHighlighter::Live) {
         int row, column;
         QTextBlock header;
@@ -883,12 +1119,16 @@ void MarkdownEditor::mousePressEvent(QMouseEvent *e) {
         QTextBlock b;
         const int task = taskAt(e->pos(), &b);
         if (task >= 0) {
-            QTextCursor c(document());
-            c.setPosition(b.position() + task + 1);
-            c.setPosition(b.position() + task + 2, QTextCursor::KeepAnchor);
-            const bool done = c.selectedText() != QLatin1String(" ");
-            c.insertText(done ? QStringLiteral(" ") : QStringLiteral("x"));
+            toggleTaskAtBlock(b);
             return;
+        }
+        if (taskMarkerAt(e->pos(), &b)) {
+            const auto *info = static_cast<BlockInfo *>(b.userData());
+            const bool rendered = m_hl->mode() == MarkdownHighlighter::Live && info && !info->active;
+            if (rendered || (e->modifiers() & Qt::ControlModifier)) {
+                openDuePickerForBlock(b);
+                return;
+            }
         }
     }
     if (e->button() == Qt::LeftButton) {
@@ -920,6 +1160,10 @@ void MarkdownEditor::mousePressEvent(QMouseEvent *e) {
 void MarkdownEditor::mouseMoveEvent(QMouseEvent *e) {
     QTextBlock b;
     bool hand = taskAt(e->pos(), &b) >= 0;
+    if (!hand && !isReadOnly() && taskMarkerAt(e->pos(), &b)) {
+        const auto *info = static_cast<BlockInfo *>(b.userData());
+        hand = (m_hl->mode() == MarkdownHighlighter::Live && info && !info->active) || (e->modifiers() & Qt::ControlModifier);
+    }
     if (!hand) {
         if (linkAt(e->pos(), &b)) {
             const auto *info = static_cast<BlockInfo *>(b.userData());
@@ -966,6 +1210,12 @@ void MarkdownEditor::contextMenuEvent(QContextMenuEvent *e) {
         }
     }
     menu->addSeparator();
+    if (!isReadOnly()) {
+        const QTextBlock clickBlock = cursorForPosition(e->pos()).block();
+        menu->addAction(T("设置日期与重复…"), this, [this, clickBlock] {
+            openDuePickerForBlock(clickBlock.isValid() ? clickBlock : textCursor().block());
+        });
+    }
     auto *copyRich = menu->addAction(T("复制为富文本"), this, [this] {
         const auto selection = textCursor().selection();
         const QString html = renderMarkdown(selection.toPlainText());
@@ -987,6 +1237,7 @@ void MarkdownEditor::focusInEvent(QFocusEvent *e) {
 
 void MarkdownEditor::focusOutEvent(QFocusEvent *e) {
     QTextEdit::focusOutEvent(e);
+    hideInlinePopup(false);
     // Show the line rendered once the editor is left.
     if (!m_completer->popup()->isVisible()) setActiveLines(-1, -1);
 }
@@ -995,22 +1246,21 @@ void MarkdownEditor::focusOutEvent(QFocusEvent *e) {
 
 void MarkdownEditor::showInsertMenu() {
     if (isReadOnly()) return;
-    auto *menu = new QMenu(this);
-    menu->setAttribute(Qt::WA_DeleteOnClose);
-    const QList<QPair<QString, const char *>> items{
-        {"h1", "一级标题"}, {"h2", "二级标题"}, {"h3", "三级标题"},
-        {"bold", "粗体"}, {"italic", "斜体"}, {"highlight", "高亮"},
-        {"todo", "待办"}, {"bullet", "无序列表"}, {"ordered", "有序列表"},
-        {"quote", "引用"}, {"codeblock", "代码块"}, {"table", "表格"}, {"divider", "分割线"},
-        {"today", "今天的日期"}, {"now", "当前时间"},
-        {"link", "网页链接"}, {"image", "网络图片"}, {"file", "插入图片或文件…"}
-    };
-    for (const auto &[id, label] : items) {
-        auto *action = menu->addAction(T(label));
-        action->setObjectName(QStringLiteral("insert-") + id);
-        connect(action, &QAction::triggered, this, [this, id] { insertElement(id); });
+    setFocus();
+    if (m_popup->isVisible() && m_popupKind == PopupKind::Slash) return;
+    QTextCursor c = textCursor();
+    const QString before = c.block().text().left(c.positionInBlock());
+    static const QRegularExpression existingSlash(QStringLiteral(R"((?:^|[\s\x{3000}])/([^\s/]*)$)"));
+    if (!existingSlash.match(before).hasMatch()) {
+        const bool needSpace = !before.isEmpty() && !before.back().isSpace() && before.back() != QChar(0x3000);
+        m_slashAutoStart = c.position();
+        c.beginEditBlock();
+        c.insertText(needSpace ? QStringLiteral(" /") : QStringLiteral("/"));
+        c.endEditBlock();
+        setTextCursor(c);
+        m_slashAutoInserted = true;
     }
-    menu->popup(viewport()->mapToGlobal(cursorRect().bottomLeft()));
+    updateInlinePopup();
 }
 
 void MarkdownEditor::insertElement(const QString &id) {
@@ -1021,13 +1271,52 @@ void MarkdownEditor::insertElement(const QString &id) {
     if (id == QLatin1String("h3")) return setHeading(3);
     if (id == QLatin1String("bold")) return toggleFormat(QStringLiteral("**"));
     if (id == QLatin1String("italic")) return toggleFormat(QStringLiteral("*"));
+    if (id == QLatin1String("strike")) return toggleFormat(QStringLiteral("~~"));
     if (id == QLatin1String("highlight")) return toggleFormat(QStringLiteral("=="));
+    if (id == QLatin1String("code")) return toggleFormat(QStringLiteral("`"));
     if (id == QLatin1String("todo")) return toggleList(QStringLiteral("- [ ]"));
     if (id == QLatin1String("bullet")) return toggleList(QStringLiteral("-"));
     if (id == QLatin1String("ordered")) return toggleList(QStringLiteral("1."));
+    if (id == QLatin1String("due")) return openDuePicker();
     if (id == QLatin1String("file")) { emit attachmentRequested(); return; }
+    if (id == QLatin1String("wiki")) {
+        insertPlainText(QStringLiteral("[[]]"));
+        QTextCursor c = textCursor();
+        c.movePosition(QTextCursor::Left, QTextCursor::MoveAnchor, 2);
+        setTextCursor(c);
+        updateCompletion();
+        return;
+    }
     if (id == QLatin1String("today") || id == QLatin1String("now")) {
         insertPlainText(QDateTime::currentDateTime().toString(id == QLatin1String("today") ? QStringLiteral("yyyy-MM-dd") : QStringLiteral("yyyy-MM-dd HH:mm")));
+        return;
+    }
+    if (id == QLatin1String("properties")) {
+        const QTextBlock first = document()->firstBlock();
+        if (first.text().trimmed() == QLatin1String("---")) {
+            QTextCursor c(first.next().isValid() ? first.next() : first);
+            c.movePosition(QTextCursor::EndOfBlock);
+            setTextCursor(c);
+            ensureCursorVisible();
+            return;
+        }
+        QTextCursor c(document());
+        c.beginEditBlock();
+        c.movePosition(QTextCursor::Start);
+        c.insertText(QStringLiteral("---\ntags: []\n---\n\n"));
+        c.endEditBlock();
+        c.setPosition(11); // inside []
+        setTextCursor(c);
+        ensureCursorVisible();
+        return;
+    }
+    if (id == QLatin1String("mermaid")) {
+        insertBlockText(QStringLiteral("```mermaid\nflowchart TD\n    A[Start] --> B[End]\n```\n"));
+        QTextCursor c = textCursor();
+        c.movePosition(QTextCursor::PreviousBlock);
+        c.movePosition(QTextCursor::PreviousBlock);
+        c.movePosition(QTextCursor::EndOfBlock);
+        setTextCursor(c);
         return;
     }
     if (id == QLatin1String("link") || id == QLatin1String("image")) {
@@ -1179,6 +1468,26 @@ bool MarkdownEditor::continueList() {
 void MarkdownEditor::keyPressEvent(QKeyEvent *e) {
     if (e->matches(QKeySequence::Undo)) return undo();
     if (e->matches(QKeySequence::Redo)) return redo();
+    if (m_popup->isVisible()) {
+        switch (e->key()) {
+        case Qt::Key_Down:
+            moveInlinePopupSelection(1);
+            return;
+        case Qt::Key_Up:
+            moveInlinePopupSelection(-1);
+            return;
+        case Qt::Key_Return:
+        case Qt::Key_Enter:
+        case Qt::Key_Tab:
+            acceptInlinePopupItem(m_popupList->currentItem());
+            return;
+        case Qt::Key_Escape:
+            hideInlinePopup(true);
+            return;
+        default:
+            break;
+        }
+    }
     if (m_completer->popup()->isVisible()) {
         switch (e->key()) {
         case Qt::Key_Enter:
@@ -1211,6 +1520,7 @@ void MarkdownEditor::keyPressEvent(QKeyEvent *e) {
             if (e->key() == Qt::Key_E) return toggleFormat(QStringLiteral("`"));
         }
         if (shift && !alt) {
+            if (e->key() == Qt::Key_D) { openDuePicker(); return; }
             if (e->key() == Qt::Key_X) return toggleFormat(QStringLiteral("~~"));
             if (e->key() == Qt::Key_K) {
                 insertPlainText(QStringLiteral("[[]]"));
@@ -1265,7 +1575,18 @@ void MarkdownEditor::keyPressEvent(QKeyEvent *e) {
         return;
     }
     QTextEdit::keyPressEvent(e);
-    if (!e->text().isEmpty() || e->key() == Qt::Key_Backspace) updateCompletion();
+    if (!e->text().isEmpty() || e->key() == Qt::Key_Backspace) {
+        updateCompletion();
+        updateInlinePopup();
+    }
+}
+
+void MarkdownEditor::inputMethodEvent(QInputMethodEvent *e) {
+    QTextEdit::inputMethodEvent(e);
+    if (!e->commitString().isEmpty()) {
+        updateCompletion();
+        updateInlinePopup();
+    }
 }
 
 void MarkdownEditor::updateCompletion() {
@@ -1303,6 +1624,252 @@ void MarkdownEditor::insertCompletion(const QString &title) {
     else c.insertText(QStringLiteral("]]"));
     c.endEditBlock();
     setTextCursor(c);
+}
+
+bool MarkdownEditor::inlinePopupVisible() const {
+    return m_popup && m_popup->isVisible();
+}
+
+QStringList MarkdownEditor::inlinePopupItemIds() const {
+    QStringList ids;
+    if (!m_popupList) return ids;
+    for (int i = 0; i < m_popupList->count(); ++i) {
+        const auto *it = m_popupList->item(i);
+        if (!it || it->data(RoleIsHeader).toBool()) continue;
+        ids << it->data(RoleId).toString();
+    }
+    return ids;
+}
+
+void MarkdownEditor::hideInlinePopup(bool revertAutoSlash) {
+    const bool revert = revertAutoSlash && m_slashAutoInserted && m_popupKind == PopupKind::Slash && m_popupFrom >= 0;
+    const int from = (m_slashAutoStart >= 0 && m_slashAutoStart <= m_popupFrom) ? m_slashAutoStart : m_popupFrom;
+    const int to = m_popupTo;
+    m_popupKind = PopupKind::None;
+    m_popupFrom = -1;
+    m_popupTo = -1;
+    m_slashAutoInserted = false;
+    m_slashAutoStart = -1;
+    if (m_popup) m_popup->hide();
+    if (revert) {
+        const int maxPos = std::max(0, document()->characterCount() - 1);
+        const int a = std::clamp(from, 0, maxPos);
+        const int b = std::clamp(to, a, maxPos);
+        if (b > a) {
+            QTextCursor c(document());
+            c.beginEditBlock();
+            c.setPosition(a);
+            c.setPosition(b, QTextCursor::KeepAnchor);
+            c.removeSelectedText();
+            c.endEditBlock();
+            setTextCursor(c);
+        }
+    }
+}
+
+void MarkdownEditor::positionInlinePopup() {
+    if (!m_popup || !m_popupList || m_popupList->count() == 0) return;
+    int totalH = 8;
+    for (int i = 0; i < m_popupList->count(); ++i) {
+        const auto *it = m_popupList->item(i);
+        totalH += it && it->data(RoleIsHeader).toBool() ? 24 : 34;
+    }
+    const int popupW = std::min(320, std::max(240, width() - 24));
+    const int popupH = std::min(300, totalH + 4);
+    const QRect cr = cursorRect();
+    const QPoint vpPos = viewport()->mapTo(this, cr.bottomLeft());
+    const QPoint vpTop = viewport()->mapTo(this, cr.topLeft());
+    int x = std::clamp(vpPos.x(), 8, std::max(8, width() - popupW - 8));
+    int y = vpPos.y() + 6;
+    if (y + popupH > height() - 8 && vpTop.y() - popupH - 6 >= 8) {
+        y = vpTop.y() - popupH - 6;
+    }
+    m_popup->setGeometry(x, y, popupW, popupH);
+    m_popup->raise();
+}
+
+void MarkdownEditor::moveInlinePopupSelection(int delta) {
+    if (!m_popupList || m_popupList->count() == 0) return;
+    const int n = m_popupList->count();
+    int cur = m_popupList->currentRow();
+    for (int step = 0; step < n; ++step) {
+        cur = (cur + delta + n) % n;
+        const auto *it = m_popupList->item(cur);
+        if (it && !it->data(RoleIsHeader).toBool()) {
+            m_popupList->setCurrentRow(cur);
+            m_popupList->scrollToItem(it);
+            return;
+        }
+    }
+}
+
+void MarkdownEditor::updateInlinePopup() {
+    if (isReadOnly() || m_loading || m_completer->popup()->isVisible()) {
+        hideInlinePopup(false);
+        return;
+    }
+    const QTextCursor c = textCursor();
+    if (c.hasSelection()) {
+        hideInlinePopup(false);
+        return;
+    }
+    const QTextBlock block = c.block();
+    const QString line = block.text();
+    const QString before = line.left(c.positionInBlock());
+    const auto *info = static_cast<BlockInfo *>(block.userData());
+    const bool suppressed = (info && (info->kind == BlockInfo::Code || info->kind == BlockInfo::Fence)) ||
+                            inInlineCode(before) || inFrontmatter(block);
+    if (suppressed && !m_slashAutoInserted) {
+        hideInlinePopup(false);
+        return;
+    }
+
+    const bool zh = i18n::isZh();
+
+    // 1. Natural-language @ date completion on task lines.
+    if (tasks::isTaskLine(line)) {
+        static const QRegularExpression atRe(QStringLiteral(R"((?:^|[\s\x{3000}])@([^@\n]{0,24})$)"));
+        if (const auto m = atRe.match(before); m.hasMatch()) {
+            const qsizetype atIdx = before.lastIndexOf(u'@');
+            const QString query = m.captured(1);
+            const QDateTime now = QDateTime::currentDateTime();
+            const QDate today = now.date();
+            m_popupList->clear();
+            auto addDateOption = [&](const QString &id, const QString &label, const QString &hint, const tasks::Due &due) {
+                auto *it = new QListWidgetItem(label, m_popupList);
+                it->setData(RoleId, id);
+                it->setData(RoleIcon, QStringLiteral("📅"));
+                it->setData(RoleHint, hint);
+                it->setData(RoleIsHeader, false);
+                it->setData(RoleDueDate, due.date);
+                it->setData(RoleDueTime, due.time);
+            };
+            if (query.trimmed().isEmpty()) {
+                for (const auto &q : tasks::quickDates(now, zh)) {
+                    addDateOption(QStringLiteral("date:") + q.due.dateString(), q.label, q.due.dateString(), q.due);
+                }
+            } else if (const auto parsed = tasks::parseWhen(query, now)) {
+                const QString fmt = parsed->allDay() ? parsed->dateString() : parsed->dateString() + u' ' + parsed->timeString();
+                addDateOption(QStringLiteral("date:") + fmt, tasks::describeDue(*parsed, today, zh), fmt, *parsed);
+                if (parsed->allDay()) {
+                    tasks::Due withMorning = *parsed;
+                    withMorning.time = QTime(9, 0);
+                    const QString mFmt = withMorning.dateString() + QStringLiteral(" 09:00");
+                    addDateOption(QStringLiteral("date:") + mFmt, tasks::describeDue(withMorning, today, zh), mFmt, withMorning);
+                }
+            }
+            auto *pickerItem = new QListWidgetItem(T("选择日期和重复…"), m_popupList);
+            pickerItem->setData(RoleId, QStringLiteral("__picker__"));
+            pickerItem->setData(RoleIcon, QStringLiteral("🔁"));
+            pickerItem->setData(RoleHint, QStringLiteral("Ctrl+Shift+D"));
+            pickerItem->setData(RoleIsHeader, false);
+
+            m_popupKind = PopupKind::Date;
+            m_popupFrom = block.position() + int(atIdx);
+            m_popupTo = c.position();
+            m_slashAutoInserted = false;
+            m_popupList->setCurrentRow(0);
+            positionInlinePopup();
+            m_popup->show();
+            return;
+        }
+    }
+
+    // 2. Slash command menu (/query).
+    static const QRegularExpression slashRe(QStringLiteral(R"((?:^|[\s\x{3000}])/([^\s/]*)$)"));
+    if (const auto m = slashRe.match(before); m.hasMatch()) {
+        const qsizetype slashIdx = before.lastIndexOf(u'/');
+        const QString query = m.captured(1);
+        const QList<insertitems::Item> items = insertitems::match(query);
+        if (items.isEmpty()) {
+            hideInlinePopup(false);
+            return;
+        }
+        m_popupList->clear();
+        QString lastSection;
+        int firstSelectable = -1;
+        for (const auto &item : items) {
+            if (query.isEmpty() && item.section != lastSection) {
+                lastSection = item.section;
+                auto *hdr = new QListWidgetItem(insertitems::sectionLabel(item.section, zh), m_popupList);
+                hdr->setData(RoleIsHeader, true);
+                hdr->setFlags(Qt::NoItemFlags);
+            }
+            auto *it = new QListWidgetItem(zh ? item.zh : item.en, m_popupList);
+            it->setData(RoleId, item.id);
+            it->setData(RoleIcon, item.icon);
+            it->setData(RoleHint, item.hint);
+            it->setData(RoleDesc, zh ? item.descZh : item.descEn);
+            it->setData(RoleIsHeader, false);
+            if (firstSelectable < 0) firstSelectable = m_popupList->count() - 1;
+        }
+        m_popupKind = PopupKind::Slash;
+        m_popupFrom = block.position() + int(slashIdx);
+        m_popupTo = c.position();
+        if (firstSelectable >= 0) m_popupList->setCurrentRow(firstSelectable);
+        positionInlinePopup();
+        m_popup->show();
+        return;
+    }
+
+    hideInlinePopup(false);
+}
+
+void MarkdownEditor::acceptInlinePopupItem(QListWidgetItem *item) {
+    if (!item || item->data(RoleIsHeader).toBool()) return;
+    const PopupKind kind = m_popupKind;
+    const int from = m_popupFrom;
+    const int to = m_popupTo;
+    const QString id = item->data(RoleId).toString();
+    const QDate dueDate = item->data(RoleDueDate).toDate();
+    const QTime dueTime = item->data(RoleDueTime).toTime();
+    hideInlinePopup(false);
+
+    const int maxPos = std::max(0, document()->characterCount() - 1);
+    const int a = std::clamp(from, 0, maxPos);
+    const int b = std::clamp(to, a, maxPos);
+
+    if (kind == PopupKind::Slash) {
+        if (b > a) {
+            QTextCursor c(document());
+            c.beginEditBlock();
+            c.setPosition(a);
+            c.setPosition(b, QTextCursor::KeepAnchor);
+            c.removeSelectedText();
+            c.endEditBlock();
+            setTextCursor(c);
+        }
+        insertElement(id);
+        return;
+    }
+
+    if (kind == PopupKind::Date) {
+        QTextCursor c(document());
+        c.beginEditBlock();
+        if (b > a) {
+            c.setPosition(a);
+            c.setPosition(b, QTextCursor::KeepAnchor);
+            c.removeSelectedText();
+        }
+        if (id == QLatin1String("__picker__")) {
+            c.endEditBlock();
+            setTextCursor(c);
+            openDuePicker();
+            return;
+        }
+        const QTextBlock blk = c.block();
+        QString line = blk.text();
+        // Clean trailing whitespace left behind by removing "@query".
+        while (line.endsWith(u' ')) line.chop(1);
+        const tasks::Due due{dueDate, dueTime};
+        const QString updated = tasks::setTaskDue(line, due, std::nullopt);
+        c.setPosition(blk.position());
+        c.setPosition(blk.position() + int(blk.text().size()), QTextCursor::KeepAnchor);
+        c.insertText(updated);
+        c.endEditBlock();
+        setTextCursor(c);
+        setFocus();
+    }
 }
 
 void MarkdownEditor::insertBlockText(const QString &markdown) {

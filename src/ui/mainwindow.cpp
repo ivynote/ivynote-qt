@@ -1,30 +1,34 @@
 #include "ui/mainwindow.h"
 
-#include "core/i18n.h"
 #include "core/agenda.h"
-#include <QDateTimeEdit>
-#include <QDialogButtonBox>
-#include <QTextBlock>
+#include "core/format.h"
+#include "core/i18n.h"
 #include "core/models.h"
 #include "sync/api.h"
 #include "sync/engine.h"
+#include "ui/backupdialog.h"
 #include "ui/dialogs.h"
+#include "ui/diffdialog.h"
 #include "ui/editor.h"
 #include "ui/historydialog.h"
 #include "ui/icons.h"
 #include "ui/notepane.h"
 #include "ui/palette.h"
 #include "ui/panels.h"
-#include "ui/settingsdialog.h"
 #include "ui/serverpanels.h"
-#include "ui/updater.h"
+#include "ui/settingsdialog.h"
 #include "ui/shelf.h"
 #include "ui/theme.h"
 #include "ui/toast.h"
+#include "ui/updater.h"
 #include "ui/vaultdialog.h"
 #include "ui/widgets.h"
+#include "vault/backup.h"
 #include "vault/session.h"
 #include "vault/transfer.h"
+
+#include <QPainter>
+#include <QTextBlock>
 
 #include <QActionGroup>
 #include <QApplication>
@@ -168,6 +172,14 @@ MainWindow::MainWindow() {
         m_session->wake();
     });
     connect(m_agenda, &AgendaPanel::taskActivated, this, &MainWindow::openTask);
+    connect(m_agenda, &AgendaPanel::taskToggled, this, &MainWindow::toggleAgendaTask);
+    connect(m_agenda, &AgendaPanel::taskDueChanged, this, &MainWindow::rescheduleAgendaTask);
+    connect(m_agenda, &AgendaPanel::badgeChanged, this, [this](int count, bool overdue) {
+        if (m_agendaBadgeCount == count && m_agendaBadgeOverdue == overdue) return;
+        m_agendaBadgeCount = count;
+        m_agendaBadgeOverdue = overdue;
+        refreshRailIcons();
+    });
 
     connect(m_shelf, &Shelf::openNote, this, &MainWindow::openNote);
     connect(m_shelf, &Shelf::newNote, this, &MainWindow::newNote);
@@ -175,9 +187,11 @@ MainWindow::MainWindow() {
     connect(m_shelf, &Shelf::searchRequested, this, [this] { showSearch(); });
     connect(m_shelf, &Shelf::vaultMenuRequested, this, &MainWindow::showVaultMenu);
     connect(m_shelf, &Shelf::emptyTrashRequested, this, &MainWindow::emptyTrash);
+    connect(m_shelf, &Shelf::diffRequested, this, &MainWindow::openDiff);
     connect(m_pane, &NotePane::openNote, this, &MainWindow::openNote);
     connect(m_pane, &NotePane::moveRequested, this, &MainWindow::moveNote);
     connect(m_pane, &NotePane::duplicateRequested, this, &MainWindow::duplicateNote);
+    connect(m_pane, &NotePane::diffRequested, this, &MainWindow::openDiff);
     connect(m_pane, &NotePane::historyRequested, this, [this](const QString &id) {
         if (!m_session) return;
         m_pane->flush();
@@ -198,6 +212,12 @@ MainWindow::MainWindow() {
     connect(m_pane, &NotePane::editorModeChanged, this, [this](EditorMode mode) {
         if (m_modeGroup) m_modeGroup->actions().value(int(mode))->setChecked(true);
     });
+    connect(m_pane, &NotePane::readingChanged, this, [this](bool reading) {
+        if (m_readAction) {
+            const QSignalBlocker blocker(m_readAction);
+            m_readAction->setChecked(reading);
+        }
+    });
     connect(Prefs::instance(), &Prefs::changed, this, &MainWindow::applyPrefs);
     connect(qApp, &QGuiApplication::applicationStateChanged, this, [this](Qt::ApplicationState s) {
         if (!m_session) return;
@@ -210,6 +230,27 @@ MainWindow::MainWindow() {
     });
 
     buildMenus();
+    m_backup = new LocalBackupManager(this);
+    connect(m_backup, &LocalBackupManager::needsInitialSetup, this, [this] {
+        if (!m_session || m_session->isRemote()) return;
+        if (QApplication::platformName() == QLatin1String("offscreen")) return;
+        if (QApplication::activeModalWidget()) return;
+        showBackupManager(true);
+    });
+    connect(m_backup, &LocalBackupManager::lowSpaceDetected, this, [this](const backup::SpaceCheck &space) {
+        const QString msg = (i18n::isZh()
+            ? QStringLiteral("本地备份目录所在磁盘可用空间不足（仅剩 %1），建议更换备份位置")
+            : QStringLiteral("Low disk space on local backup drive (%1 left); consider changing the backup folder"))
+                                .arg(fmt::bytes(space.bytesAvailable));
+        Toaster::show(msg, true, T("备份设置"), [this] { showBackupManager(false); });
+    });
+    connect(m_backup, &LocalBackupManager::backupFinished, this, [this](const backup::RunRecord &record) {
+        if (record.manual) {
+            Toaster::show(record.ok ? record.summary : (T("本地备份失败：") + record.error), !record.ok);
+        } else if (!record.ok) {
+            Toaster::show(T("定时本地备份失败：") + record.error, true, T("备份设置"), [this] { showBackupManager(false); });
+        }
+    });
     applyPrefs();
     QSettings s;
     restoreGeometry(s.value(QStringLiteral("window/geometry")).toByteArray());
@@ -226,8 +267,19 @@ void MainWindow::start() {
     auto *updates = new QTimer(this);
     connect(updates, &QTimer::timeout, this, [this] { updater::check(this, false); });
     updates->start(6 * 60 * 60 * 1000);
+    // Discover any valid unregistered local vaults already sitting in the default location.
+    vaults::discoverDefaultVaults();
     QString id = vaults::lastOpened();
-    if (vaults::find(id).id.isEmpty()) id = vaults::list().isEmpty() ? QString() : vaults::list().first().id;
+    if (vaults::find(id).id.isEmpty()) {
+        const auto all = vaults::list();
+        for (const VaultInfo &v : all) {
+            if (QFileInfo::exists(v.dir())) {
+                id = v.id;
+                break;
+            }
+        }
+        if (id.isEmpty() && !all.isEmpty()) id = all.first().id;
+    }
     if (id.isEmpty()) {
         // First run: a local vault, ready to write in.
         VaultInfo v;
@@ -279,10 +331,10 @@ bool MainWindow::openVault(const QString &id) {
     m_media->setSession(s);
     m_sync->setSession(s);
     m_pane->setSession(s);
-    m_pane->setEditorMode(EditorMode(Prefs::instance()->editorMode()));
+    applyOpenMode(Prefs::instance()->editorMode());
     m_pane->setFontSize(Prefs::instance()->fontSize());
-    connect(s->engine(), &SyncEngine::conflict, this, [this](const QString &, const QString &copyId) {
-        Toaster::show(T("同一处被两台设备修改，另一份内容已存为冲突副本"), false, T("查看"), [this, copyId] { openNote(copyId); });
+    connect(s->engine(), &SyncEngine::conflict, this, [this](const QString &origId, const QString &copyId) {
+        Toaster::show(T("同一处被两台设备修改，另一份内容已存为冲突副本"), false, T("对比差异"), [this, origId, copyId] { openDiff(origId, copyId); });
     });
     connect(s->engine(), &SyncEngine::rejected, this, [](const QString &, const QString &, const QString &error) {
         if (error.contains(QLatin1String("hlc"))) Toaster::show(T("服务器拒绝了更改：请检查这台电脑的系统时间，校准后重启应用"), true);
@@ -326,6 +378,7 @@ bool MainWindow::openVault(const QString &id) {
     rebuildVaultMenu();
     updateTitle();
     for (QAction *a : std::as_const(m_remoteActions)) a->setVisible(s->isRemote());
+    if (m_backup) m_backup->setSession(s);
     const QString last = QSettings().value(noteKey(s)).toString();
     if (s->engine()->note(last)) {
         openNote(last);
@@ -345,11 +398,18 @@ void MainWindow::closeVault() {
     if (!m_session) return;
     m_pane->flush();
     dropEmptyDraft(QString());
+    if (m_backup) {
+        m_backup->runIfDirtyOnClose();
+        m_backup->setSession(nullptr);
+    }
     m_shelf->setSession(nullptr);
     m_agenda->setSession(nullptr);
     m_media->setSession(nullptr);
     m_sync->setSession(nullptr);
     m_pane->setSession(nullptr);
+    m_agendaBadgeCount = 0;
+    m_agendaBadgeOverdue = false;
+    refreshRailIcons();
     {
         const QSignalBlocker blocker(m_tabs);
         while (m_tabs->count()) m_tabs->removeTab(0);
@@ -374,10 +434,28 @@ void MainWindow::syncPrefsFromServer() {
         const QString mode = o.value(QLatin1String("editorMode")).toString();
         const int size = o.value(QLatin1String("fontSize")).toInt();
         Prefs *p = Prefs::instance();
-        const QStringList modes{QStringLiteral("live"), QStringLiteral("source"), QStringLiteral("split")};
+        const QStringList modes{QStringLiteral("live"), QStringLiteral("source"), QStringLiteral("split"), QStringLiteral("read")};
         if (modes.contains(mode) && modes.indexOf(mode) != p->editorMode()) p->setEditorMode(int(modes.indexOf(mode)));
         if (size >= 13 && size <= 22 && size != p->fontSize()) p->setFontSize(size);
+        if (o.contains(QLatin1String("defaultNoteFolder")) && o.value(QLatin1String("defaultNoteFolder")).isString()) {
+            const QString folder = o.value(QLatin1String("defaultNoteFolder")).toString();
+            if (folder != p->defaultNoteFolder()) p->setDefaultNoteFolder(folder);
+        }
+        if (o.contains(QLatin1String("defaultNoteTitle")) && o.value(QLatin1String("defaultNoteTitle")).isString()) {
+            const QString title = o.value(QLatin1String("defaultNoteTitle")).toString();
+            if (title != p->defaultNoteTitle()) p->setDefaultNoteTitle(title);
+        }
     });
+}
+
+void MainWindow::applyOpenMode(int mode) {
+    if (mode == int(OpenMode::Read)) {
+        if (m_pane->editorMode() != EditorMode::Live) m_pane->setEditorMode(EditorMode::Live);
+        m_pane->setReading(true);
+    } else {
+        const auto em = EditorMode(std::clamp(mode, 0, 2));
+        if (m_pane->editorMode() != em || m_pane->isReading()) m_pane->setEditorMode(em);
+    }
 }
 
 void MainWindow::applyPrefs() {
@@ -386,7 +464,10 @@ void MainWindow::applyPrefs() {
     if (Theme::instance()->mode() != Theme::Mode(p->theme())) Theme::instance()->setMode(Theme::Mode(p->theme()));
     i18n::setLang(i18n::Lang(p->lang()));
     m_pane->setFontSize(p->fontSize());
-    if (m_pane->editorMode() != EditorMode(p->editorMode())) m_pane->setEditorMode(EditorMode(p->editorMode()));
+    if (p->editorMode() != m_appliedOpenMode) {
+        m_appliedOpenMode = p->editorMode();
+        applyOpenMode(m_appliedOpenMode);
+    }
 }
 
 // --- menus ---
@@ -404,6 +485,7 @@ void MainWindow::buildMenus() {
     file->addSeparator();
     m_vaultMenu = file->addMenu(T("切换笔记库"));
     file->addAction(T("新建或接入笔记库…"), this, [this] { addVault(); });
+    file->addAction(T("打开已有本地笔记库…"), this, &MainWindow::openExistingVault);
     file->addSeparator();
     QMenu *import = file->addMenu(T("导入"));
     const auto addImport = [this, import](const QString &label, transfer::MarkdownSource source) {
@@ -420,6 +502,7 @@ void MainWindow::buildMenus() {
     import->addSeparator();
     import->addAction(T("从其他笔记库导入…"), this, &MainWindow::importVault);
     file->addAction(T("导出为 Markdown…"), this, &MainWindow::exportMarkdown);
+    file->addAction(T("本地备份管理…"), this, [this] { showBackupManager(false); });
     file->addSeparator();
     file->addAction(T("设置…"), QKeySequence(QStringLiteral("Ctrl+,")), this, [this] { showSettings(); });
     file->addSeparator();
@@ -463,17 +546,23 @@ void MainWindow::buildMenus() {
 
     QMenu *view = bar->addMenu(T("视图(&V)"));
     m_modeGroup = new QActionGroup(this);
-    const QList<QPair<EditorMode, const char *>> modes{{EditorMode::Live, "即时渲染"}, {EditorMode::Source, "源码"}, {EditorMode::Split, "双栏"}};
+    const QList<QPair<EditorMode, const char *>> modes{{EditorMode::Live, "所见即所得"}, {EditorMode::Source, "源码"}, {EditorMode::Split, "双栏"}};
+    const int initialPref = Prefs::instance()->editorMode();
     for (const auto &[mode, label] : modes) {
         QAction *a = view->addAction(T(label));
         a->setCheckable(true);
-        a->setChecked(int(mode) == Prefs::instance()->editorMode());
+        a->setChecked(int(mode) == (initialPref == int(OpenMode::Read) ? int(EditorMode::Live) : initialPref));
         m_modeGroup->addAction(a);
         connect(a, &QAction::triggered, this, [this, m = mode] {
             m_pane->setEditorMode(m);
-            Prefs::instance()->setEditorMode(int(m));
         });
     }
+    m_readAction = view->addAction(T("阅读模式"), QKeySequence(QStringLiteral("Ctrl+Shift+E")), this, [this](bool checked) {
+        if (!m_pane->noteId().isEmpty()) m_pane->setReading(checked);
+    });
+    m_readAction->setCheckable(true);
+    m_readAction->setChecked(initialPref == int(OpenMode::Read));
+    m_noteActions << m_readAction;
     view->addSeparator();
     QAction *outline = view->addAction(T("大纲"), this, [this] { m_pane->toggleOutline(); });
     m_noteActions << outline;
@@ -513,6 +602,7 @@ void MainWindow::buildMenus() {
     noteAction(T("复制笔记"), [this](const QString &id) { duplicateNote(id); });
     note->addSeparator();
     noteAction(T("笔记信息…"), [this](const QString &) { m_pane->showInfo(); });
+    noteAction(T("对比差异 (Diff)…"), [this](const QString &id) { openDiff(id); });
     noteAction(T("历史版本…"), [this](const QString &id) { emit m_pane->historyRequested(id); }, true);
     noteAction(T("分享…"), [this](const QString &id) { emit m_pane->shareRequested(id); }, true);
     note->addSeparator();
@@ -523,28 +613,11 @@ void MainWindow::buildMenus() {
         m_session->engine()->updateNote(id, p);
     });
     note->addSeparator();
-    m_noteActions << note->addAction(T("插入定时任务"), this, [this] {
+    m_noteActions << note->addAction(T("设置日期与重复") + QStringLiteral("\tCtrl+Shift+D"), this, [this] {
         if (!m_session || m_pane->noteId().isEmpty() || m_pane->editor()->isReadOnly()) return;
-        QDialog dialog(this);
-        dialog.setWindowTitle(T("插入定时任务"));
-        QVBoxLayout layout(&dialog);
-        QLineEdit task;
-        QDateTimeEdit due(QDateTime::currentDateTime().addSecs(3600));
-        due.setCalendarPopup(true);
-        due.setDisplayFormat(QStringLiteral("yyyy-MM-dd HH:mm"));
-        QDialogButtonBox buttons(QDialogButtonBox::Ok | QDialogButtonBox::Cancel);
-        layout.addWidget(&task);
-        layout.addWidget(&due);
-        layout.addWidget(&buttons);
-        connect(&buttons, &QDialogButtonBox::accepted, &dialog, &QDialog::accept);
-        connect(&buttons, &QDialogButtonBox::rejected, &dialog, &QDialog::reject);
-        if (dialog.exec() == QDialog::Accepted && !task.text().trimmed().isEmpty() && !m_pane->editor()->isReadOnly()) {
-            auto cursor = m_pane->editor()->textCursor();
-            cursor.movePosition(QTextCursor::EndOfBlock);
-            if (!cursor.block().text().isEmpty()) cursor.insertBlock();
-            cursor.insertText(QStringLiteral("- [ ] %1 📅 %2").arg(task.text().trimmed(), due.dateTime().toString(QStringLiteral("yyyy-MM-dd HH:mm"))));
-            m_pane->editor()->setTextCursor(cursor);
-        }
+        if (m_pane->isReading()) m_pane->setReading(false);
+        m_pane->focusEditor();
+        m_pane->editor()->openDuePicker();
     });
 
     // The rail at the left edge: where you are, not what you can do. Actions
@@ -582,26 +655,11 @@ void MainWindow::buildMenus() {
     auto *spacer = new QWidget(m_rail);
     spacer->setSizePolicy(QSizePolicy::Preferred, QSizePolicy::Expanding);
     m_rail->addWidget(spacer);
-    QAction *settings = m_rail->addAction(T("设置"), this, [this] { showSettings(); });
-    settings->setToolTip(T("设置") + QStringLiteral(" (Ctrl+,)"));
-    settings->setData(QStringLiteral("settings"));
-    const auto railIcons = [this, settings] {
-        const Tokens &k = Theme::t();
-        for (QAction *a : m_railPages + QList<QAction *>{settings}) {
-            const QString name = a->data().toString();
-            QIcon icon;
-            for (int size : {16, 20, 24, 32}) {
-                const qreal dpr = devicePixelRatioF();
-                icon.addPixmap(icons::pixmap(name, k.muted, size, dpr), QIcon::Normal, QIcon::Off);
-                icon.addPixmap(icons::pixmap(name, k.ink, size, dpr), QIcon::Active, QIcon::Off);
-                icon.addPixmap(icons::pixmap(name, k.ivy, size, dpr), QIcon::Normal, QIcon::On);
-                icon.addPixmap(icons::pixmap(name, k.ivy, size, dpr), QIcon::Active, QIcon::On);
-            }
-            a->setIcon(icon);
-        }
-    };
-    railIcons();
-    connect(Theme::instance(), &Theme::changed, this, railIcons);
+    m_railSettings = m_rail->addAction(T("设置"), this, [this] { showSettings(); });
+    m_railSettings->setToolTip(T("设置") + QStringLiteral(" (Ctrl+,)"));
+    m_railSettings->setData(QStringLiteral("settings"));
+    refreshRailIcons();
+    connect(Theme::instance(), &Theme::changed, this, &MainWindow::refreshRailIcons);
 
     // Everything that needs a server account.
     QMenu *server = bar->addMenu(T("服务器(&S)"));
@@ -658,15 +716,38 @@ void MainWindow::showVaultMenu(const QPoint &global) {
         });
     }
     menu.addSeparator();
-    menu.addAction(icons::themed("plus"), T("新建本地笔记库…"), this, [this] { addVault(false); });
+    menu.addAction(icons::themed("plus"), T("新建本地笔记库…"), this, &MainWindow::createLocalVault);
+    menu.addAction(icons::themed("folder"), T("打开已有本地笔记库…"), this, &MainWindow::openExistingVault);
     menu.addAction(icons::themed("cloud"), T("连接 Ivynote 服务器…"), this, [this] { addVault(true); });
     menu.addSeparator();
+    if (m_session)
+        menu.addAction(icons::themed("download"), T("本地备份管理…"), this, [this] { showBackupManager(false); });
     menu.addAction(icons::themed("settings"), T("笔记库设置…"), this, [this] { showSettings(VaultPage); });
     menu.exec(global);
 }
 
 void MainWindow::addVault(bool server) {
     VaultDialog dlg(this, server);
+    if (dlg.exec() != QDialog::Accepted || dlg.vaultId().isEmpty()) {
+        if (!m_session && !vaults::list().isEmpty()) openVault(vaults::list().first().id);
+        return;
+    }
+    openVault(dlg.vaultId());
+}
+
+void MainWindow::createLocalVault() {
+    VaultDialog dlg(this);
+    dlg.showLocalCreate();
+    if (dlg.exec() != QDialog::Accepted || dlg.vaultId().isEmpty()) {
+        if (!m_session && !vaults::list().isEmpty()) openVault(vaults::list().first().id);
+        return;
+    }
+    openVault(dlg.vaultId());
+}
+
+void MainWindow::openExistingVault() {
+    VaultDialog dlg(this);
+    dlg.showOpenExisting();
     if (dlg.exec() != QDialog::Accepted || dlg.vaultId().isEmpty()) {
         if (!m_session && !vaults::list().isEmpty()) openVault(vaults::list().first().id);
         return;
@@ -691,9 +772,26 @@ void MainWindow::signIn() {
 // --- notes ---
 
 void MainWindow::openNote(const QString &id) {
+    openNoteInMode(id, false);
+}
+
+void MainWindow::openNoteInMode(const QString &id, bool forEditing) {
     if (!m_session) return;
     const Note *note = m_session->engine()->note(id);
     const bool has = note && !note->deleted;
+    const bool switching = has && m_pane->noteId() != id;
+    if (switching) {
+        m_pane->flush();
+        const int pref = Prefs::instance()->editorMode();
+        if (pref == int(OpenMode::Read) && !forEditing) {
+            m_pane->prepareOpenMode(EditorMode::Live, true);
+        } else {
+            const auto em = pref == int(OpenMode::Read) ? EditorMode::Live : EditorMode(std::clamp(pref, 0, 2));
+            m_pane->prepareOpenMode(em, false);
+        }
+    } else if (has && forEditing && m_pane->isReading()) {
+        m_pane->setReading(false);
+    }
     if (m_pane->noteId() != id || !has) m_pane->setNote(has ? id : QString());
     QWidget *page = has ? static_cast<QWidget *>(m_pane) : m_empty;
     if (m_stack->currentWidget() != page) {
@@ -738,12 +836,66 @@ void MainWindow::refreshNoteTabs() {
 void MainWindow::openTask(const QString &noteId, int line) {
     if (!m_session) return;
     m_pane->flush();
-    openNote(noteId);
+    openNoteInMode(noteId, true);
     const auto block = m_pane->editor()->document()->findBlockByNumber(line);
     if (block.isValid()) {
         m_pane->editor()->setTextCursor(QTextCursor(block));
         m_pane->focusEditor();
     }
+}
+
+namespace {
+int resolveTaskLine(const QString &body, int line, const QString &rawLine) {
+    const QStringList lines = body.split(u'\n');
+    if (line >= 0 && line < lines.size() && lines[line] == rawLine) return line;
+    if (!rawLine.isEmpty()) {
+        const int idx = lines.indexOf(rawLine);
+        if (idx >= 0) return idx;
+    }
+    return -1;
+}
+} // namespace
+
+void MainWindow::toggleAgendaTask(const QString &noteId, int line, const QString &rawLine) {
+    if (!m_session) return;
+    if (m_pane->noteId() == noteId) m_pane->flush();
+    const Note *n = m_session->engine()->note(noteId);
+    if (!n || n->deleted || notelock::isEncrypted(n->body)) return;
+    const int target = resolveTaskLine(n->body, line, rawLine);
+    if (target < 0) return;
+    const QString nextBody = tasks::toggleTaskLine(n->body, target);
+    if (nextBody == n->body) return;
+    NotePatch p;
+    p.body = nextBody;
+    m_session->engine()->updateNote(noteId, p);
+    if (m_pane->noteId() == noteId) m_pane->syncBodyFromEngine();
+}
+
+void MainWindow::rescheduleAgendaTask(const QString &noteId, int line, const QString &rawLine,
+                                      const std::optional<tasks::Due> &due, const QString &repeat) {
+    if (!m_session) return;
+    if (m_pane->noteId() == noteId) m_pane->flush();
+    const Note *n = m_session->engine()->note(noteId);
+    if (!n || n->deleted || notelock::isEncrypted(n->body)) return;
+    const int target = resolveTaskLine(n->body, line, rawLine);
+    if (target < 0) return;
+    QStringList lines = n->body.split(u'\n');
+    lines[target] = tasks::setTaskDue(lines[target], due, repeat);
+    const QString nextBody = lines.join(u'\n');
+    if (nextBody == n->body) return;
+    NotePatch p;
+    p.body = nextBody;
+    m_session->engine()->updateNote(noteId, p);
+    if (m_pane->noteId() == noteId) m_pane->syncBodyFromEngine();
+}
+
+void MainWindow::openDiff(const QString &baseId, const QString &otherId) {
+    if (!m_session || baseId.isEmpty()) return;
+    m_pane->flush();
+    NoteDiffDialog dlg(m_session, baseId, otherId, this);
+    connect(&dlg, &NoteDiffDialog::openNoteRequested, this, [this](const QString &id) { openNote(id); });
+    dlg.exec();
+    m_pane->syncBodyFromEngine();
 }
 
 // --- sidebar ---
@@ -762,13 +914,64 @@ void MainWindow::syncRail() {
         m_railPages[i]->setChecked(!m_shelfCollapsed && m_page == Page(i));
 }
 
+void MainWindow::refreshRailIcons() {
+    const Tokens &k = Theme::t();
+    const qreal dpr = devicePixelRatioF();
+    const auto withBadge = [&](QPixmap base, int size) -> QPixmap {
+        if (m_agendaBadgeCount <= 0 || size < 18) return base;
+        QPainter p(&base);
+        p.setRenderHint(QPainter::Antialiasing);
+        const QString text = m_agendaBadgeCount > 99 ? QStringLiteral("99+") : QString::number(m_agendaBadgeCount);
+        const qreal h = std::max<qreal>(10.0, size * 0.48);
+        QFont f = Theme::uiFont(std::max<qreal>(7.5, size * 0.34), QFont::Bold);
+        p.setFont(f);
+        const qreal tw = QFontMetricsF(f).horizontalAdvance(text);
+        const qreal w = std::max(h, tw + 5.0);
+        const QRectF pill(size - w, 0.0, w, h);
+        p.setPen(Qt::NoPen);
+        p.setBrush(m_agendaBadgeOverdue ? k.danger : k.ivy);
+        p.drawRoundedRect(pill, h / 2.0, h / 2.0);
+        p.setPen(Qt::white);
+        p.drawText(pill, Qt::AlignCenter, text);
+        p.end();
+        return base;
+    };
+
+    QList<QAction *> all = m_railPages;
+    if (m_railSettings) all << m_railSettings;
+    for (QAction *a : all) {
+        const QString name = a->data().toString();
+        const bool isAgenda = (m_railPages.size() > AgendaPage && a == m_railPages[AgendaPage]);
+        QIcon icon;
+        for (int size : {16, 20, 24, 32}) {
+            auto pm = [&](const QColor &c) {
+                QPixmap p = icons::pixmap(name, c, size, dpr);
+                return isAgenda ? withBadge(p, size) : p;
+            };
+            icon.addPixmap(pm(k.muted), QIcon::Normal, QIcon::Off);
+            icon.addPixmap(pm(k.ink), QIcon::Active, QIcon::Off);
+            icon.addPixmap(pm(k.ivy), QIcon::Normal, QIcon::On);
+            icon.addPixmap(pm(k.ivy), QIcon::Active, QIcon::On);
+        }
+        a->setIcon(icon);
+        if (isAgenda) {
+            QString tip = T("日程") + QStringLiteral(" (Ctrl+2)");
+            if (m_agendaBadgeCount > 0)
+                tip += QStringLiteral(" · ") + QString::number(m_agendaBadgeCount);
+            a->setToolTip(tip);
+        }
+    }
+}
+
 void MainWindow::dropEmptyDraft(const QString &next) {
     if (m_draftId.isEmpty() || m_draftId == next || !m_session) return;
     const QString id = m_draftId;
+    const QString initialTitle = m_draftTitle;
     m_draftId.clear();
+    m_draftTitle.clear();
     if (m_pane->noteId() == id) m_pane->flush();
     const Note *n = m_session->engine()->note(id);
-    if (n && !n->trashed() && n->title.trimmed().isEmpty() && n->body.trimmed().isEmpty() && n->tags.isEmpty())
+    if (n && !n->trashed() && n->title.trimmed() == initialTitle.trimmed() && n->body.trimmed().isEmpty() && n->tags.isEmpty())
         m_session->engine()->deleteNote(id);
 }
 
@@ -778,13 +981,31 @@ void MainWindow::newNote(const QString &folderId) {
     NoteInit init;
     init.folderId = folderId;
     if (folderId.isEmpty()) {
-        // New notes go next to the open one.
-        if (const Note *cur = m_session->engine()->note(m_pane->noteId()); cur && !cur->trashed()) init.folderId = cur->folderId;
+        const QString defFolder = Prefs::instance()->defaultNoteFolder();
+        if (defFolder == QLatin1String("__inbox__")) {
+            init.folderId.clear();
+        } else if (!defFolder.isEmpty()) {
+            const auto &folders = m_session->engine()->folders();
+            const auto it = folders.constFind(defFolder);
+            if (it != folders.constEnd() && !it->deleted) {
+                init.folderId = defFolder;
+            } else if (const Note *cur = m_session->engine()->note(m_pane->noteId()); cur && !cur->trashed()) {
+                init.folderId = cur->folderId;
+            }
+        } else {
+            // New notes go next to the open one.
+            if (const Note *cur = m_session->engine()->note(m_pane->noteId()); cur && !cur->trashed()) init.folderId = cur->folderId;
+        }
     }
+    const QString titleTpl = Prefs::instance()->defaultNoteTitle();
+    if (!titleTpl.trimmed().isEmpty())
+        init.title = fmt::formatNoteTitle(titleTpl, QDateTime::currentDateTime(), i18n::isZh());
     const Note n = m_session->engine()->createNote(init);
-    openNote(n.id);
+    openNoteInMode(n.id, true);
     m_draftId = n.id;
-    m_pane->focusTitle();
+    m_draftTitle = init.title;
+    if (init.title.trimmed().isEmpty()) m_pane->focusTitle();
+    else m_pane->focusEditor();
 }
 
 void MainWindow::moveNote(const QString &id) { moveNotes({id}); }
@@ -846,19 +1067,39 @@ void MainWindow::showSearch(const QString &initial) {
         {T("收起或展开书架"), QStringLiteral("Ctrl+\\"), QStringLiteral("sidebar"), [this] { toggleShelf(); }},
         {T("日程"), QStringLiteral("Ctrl+2"), QStringLiteral("calendar"), [this] { showPage(AgendaPage, false); }},
         {T("媒体库"), QStringLiteral("Ctrl+3"), QStringLiteral("image"), [this] { showPage(MediaPage, false); }},
-        {T("即时渲染"), QString(), QStringLiteral("eye"), [] { Prefs::instance()->setEditorMode(0); }},
-        {T("源码"), QString(), QStringLiteral("code"), [] { Prefs::instance()->setEditorMode(1); }},
-        {T("双栏"), QString(), QStringLiteral("split"), [] { Prefs::instance()->setEditorMode(2); }},
+        {T("所见即所得"), QString(), QStringLiteral("eye"), [this] { m_pane->setEditorMode(EditorMode::Live); }},
+        {T("源码"), QString(), QStringLiteral("code"), [this] { m_pane->setEditorMode(EditorMode::Source); }},
+        {T("双栏"), QString(), QStringLiteral("split"), [this] { m_pane->setEditorMode(EditorMode::Split); }},
+        {T("阅读模式"), QStringLiteral("Ctrl+Shift+E"), QStringLiteral("book"), [this] {
+             if (!m_pane->noteId().isEmpty()) m_pane->toggleReading();
+         }},
         {T("浅色主题"), QString(), QStringLiteral("sun"), [] { Prefs::instance()->setTheme(1); }},
         {T("深色主题"), QString(), QStringLiteral("moon"), [] { Prefs::instance()->setTheme(2); }},
         {T("跟随系统主题"), QString(), QStringLiteral("monitor"), [] { Prefs::instance()->setTheme(0); }},
         {T("导入 Markdown…"), QString(), QStringLiteral("upload"), [this] { importMarkdown(); }},
         {T("导出为 Markdown…"), QString(), QStringLiteral("download"), [this] { exportMarkdown(); }},
         {T("新建或接入笔记库…"), QString(), QStringLiteral("vault"), [this] { addVault(); }},
+        {T("打开已有本地笔记库…"), QString(), QStringLiteral("folder"), [this] { openExistingVault(); }},
         {T("设置"), QStringLiteral("Ctrl+,"), QStringLiteral("settings"), [this] { showSettings(); }},
         {T("清空回收站"), QString(), QStringLiteral("trash"), [this] { emptyTrash(); }},
     };
-    if (m_session->isRemote()) cmds.append({T("立即同步"), QStringLiteral("Ctrl+R"), QStringLiteral("refresh"), [this] { if (m_session) m_session->wake(); }});
+    if (!m_pane->noteId().isEmpty()) {
+        cmds.insert(9, {T("对比差异 (Diff)"), QString(), QStringLiteral("diff"), [this] { openDiff(m_pane->noteId()); }});
+        cmds.insert(10, {T("设置日期与重复"), QStringLiteral("Ctrl+Shift+D"), QStringLiteral("calendar"), [this] {
+            if (m_pane->isReading()) m_pane->setReading(false);
+            m_pane->focusEditor();
+            m_pane->editor()->openDuePicker();
+        }});
+    }
+    if (m_session->isRemote()) {
+        cmds.append({T("立即同步"), QStringLiteral("Ctrl+R"), QStringLiteral("refresh"), [this] { if (m_session) m_session->wake(); }});
+    }
+    cmds.append({T("本地备份管理…"), QString(), QStringLiteral("download"), [this] { showBackupManager(false); }});
+    cmds.append({T("立即执行本地备份"), QString(), QStringLiteral("download"), [this] {
+        if (!m_session || !m_backup) return;
+        m_pane->flush();
+        m_backup->runNow(true);
+    }});
     for (const VaultInfo &v : vaults::list())
         if (v.id != m_session->info().id)
             cmds.append({T("切换到") + QStringLiteral(" ") + v.name, QString(), QStringLiteral("vault"), [this, id = v.id] { openVault(id); }});
@@ -877,6 +1118,12 @@ void MainWindow::showSettings(SettingsPage page) {
     connect(&dlg, &SettingsDialog::importMarkdown, this, &MainWindow::importMarkdown, Qt::QueuedConnection);
     connect(&dlg, &SettingsDialog::importVault, this, &MainWindow::importVault, Qt::QueuedConnection);
     connect(&dlg, &SettingsDialog::exportMarkdown, this, &MainWindow::exportMarkdown, Qt::QueuedConnection);
+    connect(&dlg, &SettingsDialog::manageBackup, this, [this] { showBackupManager(false); }, Qt::QueuedConnection);
+    connect(&dlg, &SettingsDialog::backupNow, this, [this] {
+        if (!m_session || !m_backup) return;
+        m_pane->flush();
+        m_backup->runNow(true);
+    }, Qt::QueuedConnection);
     connect(&dlg, &SettingsDialog::checkUpdates, this, [this, dlgPtr = QPointer<SettingsDialog>(&dlg)] {
         updater::check(this, true, [dlgPtr](updater::Outcome, const QString &message) {
             if (dlgPtr) dlgPtr->setUpdateStatus(false, message);
@@ -892,6 +1139,17 @@ void MainWindow::showSettings(SettingsPage page) {
         rebuildVaultMenu();
         updateTitle();
     });
+    dlg.exec();
+}
+
+void MainWindow::showBackupManager(bool firstRun) {
+    if (!m_session || !m_backup) return;
+    m_pane->flush();
+    LocalBackupDialog dlg(m_session, m_backup, firstRun, this);
+    connect(&dlg, &LocalBackupDialog::importBackupRequested, this, [this](const QString &dir) {
+        if (!m_session || dir.isEmpty()) return;
+        runJob(transfer::importMarkdown(m_session, {dir}, QString(), this), T("正在导入…"));
+    }, Qt::QueuedConnection);
     dlg.exec();
 }
 
@@ -1010,32 +1268,52 @@ void MainWindow::removeVault() {
     if (!m_session) return;
     const VaultInfo info = m_session->info();
     const SyncState st = m_session->engine()->state();
-    QString text;
+    bool deleteFiles = true;
+
     if (info.isRemote()) {
-        text = T("退出登录并从这台电脑移除「%1」？服务器上的笔记不受影响。").arg(info.name);
+        QString text = T("退出登录并从这台电脑移除「%1」？服务器上的笔记不受影响。").arg(info.name);
         if (st.blocked > 0 || st.pending + st.uploads > 0)
             text += u'\n' + (i18n::isZh() ? QStringLiteral("\n注意：还有 %1 条更改没有同步到服务器（其中 %2 条被拒绝），移除后会丢失。")
                                           : QStringLiteral("\nNote: %1 changes have not reached the server (%2 refused) and will be lost."))
                                 .arg(st.pending + st.uploads + st.blocked).arg(st.blocked);
+        if (!dialogs::confirm(this, T("退出登录"), text, T("退出并移除"))) return;
+    } else if (info.hasCustomPath()) {
+        QMessageBox box(QMessageBox::Question, T("移除本地笔记库"),
+                        T("要如何处理本地笔记库「%1」？\n\n位置：%2").arg(info.name, QDir::toNativeSeparators(info.dir())),
+                        QMessageBox::NoButton, this);
+        QPushButton *unlinkBtn = box.addButton(T("仅从列表移除（保留文件）"), QMessageBox::AcceptRole);
+        QPushButton *deleteBtn = box.addButton(T("彻底删除笔记库文件"), QMessageBox::DestructiveRole);
+        box.addButton(T("取消"), QMessageBox::RejectRole);
+        box.setDefaultButton(unlinkBtn);
+        box.exec();
+        if (box.clickedButton() == unlinkBtn) {
+            deleteFiles = false;
+        } else if (box.clickedButton() == deleteBtn) {
+            deleteFiles = true;
+            bool ok = false;
+            const QString typed = QInputDialog::getText(this, T("删除笔记库"), T("请输入笔记库名称以确认："), QLineEdit::Normal, QString(), &ok);
+            if (!ok || typed.trimmed() != info.name) return;
+        } else {
+            return;
+        }
     } else {
-        text = T("永久删除本地笔记库「%1」及其中全部笔记和附件？此操作无法撤销。").arg(info.name);
-    }
-    if (!dialogs::confirm(this, info.isRemote() ? T("退出登录") : T("删除笔记库"), text, info.isRemote() ? T("退出并移除") : T("删除"))) return;
-    if (!info.isRemote()) {
+        const QString text = T("永久删除本地笔记库「%1」及其中全部笔记和附件？此操作无法撤销。").arg(info.name);
+        if (!dialogs::confirm(this, T("删除笔记库"), text, T("删除"))) return;
         bool ok = false;
         const QString typed = QInputDialog::getText(this, T("删除笔记库"), T("请输入笔记库名称以确认："), QLineEdit::Normal, QString(), &ok);
         if (!ok || typed.trimmed() != info.name) return;
     }
+
     m_pane->flush();
     QPointer<MainWindow> self(this);
     setEnabled(false);
-    Toaster::show(info.isRemote() ? T("正在同步并退出…") : T("正在删除…"));
-    m_session->signOut([self, info] {
+    Toaster::show(info.isRemote() ? T("正在同步并退出…") : (deleteFiles ? T("正在删除…") : T("正在移除…")));
+    m_session->signOut([self, info, deleteFiles] {
         if (!self) return;
         self->setEnabled(true);
         self->closeVault();
-        vaults::remove(info.id);
-        Toaster::show(info.isRemote() ? T("已退出并移除") : T("已删除"));
+        vaults::remove(info.id, deleteFiles);
+        Toaster::show(info.isRemote() ? T("已退出并移除") : (deleteFiles ? T("已删除") : T("已从列表移除，文件仍保留在原位置")));
         const auto rest = vaults::list();
         if (!rest.isEmpty() && self->openVault(rest.first().id)) return;
         self->rebuildVaultMenu();

@@ -925,6 +925,7 @@ void Shelf::onContextMenu(int row, const QPoint &global) {
         });
         menu.addAction(icons::themed("edit"), T("重命名"), this, [this, row] { renameRow(row); });
         menu.addAction(icons::themed("move"), T("移动到…"), this, [this, id] { emit moveNotes({id}); });
+        menu.addAction(icons::themed("diff"), T("对比差异 (Diff)"), this, [this, id] { emit diffRequested(id, QString()); });
         menu.addSeparator();
         menu.addAction(icons::themed("trash"), T("移到回收站"), this, [this, row] { deleteRow(row); });
     } else if (r.kind == TreeRow::TagRow) {
@@ -986,6 +987,12 @@ void Shelf::batchMenu(const QStringList &ids, bool trash, const QPoint &global) 
             emit moveNotes(ids);
             m_view->clearMulti();
         });
+        if (ids.size() == 2) {
+            menu.addAction(icons::themed("diff"), T("对比这两篇笔记"), this, [this, a = ids[0], b = ids[1]] {
+                m_view->clearMulti();
+                emit diffRequested(a, b);
+            });
+        }
         menu.addSeparator();
         menu.addAction(icons::themed("trash"), T("移到回收站"), this, [this, ids] { trashNotes(ids, true); });
     }

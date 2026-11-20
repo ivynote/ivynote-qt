@@ -156,7 +156,7 @@ src/ui        主题、图标、书架、日程与媒体库面板、编辑器与
 tests         单元、引擎、真实服务端集成、UI、导入导出
 ```
 
-数据位置：Linux `~/.local/share/Ivynote/Ivynote/`，Windows `%APPDATA%\Ivynote\Ivynote\`。每个笔记库一个目录：`vault.db`（SQLite，每行一条 JSON，加密时为密文）、`files/`、`thumbs/`、`uploads/`。
+数据位置（与 Tauri 桌面端默认位置一致）：Linux `~/.local/share/app.ivynote.desktop/`，macOS `~/Library/Application Support/app.ivynote.desktop/`，Windows `%APPDATA%\app.ivynote.desktop\`（旧版 `Ivynote/Ivynote` 数据会在启动时自动迁移）。每个笔记库一个目录：`vaults/<id>/` 下包含 `vault.db`（SQLite，每行一条 JSON，加密时为密文）、`files/`、`thumbs/`、`uploads/`。
 
 `make appimage` 与 Linux CI 共用配置、编译、测试和打包入口，默认使用
 `build-appimage/`，产物输出到 `dist/`；省略 `VERSION` 时使用

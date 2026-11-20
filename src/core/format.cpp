@@ -4,6 +4,7 @@
 
 #include <QDateTime>
 #include <QLocale>
+#include <QRegularExpression>
 #include <cmath>
 
 namespace fmt {
@@ -65,6 +66,38 @@ QString bytes(qint64 n) {
 
 QString number(qint64 n) {
     return QLocale(QLocale::English).toString(n);
+}
+
+QString formatNoteTitle(const QString &tpl, const QDateTime &now, bool zh) {
+    const QString raw = tpl.trimmed();
+    if (raw.isEmpty()) return {};
+    static const QRegularExpression re(QStringLiteral("YYYY|YY|MM|DD|HH|mm|ss|ddd"));
+    static const char *zhDays[] = {"周日", "周一", "周二", "周三", "周四", "周五", "周六"};
+    static const char *enDays[] = {"Sun", "Mon", "Tue", "Wed", "Thu", "Fri", "Sat"};
+    const QDate d = now.date();
+    const QTime t = now.time();
+    const int wd = d.dayOfWeek() % 7; // 0 = Sun .. 6 = Sat
+    auto pad2 = [](int v) { return QStringLiteral("%1").arg(v, 2, 10, u'0'); };
+    QString out;
+    out.reserve(raw.size() + 16);
+    qsizetype last = 0;
+    for (auto it = re.globalMatch(raw); it.hasNext();) {
+        const auto m = it.next();
+        out += raw.mid(last, m.capturedStart() - last);
+        const QString tok = m.captured(0);
+        if (tok == QLatin1String("YYYY")) out += QString::number(d.year());
+        else if (tok == QLatin1String("YY")) out += pad2(d.year() % 100);
+        else if (tok == QLatin1String("MM")) out += pad2(d.month());
+        else if (tok == QLatin1String("DD")) out += pad2(d.day());
+        else if (tok == QLatin1String("HH")) out += pad2(t.hour());
+        else if (tok == QLatin1String("mm")) out += pad2(t.minute());
+        else if (tok == QLatin1String("ss")) out += pad2(t.second());
+        else if (tok == QLatin1String("ddd")) out += zh ? QString::fromUtf8(zhDays[wd]) : QString::fromLatin1(enDays[wd]);
+        else out += tok;
+        last = m.capturedEnd();
+    }
+    out += raw.mid(last);
+    return out;
 }
 
 } // namespace fmt

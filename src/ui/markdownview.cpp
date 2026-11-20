@@ -107,6 +107,33 @@ void MarkdownView::setBaseSize(int px) {
     restyle();
 }
 
+void MarkdownView::setColumnWidth(int maxWidth) {
+    if (m_maxColumn == maxWidth) return;
+    m_maxColumn = maxWidth;
+    document()->setDocumentMargin(m_maxColumn > 0 ? 2 : 28);
+    updateMargins();
+    if (m_hasMarkdown) setMarkdown(m_markdown, m_options, m_title);
+}
+
+void MarkdownView::updateMargins() {
+    if (m_maxColumn > 0) {
+        const int side = std::max(24, (width() - m_maxColumn) / 2);
+        setViewportMargins(side, 0, side, 0);
+    } else {
+        setViewportMargins(0, 0, 0, 0);
+    }
+    emit columnChanged();
+}
+
+QRect MarkdownView::textColumn() const {
+    if (m_maxColumn > 0) {
+        const int side = viewportMargins().left();
+        return {side, 0, std::max(0, width() - 2 * side), height()};
+    }
+    const int margin = int(document()->documentMargin());
+    return {margin, 0, std::max(0, width() - 2 * margin), height()};
+}
+
 void MarkdownView::restyle() {
     // Sizes and spacing from the web client's .prose-ivy (app.css).
     const Tokens &k = Theme::t();
@@ -141,6 +168,14 @@ void MarkdownView::restyle() {
                   QString::number(px), k.ivy.name(), k.muted.name(), mono)
               .arg(QString::number(qRound(px * 0.85)), k.codeBg.name(), c(Theme::alpha(k.ivy, 0.35)), k.ink2.name(), k.faint.name(),
                    k.line.name(), c(Theme::alpha(k.warn, 0.22)), QString::number(m_px));
+    css += QStringLiteral(
+        ".task-due{font-size:%1px;color:%2;background-color:%3;text-decoration:none;}"
+        ".task-due-today{font-size:%1px;color:%4;background-color:%5;text-decoration:none;}"
+        ".task-due-overdue{font-size:%1px;color:%6;background-color:%7;text-decoration:none;}"
+        ".task-repeat{font-size:%1px;color:%4;background-color:%8;text-decoration:none;}"
+        ".task-done{font-size:%1px;color:%9;text-decoration:none;}")
+               .arg(QString::number(std::max(12, m_px - 2)), k.muted.name(), c(Theme::alpha(k.line, 0.55)), k.ivy.name(),
+                    c(Theme::alpha(k.ivy, 0.14)), k.danger.name(), c(Theme::alpha(k.danger, 0.12)), c(Theme::alpha(k.ivy, 0.10)), k.faint.name());
     document()->setDefaultStyleSheet(css);
     QPalette p = palette();
     p.setColor(QPalette::Base, k.surface);
@@ -257,6 +292,7 @@ void MarkdownView::contextMenuEvent(QContextMenuEvent *event) {
 
 void MarkdownView::resizeEvent(QResizeEvent *event) {
     QTextBrowser::resizeEvent(event);
+    if (m_maxColumn > 0) updateMargins();
     if (event->size().width() != event->oldSize().width() && m_hasMarkdown) m_resizeTimer.start();
 }
 
