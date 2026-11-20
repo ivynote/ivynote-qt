@@ -157,7 +157,7 @@ bool isDirEmpty(const QString &dir) {
     return d.exists() && d.entryList(QDir::AllEntries | QDir::NoDotAndDotDot | QDir::Hidden).isEmpty();
 }
 
-bool validateTargetPath(const QString &rawDir, const QString &ignoreVaultId, bool forRelocate, QString *error) {
+bool validateTargetPath(const QString &rawDir, QString *error) {
     const QString target = normalizePath(rawDir);
     if (target.isEmpty()) {
         if (error) *error = T("请选择有效的文件夹。");
@@ -173,7 +173,6 @@ bool validateTargetPath(const QString &rawDir, const QString &ignoreVaultId, boo
         return false;
     }
     for (const VaultInfo &existing : vaults::list()) {
-        if (!ignoreVaultId.isEmpty() && existing.id == ignoreVaultId) continue;
         if (dirsOverlap(target, existing.dir())) {
             if (error) *error = T("所选位置与现有笔记库「%1」重合，请选择其他文件夹。").arg(existing.name);
             return false;
@@ -182,18 +181,6 @@ bool validateTargetPath(const QString &rawDir, const QString &ignoreVaultId, boo
     if (QFileInfo::exists(target + QStringLiteral("/vault.db"))) {
         if (error) *error = T("所选文件夹中已存在笔记库（vault.db）。如需打开它，请使用「打开已有本地笔记库」。");
         return false;
-    }
-    if (forRelocate) {
-        if (QFileInfo::exists(target + QStringLiteral("/vault.json"))) {
-            if (error) *error = T("所选文件夹中已存在笔记库元数据（vault.json），请选择其他空文件夹。");
-            return false;
-        }
-        for (const QString &sub : kVaultSubdirs) {
-            if (QFileInfo::exists(target + u'/' + sub)) {
-                if (error) *error = T("所选文件夹中已存在「%1」目录，为避免覆盖现有文件，请选择其他文件夹。").arg(sub);
-                return false;
-            }
-        }
     }
     return true;
 }
@@ -537,7 +524,7 @@ bool create(VaultInfo &v, QString *error) {
 
     if (!v.isRemote() && !v.path.trimmed().isEmpty()) {
         const QString norm = normalizePath(v.path);
-        if (!validateTargetPath(norm, QString(), false, error)) return false;
+        if (!validateTargetPath(norm, error)) return false;
         const QString defaultDir = dataRoot() + QStringLiteral("/vaults/") + v.id;
         v.path = sameDir(norm, defaultDir) ? QString() : norm;
     } else if (v.isRemote()) {
@@ -825,72 +812,6 @@ QList<DiscoveredVault> scanForVaults(const QStringList &extraRoots) {
         return a.dir < b.dir;
     });
     return results;
-}
-
-bool relocate(const QString &id, const QString &newDir, QString *error) {
-    VaultInfo v = find(id);
-    if (v.id.isEmpty()) {
-        if (error) *error = T("未找到该笔记库。");
-        return false;
-    }
-    if (v.isRemote()) {
-        if (error) *error = T("同步笔记库不支持修改本机目录。");
-        return false;
-    }
-    const QString oldDir = v.dir();
-    const QString targetDir = normalizePath(newDir);
-    if (sameDir(oldDir, targetDir)) return true;
-
-    if (dirsOverlap(oldDir, targetDir)) {
-        if (error) *error = T("不能移动到当前笔记库的子目录或父目录中，请选择其他位置。");
-        return false;
-    }
-    if (!validateTargetPath(targetDir, v.id, true, error)) return false;
-
-    const bool targetExisted = QFileInfo::exists(targetDir);
-    if (!QDir().mkpath(targetDir)) {
-        if (error) *error = T("无法创建目标目录：%1").arg(targetDir);
-        return false;
-    }
-    if (!testWritableDir(targetDir)) {
-        if (error) *error = T("目标目录不可写入：%1").arg(targetDir);
-        if (!targetExisted && isDirEmpty(targetDir)) QDir().rmdir(targetDir);
-        return false;
-    }
-
-    QStringList entriesToMove;
-    for (const QString &f : kVaultFiles) {
-        if (QFileInfo::exists(oldDir + u'/' + f)) entriesToMove << f;
-    }
-    for (const QString &sub : kVaultSubdirs) {
-        if (QFileInfo::exists(oldDir + u'/' + sub)) entriesToMove << sub;
-    }
-
-    QStringList moved;
-    for (const QString &name : entriesToMove) {
-        if (!moveEntry(oldDir + u'/' + name, targetDir + u'/' + name)) {
-            // Roll back everything already moved so the original vault stays intact.
-            for (const QString &m : moved) moveEntry(targetDir + u'/' + m, oldDir + u'/' + m);
-            if (!targetExisted && isDirEmpty(targetDir)) QDir().rmdir(targetDir);
-            if (error) *error = T("移动笔记库文件失败（%1），已恢复到原位置。").arg(name);
-            return false;
-        }
-        moved << name;
-    }
-
-    const QString defaultDir = dataRoot() + QStringLiteral("/vaults/") + v.id;
-    v.path = sameDir(targetDir, defaultDir) ? QString() : targetDir;
-    save(v);
-
-    // Keep local backup directory outside the relocated vault directory.
-    backup::Config bcfg = backup::loadConfig(v);
-    if (!bcfg.directory.isEmpty() && backup::isPathInsideVault(bcfg.directory, v)) {
-        bcfg.directory = backup::suggestDefaultDirectory(v);
-        backup::saveConfig(v.id, bcfg);
-    }
-
-    if (isDirEmpty(oldDir)) QDir().rmdir(oldDir);
-    return true;
 }
 
 } // namespace vaults

@@ -1128,7 +1128,7 @@ private slots:
             QCOMPARE(vaults::find(dlg.vaultId()).dir(), QDir::cleanPath(existingDir));
         }
 
-        // 3. SettingsDialog shows "Change location..." button for local vaults and hides it for remote vaults.
+        // 3. SettingsDialog does not expose relocating an existing vault.
         {
             const VaultInfo localInfo = vaults::list().first();
             Session::OpenError oe = Session::OpenError::None;
@@ -1137,26 +1137,8 @@ private slots:
 
             SettingsDialog localSettings(local.get());
             localSettings.showVaultTab();
-            auto *relocBtn = localSettings.findChild<QPushButton *>(QStringLiteral("changeVaultLocationBtn"));
-            QVERIFY(relocBtn != nullptr);
-            QSignalSpy relocSpy(&localSettings, &SettingsDialog::relocateVault);
-            relocBtn->click();
-            QCOMPARE(relocSpy.count(), 1);
+            QVERIFY(localSettings.findChild<QPushButton *>(QStringLiteral("changeVaultLocationBtn")) == nullptr);
             local->close();
-
-            VaultInfo remoteInfo;
-            remoteInfo.name = QStringLiteral("RemoteOnly");
-            remoteInfo.kind = VaultInfo::Remote;
-            remoteInfo.server = QStringLiteral("https://example.invalid");
-            remoteInfo.username = QStringLiteral("carol");
-            QVERIFY(vaults::create(remoteInfo, &err));
-            std::unique_ptr<Session> remote(Session::open(remoteInfo, {}, &oe, &err));
-            QVERIFY(remote != nullptr);
-
-            SettingsDialog remoteSettings(remote.get());
-            remoteSettings.showVaultTab();
-            QVERIFY(remoteSettings.findChild<QPushButton *>(QStringLiteral("changeVaultLocationBtn")) == nullptr);
-            remote->close();
         }
     }
 };

@@ -278,26 +278,11 @@ QWidget *SettingsDialog::vaultTab() {
         form->addRow(T("服务器"), server);
         form->addRow(T("账户"), new QLabel(info.username, formBox));
     }
-    auto *locBox = new QWidget(formBox);
-    auto *locCol = new QVBoxLayout(locBox);
-    locCol->setContentsMargins(0, 0, 0, 0);
-    locCol->setSpacing(6);
-    auto *dir = new QLabel(QStringLiteral("<a href=\"%1\">%2</a>").arg(QUrl::fromLocalFile(info.dir()).toString(), QDir::toNativeSeparators(info.dir()).toHtmlEscaped()), locBox);
+    auto *dir = new QLabel(QStringLiteral("<a href=\"%1\">%2</a>").arg(QUrl::fromLocalFile(info.dir()).toString(), QDir::toNativeSeparators(info.dir()).toHtmlEscaped()), formBox);
     dir->setOpenExternalLinks(true);
     dir->setWordWrap(true);
     dir->setSizePolicy(QSizePolicy::Expanding, QSizePolicy::Minimum);
-    locCol->addWidget(dir);
-    if (!info.isRemote()) {
-        auto *locActions = new QHBoxLayout;
-        locActions->setContentsMargins(0, 0, 0, 0);
-        auto *relocateBtn = new QPushButton(T("更改位置…"), locBox);
-        relocateBtn->setObjectName(QStringLiteral("changeVaultLocationBtn"));
-        connect(relocateBtn, &QPushButton::clicked, this, [this] { accept(); emit relocateVault(); });
-        locActions->addWidget(relocateBtn);
-        locActions->addStretch(1);
-        locCol->addLayout(locActions);
-    }
-    form->addRow(T("位置"), locBox);
+    form->addRow(T("位置"), dir);
     auto *crypt = new QWidget(formBox);
     auto *cryptRow = new QHBoxLayout(crypt);
     cryptRow->setContentsMargins(0, 0, 0, 0);

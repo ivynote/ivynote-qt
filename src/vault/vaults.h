@@ -88,10 +88,6 @@ QList<VaultInfo> discoverDefaultVaults();
 // and mounted data drives.
 QList<DiscoveredVault> scanForVaults(const QStringList &extraRoots = {});
 
-// Moves a closed local vault's database, metadata, and files directly into
-// newDir and updates its registered path.
-bool relocate(const QString &id, const QString &newDir, QString *error);
-
 // For tests: keep everything under dir.
 void setDataRoot(const QString &dir);
 

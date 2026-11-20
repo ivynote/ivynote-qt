@@ -1097,7 +1097,6 @@ void MainWindow::showSearch(const QString &initial) {
     if (m_session->isRemote()) {
         cmds.append({T("立即同步"), QStringLiteral("Ctrl+R"), QStringLiteral("refresh"), [this] { if (m_session) m_session->wake(); }});
     } else {
-        cmds.append({T("更改笔记库位置…"), QString(), QStringLiteral("folder"), [this] { relocateVault(); }});
         cmds.append({T("本地备份管理…"), QString(), QStringLiteral("download"), [this] { showBackupManager(false); }});
         cmds.append({T("立即备份本地笔记"), QString(), QStringLiteral("download"), [this] {
             if (!m_session || m_session->isRemote() || !m_backup) return;
@@ -1129,7 +1128,6 @@ void MainWindow::showSettings(SettingsPage page) {
         m_pane->flush();
         m_backup->runNow(true);
     }, Qt::QueuedConnection);
-    connect(&dlg, &SettingsDialog::relocateVault, this, &MainWindow::relocateVault, Qt::QueuedConnection);
     connect(&dlg, &SettingsDialog::checkUpdates, this, [this, dlgPtr = QPointer<SettingsDialog>(&dlg)] {
         updater::check(this, true, [dlgPtr](updater::Outcome, const QString &message) {
             if (dlgPtr) dlgPtr->setUpdateStatus(false, message);
@@ -1268,40 +1266,6 @@ void MainWindow::exportMarkdown() {
     for (int i = 2; QFileInfo::exists(dir); ++i) dir = parent + u'/' + name + QStringLiteral(" ") + QDateTime::currentDateTime().toString(QStringLiteral("yyyy-MM-dd")) + QStringLiteral(" (%1)").arg(i);
     m_pane->flush();
     runJob(transfer::exportMarkdown(m_session, dir, this), T("正在导出…"));
-}
-
-void MainWindow::relocateVault() {
-    if (!m_session || m_session->isRemote()) return;
-    const VaultInfo info = m_session->info();
-    const QString target = QFileDialog::getExistingDirectory(this, T("选择新的笔记库位置"), info.dir());
-    if (target.isEmpty()) return;
-    const QString cleanTarget = QDir::cleanPath(target);
-    if (cleanTarget == QDir::cleanPath(info.dir())) {
-        Toaster::show(T("所选位置与当前笔记库位置相同"));
-        return;
-    }
-    const QString msg = (i18n::isZh()
-        ? QStringLiteral("将把「%1」的数据库与附件移动到：\n%2\n\n所选文件夹将直接作为新的笔记库目录（不会创建子文件夹）。")
-        : QStringLiteral("Move the database and attachments of \"%1\" to:\n%2\n\nThe selected folder will be used directly as the vault directory (no subfolder will be created)."))
-                            .arg(info.name, QDir::toNativeSeparators(cleanTarget));
-    if (!dialogs::confirm(this, T("更改笔记库位置"), msg, T("移动"))) return;
-
-    const QString openNoteId = m_pane->noteId();
-    m_pane->flush();
-    m_session->engine()->persistNow();
-    closeVault();
-
-    QString err;
-    const bool ok = vaults::relocate(info.id, cleanTarget, &err);
-    openVault(info.id);
-    if (!openNoteId.isEmpty() && m_session && m_session->engine()->note(openNoteId)) {
-        openNote(openNoteId);
-    }
-    if (!ok) {
-        QMessageBox::warning(this, T("更改笔记库位置失败"), err);
-        return;
-    }
-    Toaster::show(T("笔记库位置已更新"));
 }
 
 void MainWindow::removeVault() {

@@ -557,17 +557,7 @@ private slots:
             QCOMPARE(found.first().noteRecords, 1);
         }
 
-        // 6. relocate moves vault artifacts directly into the new folder without touching unrelated user files.
-        const QString relocatedDir = external.filePath(QStringLiteral("RelocatedVault"));
-        QVERIFY(!vaults::relocate(reattached.id, customDir + QStringLiteral("/inside"), &err));
-        QVERIFY2(vaults::relocate(reattached.id, relocatedDir, &err), qPrintable(err));
-        QCOMPARE(vaults::find(reattached.id).dir(), QDir::cleanPath(relocatedDir));
-        QVERIFY(QFile::exists(relocatedDir + QStringLiteral("/vault.db")));
-        QVERIFY(QFile::exists(relocatedDir + QStringLiteral("/vault.json")));
-        QVERIFY(QDir(relocatedDir + QStringLiteral("/files")).exists());
-        QVERIFY(!QFile::exists(customDir + QStringLiteral("/vault.db")));
-        QVERIFY(QFile::exists(userFile)); // unrelated file stayed untouched in old folder
-
+        // 6. Reopened re-attached custom vault preserves notes and attachments.
         {
             Session::OpenError oe = Session::OpenError::None;
             std::unique_ptr<Session> s(Session::open(vaults::find(reattached.id), {}, &oe, &err));
@@ -581,17 +571,11 @@ private slots:
         }
 
         // 7. Destructive remove (deleteFiles = true) on a custom folder removes only Ivynote artifacts.
-        const QString keepInRelocated = relocatedDir + QStringLiteral("/personal.txt");
-        {
-            QFile f(keepInRelocated);
-            QVERIFY(f.open(QIODevice::WriteOnly));
-            f.write("do not delete");
-        }
         vaults::remove(reattached.id, true);
-        QVERIFY(!QFile::exists(relocatedDir + QStringLiteral("/vault.db")));
-        QVERIFY(!QFile::exists(relocatedDir + QStringLiteral("/vault.json")));
-        QVERIFY(!QDir(relocatedDir + QStringLiteral("/files")).exists());
-        QVERIFY(QFile::exists(keepInRelocated));
+        QVERIFY(!QFile::exists(customDir + QStringLiteral("/vault.db")));
+        QVERIFY(!QFile::exists(customDir + QStringLiteral("/vault.json")));
+        QVERIFY(!QDir(customDir + QStringLiteral("/files")).exists());
+        QVERIFY(QFile::exists(userFile));
 
         // 8. discoverDefaultVaults recovers unregistered local vaults in default dataRoot()/vaults
         //    and ignores remote vault caches.

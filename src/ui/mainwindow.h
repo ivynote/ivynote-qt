@@ -65,7 +65,6 @@ private:
     void importMarkdown();
     void importVault();
     void exportMarkdown();
-    void relocateVault();
     void removeVault();
     void runJob(class TransferJob *job, const QString &title);
     void syncPrefsFromServer();

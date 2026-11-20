@@ -599,7 +599,7 @@ inline constexpr Pair kEnglish[] = {
     {"每 3 小时", "Every 3 hours"},
     {"每 6 小时", "Every 6 hours"},
     {"每天", "Daily"},
-    // Custom local vault locations, opening existing vaults, discovery & relocation
+    // Custom local vault locations, opening existing vaults & discovery
     {"新建本地笔记库", "New local vault"},
     {"打开已有本地笔记库", "Open existing local vault"},
     {"打开已有本地笔记库…", "Open existing local vault…"},
@@ -626,13 +626,6 @@ inline constexpr Pair kEnglish[] = {
     {"该目录是同步笔记库的本地缓存，不能作为本地笔记库打开。请使用「连接 Ivynote 服务器」登录。", "This folder is a local cache of a synced vault and cannot be opened as a local vault. Use “Connect to Ivynote Server” to sign in."},
     {"已在列表中，可直接打开", "Already in your list, ready to open"},
     {"已添加", "Added"},
-    {"更改位置…", "Change location…"},
-    {"更改笔记库位置", "Change vault location"},
-    {"更改笔记库位置…", "Change vault location…"},
-    {"更改笔记库位置失败", "Failed to change vault location"},
-    {"选择新的笔记库位置", "Choose new vault location"},
-    {"所选位置与当前笔记库位置相同", "The selected folder is the same as the current vault location"},
-    {"笔记库位置已更新", "Vault location updated"},
     {"移除或删除这个笔记库…", "Remove or delete this vault…"},
     {"移除本地笔记库", "Remove local vault"},
     {"要如何处理本地笔记库「%1」？\n\n位置：%2", "How would you like to handle the local vault “%1”?\n\nLocation: %2"},
@@ -646,19 +639,11 @@ inline constexpr Pair kEnglish[] = {
     {"不能使用应用数据根目录作为笔记库位置，请选择其他文件夹。", "Cannot use the application data root directly as a vault folder. Please choose another folder."},
     {"所选位置与现有笔记库「%1」重合，请选择其他文件夹。", "The selected folder overlaps with existing vault “%1”. Please choose another folder."},
     {"所选文件夹中已存在笔记库（vault.db）。如需打开它，请使用「打开已有本地笔记库」。", "This folder already contains a vault (vault.db). Use “Open existing local vault” to open it."},
-    {"所选文件夹中已存在笔记库元数据（vault.json），请选择其他空文件夹。", "This folder already contains vault metadata (vault.json). Please choose another empty folder."},
-    {"所选文件夹中已存在「%1」目录，为避免覆盖现有文件，请选择其他文件夹。", "This folder already contains a “%1” directory. Choose another folder to avoid overwriting files."},
     {"无法创建目录：%1", "Cannot create directory: %1"},
     {"目录不可写入：%1", "Directory is not writable: %1"},
     {"无法保存笔记库密钥。", "Cannot store the vault key."},
     {"无法写入笔记库信息文件：%1", "Cannot write vault metadata file: %1"},
     {"所选文件夹不是有效的 Ivynote 笔记库（未找到有效的 vault.db）。", "The selected folder is not a valid Ivynote vault (no valid vault.db found)."},
-    {"未找到该笔记库。", "Vault not found."},
-    {"同步笔记库不支持修改本机目录。", "Synced vaults do not support changing the local directory."},
-    {"不能移动到当前笔记库的子目录或父目录中，请选择其他位置。", "Cannot move a vault into a subfolder or parent folder of itself. Please choose another location."},
-    {"无法创建目标目录：%1", "Cannot create target directory: %1"},
-    {"目标目录不可写入：%1", "Target directory is not writable: %1"},
-    {"移动笔记库文件失败（%1），已恢复到原位置。", "Failed to move vault files (%1); restored to original location."},
 };
 
 } // namespace i18n
