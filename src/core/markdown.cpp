@@ -282,9 +282,11 @@ ImageLink standaloneImage(const QString &line, const QString &definitions) {
     if (!trimmed.contains(u'[')) return {};
     const QByteArray input = (line + QStringLiteral("\n\n") + definitions).toUtf8();
     QByteArray output;
+    // CommonMark only: permissive autolinks in older md4c (e.g. 0.4.8 on Ubuntu 22.04)
+    // emit a nested <a> inside explicit [url](url) links when the URL has parens/queries.
     md_html(input.constData(), MD_SIZE(input.size()), [](const MD_CHAR *s, MD_SIZE n, void *p) {
         static_cast<QByteArray *>(p)->append(s, n);
-    }, &output, MD_DIALECT_GITHUB | MD_FLAG_NOHTML, 0);
+    }, &output, MD_DIALECT_COMMONMARK | MD_FLAG_NOHTML, 0);
     const QString html = QString::fromUtf8(output).trimmed();
     auto decode = [](const QString &s) { return QTextDocumentFragment::fromHtml(s).toPlainText(); };
     static const QRegularExpression image(QStringLiteral(R"RE(^(?:<p>|<h[1-6]>)<img src="([^"]*)" alt="([^"]*)"[^>]*>(?:</p>|</h[1-6]>)$)RE"));
