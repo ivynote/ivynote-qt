@@ -21,7 +21,7 @@ set(IVY_VERSION_MAJOR ${CMAKE_MATCH_1})
 set(IVY_VERSION_MINOR ${CMAKE_MATCH_2})
 set(IVY_VERSION_PATCH ${CMAKE_MATCH_3})
 
-find_package(Qt6 6.8 REQUIRED COMPONENTS Core Gui Widgets Network Sql Svg Concurrent WebEngineWidgets)
+find_package(Qt6 6.8 REQUIRED COMPONENTS Core Gui Widgets Network Sql Svg Concurrent)
 find_package(Qt6Keychain REQUIRED)
 find_package(PkgConfig REQUIRED)
 pkg_check_modules(SODIUM REQUIRED IMPORTED_TARGET libsodium)
@@ -91,7 +91,7 @@ add_library(ivyui STATIC
     src/ui/historydialog.cpp
     src/ui/mainwindow.cpp
 )
-target_link_libraries(ivyui PUBLIC ivycore Qt6::Widgets Qt6::Svg Qt6::WebEngineWidgets)
+target_link_libraries(ivyui PUBLIC ivycore Qt6::Widgets Qt6::Svg)
 
 if(IVY_BUILD_APP)
 qt_add_executable(ivynote WIN32

@@ -78,9 +78,6 @@ const QList<Item> &all() {
         {QStringLiteral("properties"), QStringLiteral("block"), QStringLiteral("笔记属性"), QStringLiteral("Properties"),
          QStringLiteral("笔记开头的键值信息"), QStringLiteral("Key-value facts at the top"), QStringLiteral("⚙"), QStringLiteral("---"),
          {QStringLiteral("shuxing"), QStringLiteral("sx"), QStringLiteral("properties"), QStringLiteral("frontmatter"), QStringLiteral("yaml"), QStringLiteral("meta")}},
-        {QStringLiteral("mermaid"), QStringLiteral("block"), QStringLiteral("图表（Mermaid）"), QStringLiteral("Diagram (Mermaid)"),
-         QStringLiteral("流程图、时序图等"), QStringLiteral("Flowcharts and more"), QStringLiteral("⧉"), QString(),
-         {QStringLiteral("tubiao"), QStringLiteral("tb"), QStringLiteral("liuchengtu"), QStringLiteral("lct"), QStringLiteral("diagram"), QStringLiteral("mermaid"), QStringLiteral("flowchart"), QStringLiteral("chart")}},
         // Links & files
         {QStringLiteral("wiki"), QStringLiteral("link"), QStringLiteral("链接到笔记"), QStringLiteral("Link to note"),
          QStringLiteral("链接到另一篇笔记"), QStringLiteral("Link to another note"), QStringLiteral("[["), QStringLiteral("[["),

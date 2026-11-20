@@ -496,7 +496,6 @@ NotePane::NotePane(QWidget *parent) : QWidget(parent) {
     connect(m_editor, &MarkdownEditor::filesDropped, this, &NotePane::insertFiles);
     connect(m_editor, &MarkdownEditor::imagePasted, this, &NotePane::addImage);
     connect(m_preview, &QTextBrowser::anchorClicked, this, [this](const QUrl &url) {
-        if (url.scheme() == QStringLiteral("ivy-diagram")) return;
         const QString s = url.toString();
         if (s.startsWith(QLatin1String("ivy-task:"))) {
             if (!m_reading && m_engine && m_engine->note(m_id) && !m_editor->isReadOnly()) {

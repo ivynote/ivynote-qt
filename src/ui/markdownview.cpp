@@ -9,51 +9,6 @@
 #include <QMimeData>
 #include <QTextDocumentFragment>
 #include <QMenu>
-#include <QDialog>
-#include <QVBoxLayout>
-#include <QJsonDocument>
-#include <QJsonArray>
-#include <QWebEngineView>
-#include <QWebEngineSettings>
-#include <QWebEngineProfile>
-#include <QWebEngineUrlRequestInterceptor>
-#include <QWebEngineUrlRequestInfo>
-
-namespace {
-class DiagramRequests final : public QWebEngineUrlRequestInterceptor {
-public:
-    using QWebEngineUrlRequestInterceptor::QWebEngineUrlRequestInterceptor;
-    void interceptRequest(QWebEngineUrlRequestInfo &request) override {
-        const auto url = request.requestUrl();
-        if (url.scheme() != QStringLiteral("qrc") || !url.path().startsWith(QStringLiteral("/mermaid/"))) request.block(true);
-    }
-};
-
-void showDiagram(QWidget *parent, const QString &source) {
-    QDialog dialog(parent);
-    dialog.setWindowTitle(QStringLiteral("Mermaid"));
-    dialog.resize(780, 560);
-    QVBoxLayout layout(&dialog);
-    QWebEngineProfile profile;
-    DiagramRequests requests;
-    profile.setUrlRequestInterceptor(&requests);
-    QWebEnginePage page(&profile);
-    QWebEngineView view(&page, &dialog);
-    layout.addWidget(&view);
-    view.settings()->setAttribute(QWebEngineSettings::LocalContentCanAccessFileUrls, false);
-    view.settings()->setAttribute(QWebEngineSettings::LocalContentCanAccessRemoteUrls, false);
-    view.setContextMenuPolicy(Qt::NoContextMenu);
-    QObject::connect(&view, &QWebEngineView::loadFinished, &dialog, [&page, source](bool loaded) {
-        if (!loaded) return;
-        const auto argument = QJsonDocument(QJsonArray{source}).toJson(QJsonDocument::Compact);
-        page.runJavaScript(QStringLiteral("showDiagram(...") + QString::fromUtf8(argument) + u')');
-    });
-    view.load(QUrl(QStringLiteral("qrc:/mermaid/view.html")));
-    dialog.exec();
-}
-}
-
-
 #include <QFontMetricsF>
 #include <QFrame>
 #include <QPainter>
@@ -70,12 +25,6 @@ void showDiagram(QWidget *parent, const QString &source) {
 // --- MarkdownView ---
 
 MarkdownView::MarkdownView(QWidget *parent) : QTextBrowser(parent) {
-    connect(this, &QTextBrowser::anchorClicked, this, [this](const QUrl &url) {
-        if (url.scheme() != QStringLiteral("ivy-diagram")) return;
-        bool ok = false;
-        int index = url.path().toInt(&ok);
-        if (ok && index >= 0 && index < m_diagrams.size()) showDiagram(this, m_diagrams.at(index));
-    });
     setOpenLinks(false);
     setOpenExternalLinks(false);
     setFrameShape(QFrame::NoFrame);
@@ -192,19 +141,6 @@ void MarkdownView::setMarkdown(const QString &markdown, RenderOptions opts, cons
     opts.forView = true;
     opts.remoteImages = true;
     QString html = renderMarkdown(markdown, opts);
-    m_diagrams.clear();
-    static const QRegularExpression diagram(QStringLiteral(R"re(<code class="language-mermaid">(.*?)</code>)re"),
-                                             QRegularExpression::DotMatchesEverythingOption);
-    QString transformed;
-    qsizetype start = 0;
-    for (auto it = diagram.globalMatch(html); it.hasNext();) {
-        const auto match = it.next();
-        transformed += html.mid(start, match.capturedStart() - start);
-        transformed += QStringLiteral("<a href=\"ivy-diagram:%1\">%2</a>").arg(m_diagrams.size()).arg(T("查看 Mermaid 图"));
-        m_diagrams << QTextDocumentFragment::fromHtml(QStringLiteral("<pre>") + match.captured(1) + QStringLiteral("</pre>")).toPlainText();
-        start = match.capturedEnd();
-    }
-    html = transformed + html.mid(start);
     if (!title.isNull()) html = QStringLiteral("<h1>%1</h1>").arg(title.toHtmlEscaped()) + html;
     // The box images follow the theme; a new name per theme skips the cache.
     html.replace(QLatin1String("src=\"ivy-check:"), Theme::dark() ? QLatin1String("src=\"ivy-check:d") : QLatin1String("src=\"ivy-check:l"));

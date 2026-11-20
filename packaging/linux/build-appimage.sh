@@ -57,16 +57,13 @@ export EXTRA_PLATFORM_PLUGINS=$(IFS=';'; echo "${wayland_plugins[*]}")
 
 # Present a private plugin tree to linuxdeploy instead of modifying system Qt.
 # KDE image handlers pull in optional codecs unrelated to this application;
-# database drivers other than SQLite similarly require extra client libraries;
-# QtWebEngine links QtPositioning, whose position plugins (e.g. NMEA) pull in
-# optional modules like QtSerialPort that this app does not use.
+# database drivers other than SQLite similarly require extra client libraries.
 PACKAGING_QT="$BUILD_DIR/packaging-qt"
 rm -rf "$PACKAGING_QT"
 mkdir -p "$PACKAGING_QT/plugins"
 cp -as "$QT_PLUGINS"/. "$PACKAGING_QT/plugins/"
 [[ -d "$PACKAGING_QT/plugins/imageformats" ]] && find "$PACKAGING_QT/plugins/imageformats" -name 'kimg_*.so' -delete
 [[ -d "$PACKAGING_QT/plugins/sqldrivers" ]] && find "$PACKAGING_QT/plugins/sqldrivers" -name '*.so' ! -name 'libqsqlite.so' -delete
-[[ -d "$PACKAGING_QT/plugins/position" ]] && find "$PACKAGING_QT/plugins/position" -name '*.so' -delete
 REAL_QMAKE=$(command -v "$QMAKE")
 export REAL_QMAKE
 export PACKAGING_QT_PLUGINS="$PACKAGING_QT/plugins"
