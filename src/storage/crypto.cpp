@@ -3,6 +3,7 @@
 #include <QFile>
 #include <QSaveFile>
 #include <QtEndian>
+#include <algorithm>
 #include <cstring>
 #include <sodium.h>
 
@@ -167,3 +168,111 @@ QByteArray VaultCipher::decodeRecoveryKey(const QString &text) {
     }
     return out.size() == crypto_aead_xchacha20poly1305_ietf_KEYBYTES ? out : QByteArray();
 }
+
+namespace BlobCrypto {
+
+qint64 sealedSize(qint64 plainSize, qint64 chunkSize) {
+    if (plainSize < 0 || chunkSize <= 0) return -1;
+    if (plainSize == 0) return kOverhead;
+    const qint64 chunks = (plainSize + chunkSize - 1) / chunkSize;
+    return plainSize + chunks * kOverhead;
+}
+
+qint64 plainSize(qint64 sealedSize, qint64 chunkSize) {
+    if (sealedSize < kOverhead || chunkSize <= 0) return -1;
+    const qint64 sc = chunkSize + kOverhead;
+    const qint64 full = sealedSize / sc;
+    const qint64 rem = sealedSize % sc;
+    if (rem == 0) return full * chunkSize;
+    if (rem < kOverhead) return -1;
+    return full * chunkSize + (rem - kOverhead);
+}
+
+QByteArray blobAd(const QString &blobId, quint64 index, bool isFinal) {
+    return QStringLiteral("ivy:blob:v1|%1|%2|%3").arg(blobId).arg(index).arg(isFinal ? 1 : 0).toUtf8();
+}
+
+bool encryptBlob(const QByteArray &key, const QString &blobId, const QByteArray &plaintext,
+                 QByteArray *out, qint64 chunkSize) {
+    if (!out || chunkSize <= 0 || key.size() != crypto_aead_xchacha20poly1305_ietf_KEYBYTES) return false;
+    if (!ensureSodium()) return false;
+
+    const qint64 expected = sealedSize(plaintext.size(), chunkSize);
+    if (expected < 0) return false;
+
+    out->clear();
+    out->reserve(qsizetype(expected));
+
+    static const unsigned char kEmpty = 0;
+    qsizetype pos = 0;
+    quint64 index = 0;
+    do {
+        const qsizetype n = std::min<qsizetype>(qsizetype(chunkSize), plaintext.size() - pos);
+        const bool isFinal = (pos + n >= plaintext.size());
+        const QByteArray ad = blobAd(blobId, index, isFinal);
+        QByteArray chunk(qsizetype(kNonceSize) + n + qsizetype(kTagSize), Qt::Uninitialized);
+        auto *nonce = reinterpret_cast<unsigned char *>(chunk.data());
+        randombytes_buf(nonce, crypto_aead_xchacha20poly1305_ietf_NPUBBYTES);
+        unsigned long long clen = 0;
+        const auto *plainPtr = n > 0 ? reinterpret_cast<const unsigned char *>(plaintext.constData() + pos) : &kEmpty;
+        if (crypto_aead_xchacha20poly1305_ietf_encrypt(
+                nonce + kNonceSize, &clen, plainPtr, static_cast<unsigned long long>(n),
+                reinterpret_cast<const unsigned char *>(ad.constData()), static_cast<unsigned long long>(ad.size()),
+                nullptr, nonce, reinterpret_cast<const unsigned char *>(key.constData())) != 0) {
+            out->clear();
+            return false;
+        }
+        chunk.resize(qsizetype(kNonceSize) + qsizetype(clen));
+        out->append(chunk);
+        pos += n;
+        ++index;
+    } while (pos < plaintext.size());
+
+    return true;
+}
+
+bool decryptBlob(const QByteArray &key, const QString &blobId, const QByteArray &ciphertext,
+                 QByteArray *out, qint64 chunkSize) {
+    if (!out || chunkSize <= 0 || key.size() != crypto_aead_xchacha20poly1305_ietf_KEYBYTES) return false;
+    if (!ensureSodium()) return false;
+
+    const qint64 expected = plainSize(ciphertext.size(), chunkSize);
+    if (expected < 0) return false;
+
+    out->clear();
+    out->reserve(qsizetype(expected));
+
+    const qsizetype sealedChunk = qsizetype(chunkSize + kOverhead);
+    qsizetype pos = 0;
+    quint64 index = 0;
+    while (pos < ciphertext.size()) {
+        const qsizetype n = std::min(sealedChunk, ciphertext.size() - pos);
+        if (n < kOverhead) {
+            out->clear();
+            return false;
+        }
+        const bool isFinal = (pos + n == ciphertext.size());
+        const QByteArray ad = blobAd(blobId, index, isFinal);
+        const auto *nonce = reinterpret_cast<const unsigned char *>(ciphertext.constData() + pos);
+        const qsizetype plainCap = n - qsizetype(kOverhead);
+        QByteArray plainChunk(plainCap, Qt::Uninitialized);
+        unsigned char dummy = 0;
+        auto *dst = plainCap > 0 ? reinterpret_cast<unsigned char *>(plainChunk.data()) : &dummy;
+        unsigned long long plen = 0;
+        if (crypto_aead_xchacha20poly1305_ietf_decrypt(
+                dst, &plen, nullptr, nonce + kNonceSize, static_cast<unsigned long long>(n - kNonceSize),
+                reinterpret_cast<const unsigned char *>(ad.constData()), static_cast<unsigned long long>(ad.size()),
+                nonce, reinterpret_cast<const unsigned char *>(key.constData())) != 0) {
+            out->clear();
+            return false;
+        }
+        plainChunk.resize(qsizetype(plen));
+        out->append(plainChunk);
+        pos += n;
+        ++index;
+    }
+
+    return true;
+}
+
+} // namespace BlobCrypto
