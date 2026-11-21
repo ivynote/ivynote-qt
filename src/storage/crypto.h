@@ -36,3 +36,23 @@ public:
 private:
     QByteArray m_key;
 };
+
+// Server-compatible chunked XChaCha20-Poly1305 blob encryption/decryption
+// (matching ivynote/server/internal/crypto/blob.go) for direct S3/CDN
+// encrypted attachment transfer.
+namespace BlobCrypto {
+
+constexpr qint64 kChunkSize = 1 << 20;
+constexpr qint64 kNonceSize = 24;
+constexpr qint64 kTagSize = 16;
+constexpr qint64 kOverhead = kNonceSize + kTagSize;
+
+qint64 sealedSize(qint64 plainSize, qint64 chunkSize = kChunkSize);
+qint64 plainSize(qint64 sealedSize, qint64 chunkSize = kChunkSize); // -1 if invalid
+QByteArray blobAd(const QString &blobId, quint64 index, bool isFinal);
+bool encryptBlob(const QByteArray &key, const QString &blobId, const QByteArray &plaintext,
+                 QByteArray *out, qint64 chunkSize = kChunkSize);
+bool decryptBlob(const QByteArray &key, const QString &blobId, const QByteArray &ciphertext,
+                 QByteArray *out, qint64 chunkSize = kChunkSize);
+
+} // namespace BlobCrypto

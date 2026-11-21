@@ -236,6 +236,34 @@ private slots:
         QVERIFY(!c.readFile(dir.filePath("f"), "files/f", &out));
     }
 
+    void blobCryptoRoundTrip() {
+        const QByteArray key = VaultCipher::generateKey();
+        QByteArray sealed, plain;
+
+        // Empty file still produces one final chunk (40 bytes).
+        QVERIFY(BlobCrypto::encryptBlob(key, QStringLiteral("att00001"), QByteArray(), &sealed));
+        QCOMPARE(sealed.size(), BlobCrypto::kOverhead);
+        QCOMPARE(BlobCrypto::sealedSize(0), qint64(sealed.size()));
+        QCOMPARE(BlobCrypto::plainSize(sealed.size()), qint64(0));
+        QVERIFY(BlobCrypto::decryptBlob(key, QStringLiteral("att00001"), sealed, &plain));
+        QVERIFY(plain.isEmpty());
+
+        // Multi-chunk roundtrip with small chunkSize (64 bytes).
+        QByteArray data(220, Qt::Uninitialized);
+        for (int i = 0; i < data.size(); ++i) data[i] = char((i * 13 + 7) & 0xff);
+        QVERIFY(BlobCrypto::encryptBlob(key, QStringLiteral("att00002"), data, &sealed, 64));
+        QCOMPARE(qint64(sealed.size()), BlobCrypto::sealedSize(data.size(), 64));
+        QCOMPARE(BlobCrypto::plainSize(sealed.size(), 64), qint64(data.size()));
+        QVERIFY(BlobCrypto::decryptBlob(key, QStringLiteral("att00002"), sealed, &plain, 64));
+        QCOMPARE(plain, data);
+
+        // Wrong blobId or tampered tag fails authentication.
+        QVERIFY(!BlobCrypto::decryptBlob(key, QStringLiteral("wrong-id"), sealed, &plain, 64));
+        QByteArray tampered = sealed;
+        tampered[tampered.size() - 1] = char(tampered.back() ^ 0x01);
+        QVERIFY(!BlobCrypto::decryptBlob(key, QStringLiteral("att00002"), tampered, &plain, 64));
+    }
+
     void storeWrongKey() {
         QTemporaryDir dir;
         const QString path = dir.filePath("v.db");
