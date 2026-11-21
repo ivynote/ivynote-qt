@@ -135,12 +135,13 @@ struct PullResponse {
     static PullResponse fromJson(const QJsonObject &o);
 };
 
-// A file inserted while offline, waiting to be uploaded. Its content lives
-// in the vault's uploads directory.
+// A file staged locally in the attachment library, waiting to be uploaded
+// in the background. Its content lives in the vault's uploads directory.
 struct PendingUpload {
     QString id; // local-xxxx
     QString name;
     QString mime;
+    QString sha256;
     qint64 createdAt = 0;
     QString failed; // refused by the server this run
 

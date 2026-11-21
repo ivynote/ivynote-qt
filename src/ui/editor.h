@@ -44,6 +44,12 @@ public:
     void setWikiTitles(const QStringList &titles);
     void refreshAttachment(const QString &id);
     void insertBlockText(const QString &markdown); // on its own line at the cursor
+    // Inserts attachment Markdown at the latest cursor (or end if untouched),
+    // leaving cursor on the line after the attachment without forcing focus.
+    void insertAttachmentMarkdown(const QString &markdown);
+    // Replaces `ivy://res/<localId>` with `ivy://res/<remoteId>` in place while
+    // keeping cursor, selection, scroll position and focus untouched.
+    bool replaceResourceId(const QString &localId, const QString &remoteId);
     void scrollToLine(int line);
     void showInsertMenu();
     void openDuePicker();
@@ -145,4 +151,5 @@ private:
     int m_maxColumn = 680;
     int m_px = 16;
     int m_lastLine = -1;
+    bool m_userPlacedCursor = false;
 };

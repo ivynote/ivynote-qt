@@ -235,8 +235,11 @@ private slots:
         QTRY_VERIFY_WITH_TIMEOUT(f1.ok, 10000);
         a.engine->addFile("same bytes", "b.txt", "text/plain", [&](AddedFile f) { f2 = f; });
         QTRY_VERIFY_WITH_TIMEOUT(f2.ok, 10000);
-        QVERIFY(!f1.local);
+        QVERIFY(f1.local);
         QCOMPARE(f1.id, f2.id);
+        QVERIFY(a.sync());
+        QVERIFY(a.engine->uploads().isEmpty());
+        QCOMPARE(a.engine->attachments().size(), 1);
     }
 
     void liveEvents() {

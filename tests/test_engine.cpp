@@ -325,18 +325,77 @@ private slots:
 
     void offlineUploadIsReplayed() {
         Rig rig;
+        rig.files->setCachePolicy(true, true, VaultFiles::kDefaultMaxCacheBytes);
         rig.transport.offline = true;
         const Note n = rig.engine->createNote({.body = ""});
         AddedFile added;
         rig.engine->addFile("PNGDATA", "pic.png", "image/png", [&](AddedFile f) { added = f; });
         QTRY_VERIFY(added.ok);
         QVERIFY(added.local);
+        QVERIFY(added.id.startsWith(QStringLiteral("local-")));
         rig.engine->updateNote(n.id, {.body = QStringLiteral("![pic](ivy://res/%1)").arg(added.id)});
+        QSignalSpy normalized(rig.engine.get(), &SyncEngine::resourceNormalized);
         rig.transport.offline = false;
         QVERIFY(rig.syncAndWait());
         QCOMPARE(rig.engine->notes().value(n.id).body, QStringLiteral("![pic](ivy://res/att0000000000001)"));
         QVERIFY(rig.engine->uploads().isEmpty());
         QVERIFY(rig.files->hasFile("att0000000000001"));
+        QCOMPARE(normalized.size(), 1);
+        QCOMPARE(normalized[0][0].toString(), added.id);
+        QCOMPARE(normalized[0][1].toString(), QStringLiteral("att0000000000001"));
+        // Alias resolves old local- id directly from promoted cache without re-download.
+        QByteArray cached;
+        QVERIFY(rig.files->readFile(added.id, &cached));
+        QCOMPARE(cached, QByteArray("PNGDATA"));
+    }
+
+    void localFirstInsertStagesWithoutWaitingAndDeduplicates() {
+        Rig rig;
+        rig.files->setCachePolicy(true, true, VaultFiles::kDefaultMaxCacheBytes);
+        AddedFile f1, f2;
+        rig.engine->addFile("SAMEBYTES", "first.png", "image/png", [&](AddedFile f) { f1 = f; });
+        QTRY_VERIFY(f1.ok);
+        QVERIFY(f1.local);
+        QCOMPARE(rig.engine->uploads().size(), 1);
+        // Same bytes added again while pending reuse the pending local id.
+        rig.engine->addFile("SAMEBYTES", "second.png", "image/png", [&](AddedFile f) { f2 = f; });
+        QTRY_VERIFY(f2.ok);
+        QCOMPARE(f2.id, f1.id);
+        QCOMPARE(rig.engine->uploads().size(), 1);
+    }
+
+    void attachmentCacheEvictsColdestAndKeepsPendingUploads() {
+        QTemporaryDir dir;
+        qint64 clock = 1000000;
+        VaultFiles files(dir.path(), VaultCipher());
+        files.setClock([&] { return clock; });
+        files.setCachePolicy(true, true, 250);
+
+        QVERIFY(files.putFile("att0000000000001", QByteArray(100, 'a')));
+        clock += 1000;
+        QVERIFY(files.putFile("att0000000000002", QByteArray(100, 'b')));
+        QCOMPARE(files.cacheEntryCount(), 2);
+
+        // Touch #1 repeatedly so it becomes hotter than #2.
+        QByteArray tmp;
+        clock += 1000;
+        QVERIFY(files.readFile("att0000000000001", &tmp));
+        clock += 1000;
+        QVERIFY(files.readFile("att0000000000001", &tmp));
+
+        // Adding #3 pushes over 250B; coldest (#2) is evicted.
+        clock += 1000;
+        QVERIFY(files.putFile("att0000000000003", QByteArray(100, 'c')));
+        QVERIFY(files.hasFile("att0000000000001"));
+        QVERIFY(!files.hasFile("att0000000000002"));
+        QVERIFY(files.hasFile("att0000000000003"));
+
+        // Stage a pending upload and disable local-first: synced cache clears, upload stays.
+        QVERIFY(files.putUpload("local-pending001", QByteArray("upload-bytes")));
+        files.setCachePolicy(true, false, 250);
+        QCOMPARE(files.cacheEntryCount(), 0);
+        QVERIFY(!files.hasFile("att0000000000001"));
+        QVERIFY(files.hasUpload("local-pending001"));
     }
 
     void localOnlyVault() {

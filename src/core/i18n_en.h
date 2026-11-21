@@ -645,6 +645,15 @@ inline constexpr Pair kEnglish[] = {
     {"无法保存笔记库密钥。", "Cannot store the vault key."},
     {"无法写入笔记库信息文件：%1", "Cannot write vault metadata file: %1"},
     {"所选文件夹不是有效的 Ivynote 笔记库（未找到有效的 vault.db）。", "The selected folder is not a valid Ivynote vault (no valid vault.db found)."},
+    // Attachment cache management
+    {"本地优先缓存", "Local-first cache"},
+    {"缓存上限", "Cache limit"},
+    {"不限制", "Unlimited"},
+    {"当前占用", "Current usage"},
+    {"清理附件缓存", "Clear attachment cache"},
+    {"附件缓存已清理", "Attachment cache cleared"},
+    {"优先从本地附件库读取并缓存已同步附件，达到上限时按访问频率与时间自动清理最冷的文件；待上传文件不会被清理。",
+     "Read attachments from the local store first and keep synced files cached up to the limit. Coldest files are evicted automatically; pending uploads are never evicted."},
 };
 
 } // namespace i18n

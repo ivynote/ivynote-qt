@@ -55,6 +55,8 @@ int Prefs::editorMode() const { return std::clamp(QSettings().value(QStringLiter
 bool Prefs::reduceMotion() const { return QSettings().value(QStringLiteral("ui/reduceMotion"), false).toBool(); }
 QString Prefs::defaultNoteFolder() const { return QSettings().value(QStringLiteral("ui/defaultNoteFolder"), QString()).toString(); }
 QString Prefs::defaultNoteTitle() const { return QSettings().value(QStringLiteral("ui/defaultNoteTitle"), QString()).toString(); }
+bool Prefs::attachmentCacheLocalFirst() const { return QSettings().value(QStringLiteral("cache/attachmentLocalFirst"), true).toBool(); }
+qint64 Prefs::attachmentCacheMaxBytes() const { return std::max<qint64>(0, QSettings().value(QStringLiteral("cache/attachmentMaxBytes"), VaultFiles::kDefaultMaxCacheBytes).toLongLong()); }
 
 void Prefs::setTheme(int v) { QSettings().setValue(QStringLiteral("ui/theme"), v); emit changed(); }
 void Prefs::setLang(int v) { QSettings().setValue(QStringLiteral("ui/lang"), v); emit changed(); }
@@ -63,6 +65,8 @@ void Prefs::setEditorMode(int v) { QSettings().setValue(QStringLiteral("ui/edito
 void Prefs::setReduceMotion(bool v) { QSettings().setValue(QStringLiteral("ui/reduceMotion"), v); emit changed(); }
 void Prefs::setDefaultNoteFolder(const QString &v) { QSettings().setValue(QStringLiteral("ui/defaultNoteFolder"), v); emit changed(); }
 void Prefs::setDefaultNoteTitle(const QString &v) { QSettings().setValue(QStringLiteral("ui/defaultNoteTitle"), v); emit changed(); }
+void Prefs::setAttachmentCacheLocalFirst(bool v) { QSettings().setValue(QStringLiteral("cache/attachmentLocalFirst"), v); emit changed(); }
+void Prefs::setAttachmentCacheMaxBytes(qint64 v) { QSettings().setValue(QStringLiteral("cache/attachmentMaxBytes"), std::max<qint64>(0, v)); emit changed(); }
 
 namespace {
 
@@ -354,23 +358,92 @@ QWidget *SettingsDialog::vaultTab() {
     if (secrets::insecure())
         addFieldRow(QString(), note(T("⚠ 系统钥匙串不可用，令牌和密钥保存在仅当前用户可读的文件中。"), formBox));
 
-    if (info.isRemote()) {
-        auto *cache = new QWidget(formBox);
-        auto *cacheRow = new QHBoxLayout(cache);
-        cacheRow->setContentsMargins(0, 0, 0, 0);
-        auto *size = new QLabel(fmt::bytes(m_session->files()->cacheBytes()), cache);
-        auto *clear = new QPushButton(T("清除"), cache);
-        connect(clear, &QPushButton::clicked, this, [this, size] {
-            if (!m_session) return;
-            m_session->files()->clearCache();
-            size->setText(fmt::bytes(m_session->files()->cacheBytes()));
-        });
-        cacheRow->addWidget(size);
-        cacheRow->addWidget(clear);
-        cacheRow->addStretch(1);
-        addFieldRow(T("附件缓存"), cache);
-    }
     col->addWidget(formBox);
+
+    if (info.isRemote()) {
+        auto *cacheBox = new QGroupBox(T("附件缓存"), w);
+        cacheBox->setObjectName(QStringLiteral("attachmentCacheGroup"));
+        auto *cacheCol = new QVBoxLayout(cacheBox);
+        cacheCol->setSpacing(8);
+        Prefs *p = Prefs::instance();
+
+        auto *localFirstCheck = new QCheckBox(T("本地优先缓存"), cacheBox);
+        localFirstCheck->setObjectName(QStringLiteral("attachmentCacheLocalFirstCheck"));
+        localFirstCheck->setChecked(p->attachmentCacheLocalFirst());
+        cacheCol->addWidget(localFirstCheck);
+
+        auto *cacheForm = new QFormLayout;
+        cacheForm->setVerticalSpacing(8);
+        auto *limitBox = new QComboBox(cacheBox);
+        limitBox->setObjectName(QStringLiteral("attachmentCacheLimitBox"));
+        const QList<QPair<QString, qint64>> limitPresets{
+            {QStringLiteral("100 MB"), 100LL * 1024 * 1024},
+            {QStringLiteral("250 MB"), 250LL * 1024 * 1024},
+            {QStringLiteral("500 MB"), 500LL * 1024 * 1024},
+            {QStringLiteral("1 GB"), 1024LL * 1024 * 1024},
+            {QStringLiteral("2 GB"), 2LL * 1024 * 1024 * 1024},
+            {QStringLiteral("5 GB"), 5LL * 1024 * 1024 * 1024},
+            {T("不限制"), 0},
+        };
+        for (const auto &[label, bytes] : limitPresets) limitBox->addItem(label, bytes);
+        const qint64 curLimit = p->attachmentCacheMaxBytes();
+        int curIdx = limitBox->findData(curLimit);
+        if (curIdx < 0) {
+            limitBox->addItem(fmt::bytes(curLimit), curLimit);
+            curIdx = limitBox->count() - 1;
+        }
+        limitBox->setCurrentIndex(curIdx);
+        limitBox->setEnabled(p->attachmentCacheLocalFirst());
+        cacheForm->addRow(T("缓存上限"), limitBox);
+
+        auto *usageRow = new QWidget(cacheBox);
+        auto *usageLayout = new QHBoxLayout(usageRow);
+        usageLayout->setContentsMargins(0, 0, 0, 0);
+        auto *usageLbl = new QLabel(usageRow);
+        auto *clearBtn = new QPushButton(T("清理附件缓存"), usageRow);
+        auto refreshUsage = [this, usageLbl, clearBtn] {
+            if (!m_session || !m_session->files()) return;
+            const qint64 bytes = m_session->files()->cacheBytes();
+            const int files = m_session->files()->cacheEntryCount();
+            const int pending = int(m_session->engine() ? m_session->engine()->uploads().size() : 0);
+            QString text = (i18n::isZh() ? QStringLiteral("%1 · %2 个文件") : QStringLiteral("%1 · %2 files"))
+                               .arg(fmt::bytes(bytes))
+                               .arg(files);
+            if (pending > 0) {
+                text += QStringLiteral("（") +
+                        (i18n::isZh() ? QStringLiteral("另有 %1 个待上传").arg(pending) : QStringLiteral("%1 pending upload").arg(pending)) +
+                        QStringLiteral("）");
+            }
+            usageLbl->setText(text);
+            clearBtn->setEnabled(bytes > 0 || files > 0);
+        };
+        refreshUsage();
+        connect(localFirstCheck, &QCheckBox::toggled, this, [this, p, limitBox, refreshUsage](bool on) {
+            p->setAttachmentCacheLocalFirst(on);
+            limitBox->setEnabled(on);
+            if (m_session) m_session->applyCachePolicy(on, p->attachmentCacheMaxBytes());
+            refreshUsage();
+        });
+        connect(limitBox, &QComboBox::currentIndexChanged, this, [this, p, limitBox, refreshUsage](int idx) {
+            const qint64 limit = limitBox->itemData(idx).toLongLong();
+            p->setAttachmentCacheMaxBytes(limit);
+            if (m_session) m_session->applyCachePolicy(p->attachmentCacheLocalFirst(), limit);
+            refreshUsage();
+        });
+        connect(clearBtn, &QPushButton::clicked, this, [this, refreshUsage] {
+            if (!m_session || !m_session->files()) return;
+            m_session->files()->clearCache();
+            refreshUsage();
+            Toaster::show(T("附件缓存已清理"));
+        });
+        usageLayout->addWidget(usageLbl);
+        usageLayout->addWidget(clearBtn);
+        usageLayout->addStretch(1);
+        cacheForm->addRow(T("当前占用"), usageRow);
+        cacheCol->addLayout(cacheForm);
+        cacheCol->addWidget(note(T("优先从本地附件库读取并缓存已同步附件，达到上限时按访问频率与时间自动清理最冷的文件；待上传文件不会被清理。"), cacheBox));
+        col->addWidget(cacheBox);
+    }
 
     {
         auto *bak = new QGroupBox(T("本地自动备份"), w);

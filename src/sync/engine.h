@@ -139,6 +139,7 @@ signals:
     void structureChanged();                  // immediately: tree-affecting change
     void stateChanged();
     void remoteBody(const QString &noteId, const QString &body);
+    void resourceNormalized(const QString &localId, const QString &remoteId);
     void conflict(const QString &noteId, const QString &copyId);
     void rejected(const QString &type, const QString &id, const QString &error);
     void uploadFailed(const QString &name, const QString &error);
@@ -159,7 +160,7 @@ private:
     void runOnce();
     void finishRound(const TransportError &err);
     void flushUploads(Done done);
-    void flushNextUpload(QStringList queue, Done done);
+    void flushNextUpload(Done done);
     void push(Done done);
     void pushNext(QStringList keys, int index, Done done);
     void sendBatch(QList<OutboxEntry> batch, Done done);

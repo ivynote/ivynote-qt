@@ -316,6 +316,7 @@ void MarkdownEditor::setMarkdown(const QString &text) {
     QTextCursor c(document());
     c.movePosition(QTextCursor::Start);
     setTextCursor(c);
+    m_userPlacedCursor = false;
     m_lastLine = -1;
     updateActive();
 }
@@ -738,7 +739,7 @@ void MarkdownEditor::paintRendered(QTextBlock first) {
                 p.drawImage(area, img);
                 p.restore();
             } else {
-                p.setPen(Qt::NoPen);
+                p.setPen(QPen(k.line, 1.0));
                 p.setBrush(k.sunken);
                 p.drawPath(clip);
                 p.setPen(k.faint);
@@ -1081,6 +1082,7 @@ void MarkdownEditor::openDuePickerForBlock(const QTextBlock &block) {
 }
 
 void MarkdownEditor::mousePressEvent(QMouseEvent *e) {
+    m_userPlacedCursor = true;
     if (m_popup->isVisible()) hideInlinePopup(false);
     if (e->button() == Qt::LeftButton && !isReadOnly() && mode() == MarkdownHighlighter::Live) {
         int row, column;
@@ -1466,6 +1468,7 @@ bool MarkdownEditor::continueList() {
 }
 
 void MarkdownEditor::keyPressEvent(QKeyEvent *e) {
+    m_userPlacedCursor = true;
     if (e->matches(QKeySequence::Undo)) return undo();
     if (e->matches(QKeySequence::Redo)) return redo();
     if (m_popup->isVisible()) {
@@ -1882,8 +1885,90 @@ void MarkdownEditor::insertBlockText(const QString &markdown) {
     }
     c.insertText(markdown);
     c.endEditBlock();
+    m_userPlacedCursor = true;
     setTextCursor(c);
     ensureCursorVisible();
+}
+
+void MarkdownEditor::insertAttachmentMarkdown(const QString &markdown) {
+    QTextCursor c = textCursor();
+    // If the user has not placed a cursor in this non-empty unfocused note yet,
+    // append at the end instead of inserting at position 0.
+    if (!m_userPlacedCursor && !hasFocus() && !document()->isEmpty()) {
+        c.movePosition(QTextCursor::End);
+    }
+    c.beginEditBlock();
+    if (c.hasSelection()) c.removeSelectedText();
+    if (!c.block().text().isEmpty()) {
+        if (c.positionInBlock() > 0) c.movePosition(QTextCursor::EndOfBlock);
+        c.insertBlock();
+    }
+    c.insertText(markdown);
+    // Move cursor to the line after the inserted attachment so live preview
+    // renders the image instead of exposing raw Markdown syntax.
+    if (c.block().next().isValid()) {
+        c.movePosition(QTextCursor::NextBlock);
+        c.movePosition(QTextCursor::StartOfBlock);
+    } else {
+        c.insertBlock();
+    }
+    c.endEditBlock();
+    m_userPlacedCursor = true;
+    setTextCursor(c);
+    ensureCursorVisible();
+}
+
+bool MarkdownEditor::replaceResourceId(const QString &localId, const QString &remoteId) {
+    const QString from = QStringLiteral("ivy://res/") + localId;
+    const QString to = QStringLiteral("ivy://res/") + remoteId;
+    const QString cur = toPlainText();
+    if (!cur.contains(from)) return false;
+
+    const int vScroll = verticalScrollBar()->value();
+    const QTextCursor keep = textCursor();
+    int anchor = keep.anchor();
+    int pos = keep.position();
+    const int delta = int(to.size() - from.size());
+
+    // Find all occurrences before mutating so we can shift cursor accurately.
+    QList<int> positions;
+    qsizetype idx = cur.indexOf(from);
+    while (idx >= 0) {
+        positions << int(idx);
+        idx = cur.indexOf(from, idx + from.size());
+    }
+    auto shiftPos = [&](int p) {
+        int out = p;
+        for (int start : positions) {
+            const int end = start + int(from.size());
+            if (p >= end) out += delta;
+            else if (p > start) out = start + int(to.size());
+        }
+        return out;
+    };
+    const int newAnchor = shiftPos(anchor);
+    const int newPos = shiftPos(pos);
+
+    m_loading = true;
+    QTextCursor c(document());
+    c.beginEditBlock();
+    // Apply back-to-front so earlier offsets stay valid.
+    for (int i = int(positions.size()) - 1; i >= 0; --i) {
+        c.setPosition(positions[i]);
+        c.setPosition(positions[i] + int(from.size()), QTextCursor::KeepAnchor);
+        c.insertText(to);
+    }
+    c.endEditBlock();
+    m_loading = false;
+
+    const int maxLen = int(toPlainText().size());
+    QTextCursor restored(document());
+    restored.setPosition(std::clamp(newAnchor, 0, maxLen));
+    restored.setPosition(std::clamp(newPos, 0, maxLen), QTextCursor::KeepAnchor);
+    setTextCursor(restored);
+    verticalScrollBar()->setValue(vScroll);
+    refreshAttachment(remoteId);
+    return true;
 }
 
 // --- paste and drop ---
@@ -1927,6 +2012,7 @@ void MarkdownEditor::dragEnterEvent(QDragEnterEvent *e) {
 
 void MarkdownEditor::dragMoveEvent(QDragMoveEvent *e) {
     if (e->mimeData()->hasUrls() && !isReadOnly()) {
+        m_userPlacedCursor = true;
         setTextCursor(cursorForPosition(e->position().toPoint()));
         e->acceptProposedAction();
     } else {

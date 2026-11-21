@@ -219,29 +219,33 @@ void SyncEngine::finishRound(const TransportError &err) {
 // --- uploads ---
 
 void SyncEngine::flushUploads(Done done) {
-    QStringList queue;
-    for (const auto &u : std::as_const(m_uploads))
-        if (u.failed.isEmpty()) queue << u.id;
-    std::sort(queue.begin(), queue.end(), [this](const QString &a, const QString &b) {
-        return m_uploads.value(a).createdAt < m_uploads.value(b).createdAt;
-    });
-    flushNextUpload(queue, std::move(done));
+    flushNextUpload(std::move(done));
 }
 
-void SyncEngine::flushNextUpload(QStringList queue, Done done) {
-    if (queue.isEmpty()) return done(TransportError::success());
-    const QString localId = queue.takeFirst();
-    if (!m_uploads.contains(localId)) return flushNextUpload(queue, std::move(done));
+void SyncEngine::flushNextUpload(Done done) {
+    if (m_stopped) return done(TransportError::success());
+    // Pick the oldest pending non-failed upload dynamically so files added
+    // while an earlier upload is in flight are also processed cleanly.
+    QString localId;
+    qint64 oldest = 0;
+    for (const auto &u : std::as_const(m_uploads)) {
+        if (!u.failed.isEmpty()) continue;
+        if (localId.isEmpty() || u.createdAt < oldest || (u.createdAt == oldest && u.id < localId)) {
+            localId = u.id;
+            oldest = u.createdAt;
+        }
+    }
+    if (localId.isEmpty()) return done(TransportError::success());
     const PendingUpload up = m_uploads.value(localId);
     QByteArray data;
     if (!m_files->readUpload(localId, &data)) {
         // The file is gone from disk; nothing will ever upload it.
         m_uploads[localId].failed = QStringLiteral("missing file");
         emit uploadFailed(up.name, QStringLiteral("missing file"));
-        return flushNextUpload(queue, std::move(done));
+        return flushNextUpload(std::move(done));
     }
     QPointer<SyncEngine> self(this);
-    m_transport->upload(data, up.name, up.mime, [self, localId, data, queue, done](TransportError e, Attachment att) {
+    m_transport->upload(data, up.name, up.mime, [self, localId, data, done](TransportError e, Attachment att) {
         if (!self) return;
         if (!e.ok) {
             if (!refused(e)) return done(e);
@@ -251,12 +255,14 @@ void SyncEngine::flushNextUpload(QStringList queue, Done done) {
                 it->failed = e.message;
                 emit self->uploadFailed(it->name, e.message);
             }
-            return self->flushNextUpload(queue, done);
+            return self->flushNextUpload(done);
         }
         emit self->aboutToApplyRemote();
         self->m_attachments.insert(att.id, att);
         self->m_dirty.attachments.insert(att.id);
-        self->m_files->putFile(att.id, data);
+        // Promote local copy directly into the synced attachment cache (zero re-download)
+        // and register runtime alias so in-flight loads keep resolving cleanly.
+        self->m_files->promoteUpload(localId, att.id, data);
         const QString from = QStringLiteral("ivy://res/") + localId;
         const QString to = QStringLiteral("ivy://res/") + att.id;
         QStringList touched;
@@ -268,14 +274,18 @@ void SyncEngine::flushNextUpload(QStringList queue, Done done) {
             NotePatch p;
             p.body = body;
             self->updateNote(id, p);
-            emit self->remoteBody(id, body);
         }
+        // Notify open editors & sessions so links normalize in place without
+        // stealing focus, jumping the cursor, or clobbering concurrent typing.
+        emit self->resourceNormalized(localId, att.id);
+        // Commit normalized bodies before removing the staging upload.
+        self->persistNow();
         self->m_uploads.remove(localId);
         self->m_dirty.uploads.insert(localId);
         self->m_files->removeUpload(localId);
         self->persistNow();
         self->refreshState();
-        self->flushNextUpload(queue, done);
+        self->flushNextUpload(done);
     });
 }
 
@@ -928,45 +938,53 @@ void SyncEngine::addFile(const QByteArray &data, const QString &name, const QStr
         QTimer::singleShot(0, this, [a, done] { done({true, a.id, a.kind, a.name, false, {}}); });
         return;
     }
-    m_transport->upload(data, name, mime, [self, data, name, mime, kind, done](TransportError e, Attachment att) {
-        if (!self) return;
-        if (e.ok) {
-            self->m_attachments.insert(att.id, att);
-            self->m_dirty.attachments.insert(att.id);
-            self->m_files->putFile(att.id, data); // shows at once, and offline later
-            self->persistNow();
-            self->bump(true);
-            return done({true, att.id, att.kind, att.name, false, {}});
+    // Local-first staging for synced vaults: copy directly into the local
+    // attachment library so the image displays immediately with zero network wait,
+    // then upload gradually in the background and normalize links once synced.
+    const QString sha = QString::fromLatin1(QCryptographicHash::hash(data, QCryptographicHash::Sha256).toHex());
+    for (const auto &u : std::as_const(m_uploads)) {
+        if (u.failed.isEmpty() && !u.sha256.isEmpty() && u.sha256 == sha && m_files->hasUpload(u.id)) {
+            if (!m_stopped && !m_paused) scheduleSync(std::min(m_debounceMs, 250));
+            QTimer::singleShot(0, this, [id = u.id, kind, name, done] { done({true, id, kind, name, true, {}}); });
+            return;
         }
-        // Only a network failure is queued (guide 7.1); anything else is an answer.
-        if (!e.network() && !(e.status >= 500)) return done({false, {}, {}, {}, false, e.message});
-        PendingUpload up;
-        up.id = QStringLiteral("local-") + ids::newId();
-        up.name = name;
-        up.mime = mime;
-        up.createdAt = self->now();
-        if (!self->m_files->putUpload(up.id, data)) return done({false, {}, {}, {}, false, QStringLiteral("write failed")});
-        self->m_uploads.insert(up.id, up);
-        self->m_dirty.uploads.insert(up.id);
-        self->persistNow();
-        self->setStatus(SyncState::Offline);
-        self->scheduleSync(self->m_retryDelay);
-        done({true, up.id, kind, name, true, {}});
-    });
+    }
+    PendingUpload up;
+    up.id = QStringLiteral("local-") + ids::newId();
+    while (m_uploads.contains(up.id)) up.id = QStringLiteral("local-") + ids::newId();
+    up.name = name;
+    up.mime = mime;
+    up.sha256 = sha;
+    up.createdAt = now();
+    if (!m_files->putUpload(up.id, data)) {
+        QTimer::singleShot(0, this, [done] { done({false, {}, {}, {}, false, QStringLiteral("write failed")}); });
+        return;
+    }
+    m_uploads.insert(up.id, up);
+    m_dirty.uploads.insert(up.id);
+    persistNow();
+    refreshState();
+    if (!m_stopped && !m_paused) scheduleSync(std::min(m_debounceMs, 250));
+    QTimer::singleShot(0, this, [id = up.id, kind, name, done] { done({true, id, kind, name, true, {}}); });
 }
 
 QString SyncEngine::attachmentKind(const QString &id) const {
     if (id.startsWith(QLatin1String("local-"))) {
         auto u = m_uploads.constFind(id);
-        return u == m_uploads.constEnd() ? QString() : kindOfMime(u->mime);
+        if (u != m_uploads.constEnd()) return kindOfMime(u->mime);
     }
-    auto a = m_attachments.constFind(id);
+    const QString cid = m_files ? m_files->canonicalId(id) : id;
+    auto a = m_attachments.constFind(cid);
     return a == m_attachments.constEnd() ? QString() : a->kind;
 }
 
 QString SyncEngine::attachmentName(const QString &id) const {
-    if (id.startsWith(QLatin1String("local-"))) return m_uploads.value(id).name;
-    return m_attachments.value(id).name;
+    if (id.startsWith(QLatin1String("local-"))) {
+        auto u = m_uploads.constFind(id);
+        if (u != m_uploads.constEnd()) return u->name;
+    }
+    const QString cid = m_files ? m_files->canonicalId(id) : id;
+    return m_attachments.value(cid).name;
 }
 
 void SyncEngine::reset() {

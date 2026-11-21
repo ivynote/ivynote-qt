@@ -24,6 +24,8 @@ public:
     bool reduceMotion() const;
     QString defaultNoteFolder() const;
     QString defaultNoteTitle() const;
+    bool attachmentCacheLocalFirst() const;
+    qint64 attachmentCacheMaxBytes() const;
     void setTheme(int v);
     void setLang(int v);
     void setFontSize(int v);
@@ -31,6 +33,8 @@ public:
     void setReduceMotion(bool v);
     void setDefaultNoteFolder(const QString &v);
     void setDefaultNoteTitle(const QString &v);
+    void setAttachmentCacheLocalFirst(bool v);
+    void setAttachmentCacheMaxBytes(qint64 v);
 
 signals:
     void changed();
