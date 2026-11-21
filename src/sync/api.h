@@ -47,6 +47,10 @@ public:
     QNetworkReply *patchJson(const QString &path, const QJsonValue &body, const QObject *context, ApiCallback cb);
     QNetworkReply *del(const QString &path, const QObject *context, ApiCallback cb);
     QNetworkReply *upload(const QByteArray &data, const QString &name, const QString &mime, const QObject *context, ApiCallback cb);
+    QNetworkReply *uploadMultipart(const QByteArray &data, const QString &name, const QString &mime, const QObject *context, ApiCallback cb);
+    // Direct S3/CDN requests: never send Ivynote Authorization, device header, or cookies.
+    QNetworkReply *getDirect(const QUrl &url, const QObject *context, ApiCallback cb, int timeoutMs = 0);
+    QNetworkReply *putDirect(const QUrl &url, const QByteArray &data, const QObject *context, ApiCallback cb, int timeoutMs = 0);
 
     QNetworkRequest request(const QString &path, int timeoutMs) const;
     QNetworkAccessManager *nam() const { return m_nam; }

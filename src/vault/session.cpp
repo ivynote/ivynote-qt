@@ -1,5 +1,6 @@
 #include "vault/session.h"
 
+#include "storage/crypto.h"
 #include "storage/localstore.h"
 #include "storage/secrets.h"
 #include "sync/api.h"
@@ -312,14 +313,77 @@ void Session::fetch(const QString &id, bool thumb, std::function<void(bool, QByt
     waiters << std::move(done);
     if (waiters.size() > 1) return;
     QPointer<Session> self(this);
-    const QString path = QStringLiteral("/attachments/%1/raw%2").arg(QString::fromLatin1(QUrl::toPercentEncoding(id)), thumb ? QStringLiteral("?thumb=1") : QString());
-    m_api->get(path, this, [self, id, key, thumb](const ApiReply &r) {
+
+    auto finishFetch = [self, id, key, thumb](bool ok, const QByteArray &data) {
         if (!self) return;
         // Content is immutable per id, so the copy is kept for offline use.
-        if (r.ok) self->m_files->putFile(id, r.body, thumb);
-        const auto waiters = self->m_waiting.take(key);
-        for (const auto &w : waiters) w(r.ok, r.body);
-    }, 0);
+        if (ok) self->m_files->putFile(id, data, thumb);
+        const auto waiting = self->m_waiting.take(key);
+        for (const auto &w : waiting) w(ok, data);
+    };
+
+    const QString encodedId = QString::fromLatin1(QUrl::toPercentEncoding(id));
+    auto fallbackRaw = [self, encodedId, thumb, finishFetch] {
+        if (!self) return;
+        const QString rawPath = QStringLiteral("/attachments/%1/raw%2")
+                                    .arg(encodedId, thumb ? QStringLiteral("?thumb=1") : QString());
+        self->m_api->get(rawPath, self, [finishFetch](const ApiReply &r) { finishFetch(r.ok, r.body); }, 0);
+    };
+
+    const QString grantPath = QStringLiteral("/attachments/%1/grant?compat=1%2")
+                                  .arg(encodedId, thumb ? QStringLiteral("&thumb=1") : QString());
+    m_api->get(
+        grantPath,
+        this,
+        [self, finishFetch, fallbackRaw](const ApiReply &r) {
+            if (!self) return;
+            if (!r.ok) {
+                if (r.status == 401 || r.status == 403) {
+                    finishFetch(false, {});
+                    return;
+                }
+                fallbackRaw();
+                return;
+            }
+            const QJsonObject obj = r.json.toObject();
+            const bool direct = obj.value(QLatin1String("direct")).toBool();
+            const QString url = obj.value(QLatin1String("url")).toString();
+            const QString fallbackUrl = obj.value(QLatin1String("fallbackUrl")).toString();
+            const QString blobId = obj.value(QLatin1String("blobId")).toString();
+            const QByteArray bk = QByteArray::fromBase64(obj.value(QLatin1String("key")).toString().toLatin1());
+            const qint64 rawChunk = qint64(obj.value(QLatin1String("chunkSize")).toDouble(0));
+            const qint64 chunkSize = rawChunk > 0 ? rawChunk : BlobCrypto::kChunkSize;
+
+            if (!direct || url.isEmpty() || blobId.isEmpty() || bk.size() != 32 || chunkSize <= 0) {
+                fallbackRaw();
+                return;
+            }
+
+            auto tryDirect = [self, bk, blobId, chunkSize, finishFetch](const QString &targetUrl, std::function<void()> onFail) {
+                if (!self) return;
+                self->m_api->getDirect(
+                    QUrl(targetUrl),
+                    self,
+                    [bk, blobId, chunkSize, finishFetch, onFail = std::move(onFail)](const ApiReply &dr) {
+                        if (dr.ok) {
+                            QByteArray plain;
+                            if (BlobCrypto::decryptBlob(bk, blobId, dr.body, &plain, chunkSize)) {
+                                finishFetch(true, plain);
+                                return;
+                            }
+                        }
+                        onFail();
+                    },
+                    0);
+            };
+
+            if (!fallbackUrl.isEmpty() && fallbackUrl != url) {
+                tryDirect(url, [tryDirect, fallbackUrl, fallbackRaw] { tryDirect(fallbackUrl, fallbackRaw); });
+            } else {
+                tryDirect(url, fallbackRaw);
+            }
+        },
+        30000);
 }
 
 void Session::openAttachment(const QString &id) {
