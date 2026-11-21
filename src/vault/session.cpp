@@ -18,6 +18,7 @@
 #include <QJsonObject>
 #include <QNetworkInformation>
 #include <QPointer>
+#include <QSettings>
 #include <QStandardPaths>
 #include <QTemporaryDir>
 #include <QTimer>
@@ -55,6 +56,12 @@ Session *Session::open(const VaultInfo &info, const QByteArray &keyOverride, Ope
     if (!keyOverride.isEmpty()) secrets::set(info.vaultKeyKey(), keyOverride);
     if (!QFileInfo::exists(info.dir() + QStringLiteral("/vault.json"))) vaults::writeMetadata(info);
     s->m_files = new VaultFiles(info.dir(), cipher);
+    if (info.isRemote()) {
+        QSettings st;
+        const bool localFirst = st.value(QStringLiteral("cache/attachmentLocalFirst"), true).toBool();
+        const qint64 maxBytes = st.value(QStringLiteral("cache/attachmentMaxBytes"), VaultFiles::kDefaultMaxCacheBytes).toLongLong();
+        s->m_files->setCachePolicy(true, localFirst, maxBytes);
+    }
     const QString device = vaults::deviceId();
     if (info.isRemote()) {
         s->m_api = new ApiClient(QUrl(info.server), s);
@@ -67,6 +74,22 @@ Session *Session::open(const VaultInfo &info, const QByteArray &keyOverride, Ope
     }
     s->m_engine = new SyncEngine(s->m_store, s->m_files, s->m_transport, device, s);
     s->m_engine->init();
+
+    connect(s->m_engine, &SyncEngine::resourceNormalized, s, [s](const QString &localId, const QString &remoteId) {
+        // Transfer decoded in-memory images from `local-` to canonical `remoteId`
+        // so the editor never flashes or re-decodes when links normalize.
+        for (const QString &suffix : {QString(), QStringLiteral("#t")}) {
+            if (const QImage *img = s->m_images.object(localId + suffix)) {
+                const QImage copy = *img;
+                s->m_images.insert(remoteId + suffix, new QImage(copy), std::max<qsizetype>(1, copy.sizeInBytes() / 1024));
+            }
+        }
+        if (const QImage *full = s->m_images.object(localId); full && !s->m_images.contains(remoteId + QStringLiteral("#t"))) {
+            const QImage copy = *full;
+            s->m_images.insert(remoteId + QStringLiteral("#t"), new QImage(copy), std::max<qsizetype>(1, copy.sizeInBytes() / 1024));
+        }
+        emit s->attachmentReady(remoteId);
+    });
 
     if (s->m_events) {
         connect(s->m_events, &EventStream::seq, s->m_engine, &SyncEngine::onServerSeq);
@@ -92,6 +115,7 @@ void Session::close() {
     }
     delete m_transport;
     m_transport = nullptr;
+    if (m_files) m_files->flushIndex();
     delete m_files;
     m_files = nullptr;
     delete m_store;
@@ -217,6 +241,11 @@ void Session::signOut(std::function<void()> done) {
 
 // --- attachments ---
 
+void Session::applyCachePolicy(bool localFirst, qint64 maxBytes) {
+    if (!m_files || !isRemote()) return;
+    m_files->setCachePolicy(true, localFirst, maxBytes);
+}
+
 QImage Session::decode(const QByteArray &data) const {
     QBuffer buf;
     buf.setData(data);
@@ -231,12 +260,16 @@ QImage Session::decode(const QByteArray &data) const {
 }
 
 QImage Session::image(const QString &id, bool thumb) {
-    const QString key = id + (thumb ? QStringLiteral("#t") : QString());
+    const QString cid = m_files ? m_files->canonicalId(id) : id;
+    const QString key = cid + (thumb ? QStringLiteral("#t") : QString());
     if (QImage *img = m_images.object(key)) return *img;
+    if (thumb) {
+        if (QImage *full = m_images.object(cid)) return *full;
+    }
     if (m_loading.contains(key) || m_closed) return {};
     m_loading.insert(key);
     QPointer<Session> self(this);
-    auto store = [self, key, id](bool ok, const QByteArray &data) {
+    auto store = [self, key, id, cid](bool ok, const QByteArray &data) {
         if (!self) return;
         self->m_loading.remove(key);
         if (!ok) return;
@@ -244,15 +277,15 @@ QImage Session::image(const QString &id, bool thumb) {
         if (img.isNull()) return;
         self->m_images.insert(key, new QImage(img), std::max<qsizetype>(1, img.sizeInBytes() / 1024));
         emit self->attachmentReady(id);
+        if (cid != id) emit self->attachmentReady(cid);
     };
     QByteArray data;
-    if (id.startsWith(QLatin1String("local-"))) {
-        const bool ok = m_files->readUpload(id, &data);
-        QTimer::singleShot(0, this, [store, ok, data] { store(ok, data); });
-    } else if (m_files->readFile(id, &data, thumb) || (thumb && m_files->readFile(id, &data, false))) {
+    if (id.startsWith(QLatin1String("local-")) && m_files->readUpload(id, &data)) {
         QTimer::singleShot(0, this, [store, data] { store(true, data); });
-    } else if (isRemote()) {
-        fetch(id, thumb, store);
+    } else if (m_files->readFile(cid, &data, thumb) || (thumb && m_files->readFile(cid, &data, false))) {
+        QTimer::singleShot(0, this, [store, data] { store(true, data); });
+    } else if (isRemote() && !cid.startsWith(QLatin1String("local-"))) {
+        fetch(cid, thumb, store);
     } else {
         m_loading.remove(key);
     }
@@ -260,14 +293,14 @@ QImage Session::image(const QString &id, bool thumb) {
 }
 
 void Session::fileData(const QString &id, std::function<void(bool, QByteArray)> done) {
+    const QString cid = m_files ? m_files->canonicalId(id) : id;
     QByteArray data;
-    if (id.startsWith(QLatin1String("local-"))) {
-        const bool ok = m_files->readUpload(id, &data);
-        QTimer::singleShot(0, this, [done, ok, data] { done(ok, data); });
-    } else if (m_files->readFile(id, &data, false)) {
+    if (id.startsWith(QLatin1String("local-")) && m_files->readUpload(id, &data)) {
         QTimer::singleShot(0, this, [done, data] { done(true, data); });
-    } else if (isRemote()) {
-        fetch(id, false, std::move(done));
+    } else if (m_files->readFile(cid, &data, false)) {
+        QTimer::singleShot(0, this, [done, data] { done(true, data); });
+    } else if (isRemote() && !cid.startsWith(QLatin1String("local-"))) {
+        fetch(cid, false, std::move(done));
     } else {
         QTimer::singleShot(0, this, [done] { done(false, {}); });
     }

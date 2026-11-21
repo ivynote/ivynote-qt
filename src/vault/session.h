@@ -51,6 +51,7 @@ public:
     void close();
 
     // Attachments: null until loaded; attachmentReady follows.
+    void applyCachePolicy(bool localFirst, qint64 maxBytes);
     QImage image(const QString &id, bool thumb);
     void fileData(const QString &id, std::function<void(bool ok, QByteArray data)> done);
     void openAttachment(const QString &id); // with the system viewer

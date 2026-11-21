@@ -565,6 +565,22 @@ void NotePane::setSession(Session *session) {
     connect(m_engine, &SyncEngine::remoteBody, this, [this](const QString &id, const QString &body) {
         if (id == m_id && !m_bodyDirty) onRemoteBody(body);
     });
+    connect(m_engine, &SyncEngine::resourceNormalized, this, [this](const QString &localId, const QString &remoteId) {
+        if (m_id.isEmpty() || m_locked) return;
+        if (m_editor->replaceResourceId(localId, remoteId)) {
+            if (m_sealed) {
+                // Re-seal unlocked protected note so the normalized server ID is saved & synced.
+                const QString sealed = notelock::seal(m_editor->markdown(), m_lockKey);
+                if (!sealed.isEmpty()) {
+                    notelock::touch(m_lockKey);
+                    NotePatch p;
+                    p.body = sealed;
+                    m_engine->updateNote(m_id, p);
+                }
+            }
+            if (m_mode == EditorMode::Split || m_reading) m_previewTimer.start();
+        }
+    });
     connect(m_engine, &SyncEngine::dataChanged, this, [this] {
         refresh();
         m_indexTimer.start();
@@ -963,7 +979,12 @@ void NotePane::refresh() {
         m_tagsRow->add(add);
     }
     m_tagsRow->finish();
-    if (m_uploading > 0) {
+    int queuedUploads = 0;
+    if (m_engine && !m_engine->isLocalOnly() && m_engine->state().status != SyncState::Offline) {
+        for (const auto &u : m_engine->uploads())
+            if (u.failed.isEmpty()) queuedUploads++;
+    }
+    if (m_uploading > 0 || queuedUploads > 0) {
         m_savedLabel->setText(T("正在上传…"));
         m_savedLabel->show();
     } else {
@@ -1481,7 +1502,8 @@ void NotePane::attach(const QByteArray &data, const QString &name, const QString
         label.remove(u'[').remove(u']');
         const QString md = (f.kind == QLatin1String("file") ? QString() : QStringLiteral("!")) + QStringLiteral("[%1](ivy://res/%2)").arg(label, f.id);
         if (self->m_id == noteId && !self->m_locked) {
-            self->m_editor->insertBlockText(md);
+            self->m_editor->insertAttachmentMarkdown(md);
+            if (self->m_mode == EditorMode::Split || self->m_reading) self->m_previewTimer.start();
         } else if (const Note *n = self->m_engine->note(noteId); n && !notelock::isEncrypted(n->body)) {
             NotePatch p;
             p.body = n->body + (n->body.endsWith(u'\n') || n->body.isEmpty() ? QString() : QStringLiteral("\n")) + md + u'\n';
@@ -1491,8 +1513,9 @@ void NotePane::attach(const QByteArray &data, const QString &name, const QString
             Toaster::show(T("这篇笔记已加密，文件没有插入。请解锁后重新插入。"), true);
             return;
         }
-        if (f.local && self->m_sealed) Toaster::show(T("离线中：加密笔记里的文件只在本机可见，联网后请重新插入。"), true);
-        else if (f.local) Toaster::show(T("离线中，文件将在联网后上传"));
+        const bool isOffline = self->m_engine && self->m_engine->state().status == SyncState::Offline;
+        if (f.local && isOffline && self->m_sealed) Toaster::show(T("离线中：加密笔记里的文件只在本机可见，联网后请重新插入。"), true);
+        else if (f.local && isOffline) Toaster::show(T("离线中，文件将在联网后上传"));
     });
 }
 

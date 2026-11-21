@@ -43,6 +43,7 @@ const QStringList kVaultFiles{
     QStringLiteral("vault.db-shm"),
     QStringLiteral("vault.db-journal"),
     QStringLiteral("vault.json"),
+    QStringLiteral("cache-index.json"),
 };
 
 const QStringList kVaultSubdirs{

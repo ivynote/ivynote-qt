@@ -213,7 +213,9 @@ PullResponse PullResponse::fromJson(const QJsonObject &o) {
 }
 
 QJsonObject PendingUpload::toJson() const {
-    return QJsonObject{{"id", id}, {"name", name}, {"mime", mime}, {"createdAt", double(createdAt)}};
+    QJsonObject o{{"id", id}, {"name", name}, {"mime", mime}, {"createdAt", double(createdAt)}};
+    if (!sha256.isEmpty()) o.insert(QStringLiteral("sha256"), sha256);
+    return o;
 }
 
 PendingUpload PendingUpload::fromJson(const QJsonObject &o) {
@@ -221,6 +223,7 @@ PendingUpload PendingUpload::fromJson(const QJsonObject &o) {
     u.id = str(o, "id");
     u.name = str(o, "name");
     u.mime = str(o, "mime");
+    u.sha256 = str(o, "sha256");
     u.createdAt = num(o, "createdAt");
     return u;
 }
