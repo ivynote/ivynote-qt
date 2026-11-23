@@ -1312,15 +1312,6 @@ void MarkdownEditor::insertElement(const QString &id) {
         ensureCursorVisible();
         return;
     }
-    if (id == QLatin1String("mermaid")) {
-        insertBlockText(QStringLiteral("```mermaid\nflowchart TD\n    A[Start] --> B[End]\n```\n"));
-        QTextCursor c = textCursor();
-        c.movePosition(QTextCursor::PreviousBlock);
-        c.movePosition(QTextCursor::PreviousBlock);
-        c.movePosition(QTextCursor::EndOfBlock);
-        setTextCursor(c);
-        return;
-    }
     if (id == QLatin1String("link") || id == QLatin1String("image")) {
         bool ok = false;
         const QString url = QInputDialog::getText(this, id == QLatin1String("image") ? T("网络图片") : T("网页链接"), T("网址"), QLineEdit::Normal, QStringLiteral("https://"), &ok).trimmed();

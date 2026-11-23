@@ -281,7 +281,6 @@ inline constexpr Pair kEnglish[] = {
     {"我的笔记", "My Notes"},
     {"导航栏", "Navigation dock"},
     {"日程", "Agenda"},
-    {"查看 Mermaid 图", "View Mermaid diagram"},
     {"没有待办日程", "No scheduled tasks"},
     {"插入定时任务", "Insert scheduled task"},
     {"导入 Joplin Markdown 文件夹…", "Import Joplin Markdown folder…"},

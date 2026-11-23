@@ -54,7 +54,7 @@ Linux 与 Windows 的原生客户端，基于 Qt 6 Widgets。本地优先：打�
 - 导入 Markdown 文件/文件夹（YAML 头、子文件夹成笔记本、本地图片自动上传、笔记间链接重连）；导出为 Markdown 文件夹（含附件与相对链接）。
 - 浅色/深色/跟随系统，字号 13–22，中文/English，减少动态效果；字号和编辑模式与网页版跨设备同步。
 
-未做（按指南属 P1/P2，可后补）：AI 问答、关系图、API 令牌与备份配置（设置中引导到网页版）、视频/音频内嵌播放（目前用系统播放器打开）。
+未做（按指南属 P1/P2，可后补）：AI 问答、关系图、Mermaid 图表渲染、API 令牌与备份配置（设置中引导到网页版）、视频/音频内嵌播放（目前用系统播放器打开）。
 
 ## 安装
 
@@ -69,15 +69,15 @@ Linux 与 Windows 的原生客户端，基于 Qt 6 Widgets。本地优先：打�
 
 ## 构建
 
-依赖：Qt ≥ 6.8（Core、Gui、Widgets、Network、Sql、Svg、Concurrent、WebEngineWidgets，测试另需 Test）、[QtKeychain](https://github.com/frankosterfeld/qtkeychain)（Qt 6 版）、libsodium、md4c、CMake ≥ 3.21。
+依赖：Qt ≥ 6.8（Core、Gui、Widgets、Network、Sql、Svg、Concurrent，测试另需 Test）、[QtKeychain](https://github.com/frankosterfeld/qtkeychain)（Qt 6 版）、libsodium、md4c、CMake ≥ 3.21。
 
 ### Linux
 
 ```bash
 # Arch
-sudo pacman -S qt6-base qt6-svg qt6-webengine qtkeychain-qt6 libsodium md4c cmake ninja
+sudo pacman -S qt6-base qt6-svg qtkeychain-qt6 libsodium md4c cmake ninja
 # Debian/Ubuntu
-sudo apt install qt6-base-dev qt6-svg-dev qt6-webengine-dev qtkeychain-qt6-dev libsodium-dev libmd4c-dev libmd4c-html0-dev cmake ninja-build
+sudo apt install qt6-base-dev qt6-svg-dev qtkeychain-qt6-dev libsodium-dev libmd4c-dev libmd4c-html0-dev cmake ninja-build
 ```
 
 ```bash
@@ -97,7 +97,7 @@ make install PREFIX=$HOME/.local
 ### Windows（MSVC + vcpkg）
 
 ```powershell
-vcpkg install qtbase qtsvg qtwebengine qtkeychain-qt6 libsodium md4c --triplet x64-windows
+vcpkg install qtbase qtsvg qtkeychain-qt6 libsodium md4c --triplet x64-windows
 cmake -S . -B build -G Ninja -DCMAKE_BUILD_TYPE=Release -DCMAKE_TOOLCHAIN_FILE=$env:VCPKG_ROOT/scripts/buildsystems/vcpkg.cmake
 cmake --build build
 windeployqt build\ivynote.exe

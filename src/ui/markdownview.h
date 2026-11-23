@@ -41,7 +41,6 @@ private:
     int m_maxColumn = 0;
     bool m_hasMarkdown = false;
     QString m_markdown, m_title;
-    QStringList m_diagrams;
     RenderOptions m_options;
     QTimer m_resizeTimer;
     QHash<QString, QUrl> m_waiting; // remote images shown as placeholders

@@ -361,12 +361,11 @@ private slots:
     }
 
     void slashItemsMatchChineseEnglishAndPinyin() {
-        QCOMPARE(insertitems::all().size(), 24);
-        QCOMPARE(insertitems::match(QString()).size(), 24);
+        QCOMPARE(insertitems::all().size(), 23);
+        QCOMPARE(insertitems::match(QString()).size(), 23);
         QCOMPARE(insertitems::match(QStringLiteral("表格")).first().id, QStringLiteral("table"));
         QCOMPARE(insertitems::match(QStringLiteral("biaoge")).first().id, QStringLiteral("table"));
         QCOMPARE(insertitems::match(QStringLiteral("bg")).first().id, QStringLiteral("table"));
-        QCOMPARE(insertitems::match(QStringLiteral("mermaid")).first().id, QStringLiteral("mermaid"));
         QCOMPARE(insertitems::match(QStringLiteral("h2")).first().id, QStringLiteral("h2"));
         QCOMPARE(insertitems::match(QStringLiteral("daiban")).first().id, QStringLiteral("todo"));
         QVERIFY(insertitems::match(QStringLiteral("zzzznonexistent")).isEmpty());
