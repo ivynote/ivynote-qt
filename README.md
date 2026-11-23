@@ -1,6 +1,6 @@
 # 常青笔记 Ivynote · Qt 桌面客户端
 
-Linux 与 Windows 的原生客户端，基于 Qt 6 Widgets。本地优先：打开即可写，断网照常用；接入自托管的 Ivynote 服务器后在后台可靠同步。
+Linux、Windows 与 macOS 的原生客户端，基于 Qt 6 Widgets。本地优先：打开即可写，断网照常用；接入自托管的 Ivynote 服务器后在后台可靠同步。
 
 协议与行为依据 `ivynote/docs/client-development-guide.md`，与服务端代码对照实现，并用真实服务端做了集成测试。
 
@@ -60,6 +60,7 @@ Linux 与 Windows 的原生客户端，基于 Qt 6 Widgets。本地优先：打�
 
 在 [Releases](https://github.com/ivynote/ivynote-qt/releases) 下载最新版本：
 
+- **macOS 12+（Apple Silicon & Intel）**：`Ivynote-x.y.z-macos-universal.dmg`，打开镜像将 `Ivynote.app` 拖入「应用程序」文件夹。未配置签名公证证书的构建如首次打开提示“已损坏”或无法验证开发者，可运行 `xattr -cr /Applications/Ivynote.app` 后打开。
 - **Windows 10/11**：`Ivynote-x.y.z-windows-x64-setup.exe`，双击安装（默认装到当前用户，不需要管理员；向导里可选“为所有用户安装”）。升级时直接安装新版本，数据不受影响。不想安装可以用 `…-portable.zip`，解压后运行 `ivynote.exe`。安装包暂未签名，SmartScreen 提示时点“更多信息 → 仍要运行”。
 - **Linux x86_64**：`Ivynote-x.y.z-x86_64.AppImage`，加执行权限后双击或在终端运行：
   ```bash
@@ -94,6 +95,17 @@ make install PREFIX=$HOME/.local
 
 直接打开项目根目录的 `CMakeLists.txt`（Qt Creator：文件 → 打开文件或项目），选 `CMakePresets.json` 里的 Debug 或 Release 预设即可构建、调试、运行测试。VS Code 装 CMake Tools 扩展后同样识别这些预设；构建会生成 `compile_commands.json` 供 clangd 使用。
 
+### macOS（Homebrew + CMake）
+
+```bash
+brew install qt@6 qtkeychain libsodium md4c pkgconf cmake ninja
+export CMAKE_PREFIX_PATH="$(brew --prefix qt@6):$(brew --prefix qtkeychain)"
+export PKG_CONFIG_PATH="$(brew --prefix libsodium)/lib/pkgconfig:$(brew --prefix md4c)/lib/pkgconfig"
+make run        # Release 构建并启动 Ivynote.app
+make test       # 构建并运行全部测试
+make dmg        # 构建、测试并打包 dist/Ivynote-*.dmg
+```
+
 ### Windows（MSVC + vcpkg）
 
 ```powershell
@@ -115,7 +127,7 @@ git push origin v0.2.0
 ```
 
 1. 版本号取自标签（`v0.2.0` → 应用内显示 `0.2.0`），不需要先改 `CMakeLists.txt`；带后缀的标签（`v0.2.0-beta.1`）发布为预发行版。
-2. 并行构建：Linux（Ubuntu 22.04 + Qt 6.8 LTS，跑全部测试，打 AppImage）、Windows（MSVC + Qt 6.8 LTS，打安装包和便携 zip）。两边都会实际启动打包好的程序截一张图，确认依赖齐全。
+2. 并行构建：Linux（Ubuntu 22.04 + Qt 6.8 LTS，跑全部测试，打 AppImage）、Windows（MSVC + Qt 6.8 LTS，打安装包和便携 zip）、macOS（macOS 15 + Qt 6.8 LTS，跑全部测试，打 Universal arm64+x86_64 DMG，支持可选 Developer ID 签名与 Apple 公证）。三端都会实际启动打包好的程序截一张图，确认依赖齐全。
 3. 全部成功后才创建 Release：上传安装包、AppImage（及 `.zsync` 增量更新文件）、`SHA256SUMS.txt`；说明 = `packaging/release-notes.md` 的下载说明 + 自上个标签以来合并的 PR 列表（按 `.github/release.yml` 里的标签分组）。任何一步失败都不会产生半成品 Release；修好后删掉标签重推，或直接重跑失败的 workflow。
 
 改动打包相关文件的 PR 会跑同样的构建（不发布），产物在 workflow 的 Artifacts 里，可下载试装。

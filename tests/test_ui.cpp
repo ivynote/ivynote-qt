@@ -30,10 +30,12 @@
 #include <QStackedWidget>
 #include "ui/backupdialog.h"
 #include "ui/diffdialog.h"
+#include "ui/mainwindow.h"
 #include "ui/panels.h"
 #include "ui/render.h"
 #include "ui/taskpicker.h"
 #include "ui/theme.h"
+#include "ui/widgets.h"
 #include "vault/backup.h"
 #include "vault/session.h"
 
@@ -44,6 +46,8 @@
 #include <QElapsedTimer>
 #include <QGroupBox>
 #include <QListWidget>
+#include <QMenu>
+#include <QMenuBar>
 #include <QMimeData>
 #include <QScrollBar>
 #include <QSettings>
@@ -1306,6 +1310,39 @@ private slots:
 
         pane.setSession(nullptr);
         session->close();
+    }
+
+    void shortcutHintsAndMenuRoles() {
+        QVERIFY(shortcutText(QString()).isEmpty());
+#ifdef Q_OS_MACOS
+        QCOMPARE(replaceShortcutPortable(), QStringLiteral("Ctrl+Alt+F"));
+        QVERIFY(!shortcutText(QStringLiteral("Ctrl+K")).contains(QStringLiteral("Ctrl+")));
+#else
+        QCOMPARE(replaceShortcutPortable(), QStringLiteral("Ctrl+H"));
+        QCOMPARE(shortcutText(QStringLiteral("Ctrl+K")), QStringLiteral("Ctrl+K"));
+        QCOMPARE(shortcutText(QStringLiteral("Ctrl+Shift+D")), QStringLiteral("Ctrl+Shift+D"));
+#endif
+
+        MainWindow window;
+        bool hasPrefs = false;
+        bool hasAbout = false;
+        bool hasQuit = false;
+        for (QAction *menuAction : window.menuBar()->actions()) {
+#ifdef Q_OS_MACOS
+            QVERIFY(!menuAction->text().contains(u'&'));
+            QVERIFY(!menuAction->text().contains(QStringLiteral("(")));
+#endif
+            if (QMenu *menu = menuAction->menu()) {
+                for (QAction *a : menu->actions()) {
+                    if (a->menuRole() == QAction::PreferencesRole) hasPrefs = true;
+                    if (a->menuRole() == QAction::AboutRole) hasAbout = true;
+                    if (a->menuRole() == QAction::QuitRole) hasQuit = true;
+                }
+            }
+        }
+        QVERIFY(hasPrefs);
+        QVERIFY(hasAbout);
+        QVERIFY(hasQuit);
     }
 };
 

@@ -100,6 +100,7 @@ CommandPalette::CommandPalette(SyncEngine *engine, QList<PaletteCommand> command
     m_input->setPlaceholderText(T("搜索笔记，输入 > 执行命令"));
     m_input->setClearButtonEnabled(true);
     m_input->setMinimumHeight(40);
+    m_input->setAttribute(Qt::WA_MacShowFocusRect, false);
     QPalette ip = m_input->palette();
     ip.setColor(QPalette::Base, Theme::t().surface);
     m_input->setPalette(ip);

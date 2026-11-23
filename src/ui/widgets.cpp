@@ -5,6 +5,7 @@
 
 #include <QGraphicsOpacityEffect>
 #include <QKeyEvent>
+#include <QKeySequence>
 #include <QPainter>
 #include <QPainterPath>
 #include <QPointer>
@@ -331,8 +332,15 @@ public:
             const int key = k->key();
             const bool ctrl = mods == Qt::ControlModifier;
             const bool ctrlShift = mods == (Qt::ControlModifier | Qt::ShiftModifier);
+#ifdef Q_OS_MACOS
+            const bool ctrlAlt = mods == (Qt::ControlModifier | Qt::AltModifier);
+            if ((ctrl && (key == Qt::Key_F || key == Qt::Key_K || key == Qt::Key_N || key == Qt::Key_Backslash || key == Qt::Key_Comma || key == Qt::Key_R)) ||
+                (ctrlAlt && key == Qt::Key_F) ||
+                (ctrlShift && key == Qt::Key_P)) {
+#else
             if ((ctrl && (key == Qt::Key_H || key == Qt::Key_F || key == Qt::Key_K || key == Qt::Key_N || key == Qt::Key_Backslash || key == Qt::Key_Comma || key == Qt::Key_R)) ||
                 (ctrlShift && key == Qt::Key_P)) {
+#endif
                 e->ignore();
                 return true;
             }
@@ -342,6 +350,19 @@ public:
 };
 
 } // namespace
+
+QString shortcutText(const QString &portable) {
+    if (portable.isEmpty()) return {};
+    return QKeySequence(portable, QKeySequence::PortableText).toString(QKeySequence::NativeText);
+}
+
+QString replaceShortcutPortable() {
+#ifdef Q_OS_MACOS
+    return QStringLiteral("Ctrl+Alt+F");
+#else
+    return QStringLiteral("Ctrl+H");
+#endif
+}
 
 void passAppShortcuts(QWidget *w) { w->installEventFilter(new ShortcutPass(w)); }
 

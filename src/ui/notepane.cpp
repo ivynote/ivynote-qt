@@ -142,12 +142,12 @@ NotePane::NotePane(QWidget *parent) : QWidget(parent) {
     auto *top = new QHBoxLayout(m_topBar);
     top->setContentsMargins(0, 0, 0, 0);
     top->setSpacing(2);
-    m_insertButton = new IconButton(QStringLiteral("plus"), T("插入") + QStringLiteral(" (Ctrl+/)"), m_topBar);
+    m_insertButton = new IconButton(QStringLiteral("plus"), T("插入") + QStringLiteral(" (") + shortcutText(QStringLiteral("Ctrl+/")) + u')', m_topBar);
     m_insertButton->setObjectName(QStringLiteral("insertButton"));
     connect(m_insertButton, &QToolButton::clicked, this, [this] { m_editor->showInsertMenu(); });
     top->addWidget(m_insertButton);
 
-    m_dueButton = new IconButton(QStringLiteral("calendar"), T("设置日期与重复") + QStringLiteral(" (Ctrl+Shift+D)"), m_topBar);
+    m_dueButton = new IconButton(QStringLiteral("calendar"), T("设置日期与重复") + QStringLiteral(" (") + shortcutText(QStringLiteral("Ctrl+Shift+D")) + u')', m_topBar);
     m_dueButton->setObjectName(QStringLiteral("dueButton"));
     connect(m_dueButton, &QToolButton::clicked, this, [this] { m_editor->openDuePicker(); });
     top->addWidget(m_dueButton);
@@ -321,11 +321,11 @@ NotePane::NotePane(QWidget *parent) : QWidget(parent) {
     auto *findShortcut = new QShortcut(QKeySequence::Find, this);
     findShortcut->setContext(Qt::WidgetWithChildrenShortcut);
     connect(findShortcut, &QShortcut::activated, this, &NotePane::showFind);
-    auto *replaceShortcut = new QShortcut(QKeySequence(QStringLiteral("Ctrl+H")), this);
+    auto *replaceShortcut = new QShortcut(QKeySequence(replaceShortcutPortable(), QKeySequence::PortableText), this);
     replaceShortcut->setContext(Qt::WidgetWithChildrenShortcut);
     connect(replaceShortcut, &QShortcut::activated, this, &NotePane::showReplace);
     for (bool back : {false, true}) {
-        auto *shortcut = new QShortcut(QKeySequence(back ? QStringLiteral("Shift+F3") : QStringLiteral("F3")), this);
+        auto *shortcut = new QShortcut(back ? QKeySequence::FindPrevious : QKeySequence::FindNext, this);
         shortcut->setContext(Qt::WidgetWithChildrenShortcut);
         connect(shortcut, &QShortcut::activated, this, [this, back] { if (!m_findBar->isVisible()) showFind(); else findNext(back); });
     }

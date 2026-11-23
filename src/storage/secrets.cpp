@@ -17,6 +17,8 @@ const QString kService = QStringLiteral("Ivynote");
 bool g_fallbackOnly = false;
 bool g_insecure = false;
 
+bool useFallbackOnly() { return g_fallbackOnly || qEnvironmentVariableIsSet("IVY_SECRETS_IN_FILE"); }
+
 QString fallbackPath() {
     const QString dir = vaults::dataRoot();
     QDir().mkpath(dir);
@@ -50,7 +52,7 @@ QKeychain::Error run(Job &job) {
 } // namespace
 
 bool get(const QString &key, QByteArray *out) {
-    if (!g_fallbackOnly) {
+    if (!useFallbackOnly()) {
         QKeychain::ReadPasswordJob job(kService);
         job.setKey(key);
         const auto err = run(job);
@@ -67,7 +69,7 @@ bool get(const QString &key, QByteArray *out) {
 }
 
 bool set(const QString &key, const QByteArray &value) {
-    if (!g_fallbackOnly) {
+    if (!useFallbackOnly()) {
         QKeychain::WritePasswordJob job(kService);
         job.setKey(key);
         job.setBinaryData(value);
@@ -81,7 +83,7 @@ bool set(const QString &key, const QByteArray &value) {
             return true;
         }
     }
-    g_insecure = !g_fallbackOnly;
+    g_insecure = !useFallbackOnly();
     QJsonObject o = readFallback();
     o.insert(key, QString::fromLatin1(value.toBase64()));
     writeFallback(o);
@@ -89,7 +91,7 @@ bool set(const QString &key, const QByteArray &value) {
 }
 
 void remove(const QString &key) {
-    if (!g_fallbackOnly) {
+    if (!useFallbackOnly()) {
         QKeychain::DeletePasswordJob job(kService);
         job.setKey(key);
         run(job);
@@ -101,7 +103,7 @@ void remove(const QString &key) {
     }
 }
 
-bool insecure() { return g_insecure || (!g_fallbackOnly && !readFallback().isEmpty()); }
+bool insecure() { return g_insecure || (!useFallbackOnly() && !readFallback().isEmpty()); }
 
 void setFallbackOnly(bool on) { g_fallbackOnly = on; }
 
