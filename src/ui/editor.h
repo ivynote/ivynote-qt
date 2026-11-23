@@ -4,10 +4,12 @@
 
 #include "ui/highlighter.h"
 
+#include <QCache>
 #include <QHash>
 #include <QSet>
 #include <QImage>
 #include <QPixmap>
+#include <QTimer>
 #include <QVariantAnimation>
 #include <QTextBlockFormat>
 #include <QTextEdit>
@@ -43,6 +45,7 @@ public:
     QRect textColumn() const;
     void setWikiTitles(const QStringList &titles);
     void refreshAttachment(const QString &id);
+    void clearImageCache();
     void insertBlockText(const QString &markdown); // on its own line at the cursor
     // Inserts attachment Markdown at the latest cursor (or end if untouched),
     // leaving cursor on the line after the attachment without forcing focus.
@@ -65,6 +68,7 @@ public:
 
     // Wiring to the vault.
     std::function<QImage(const QString &id)> image;
+    std::function<QImage(const QString &id)> cachedImage; // non-triggering cache lookup; falls back to `image`
     std::function<QSize(const QString &id)> imageMeta;
     std::function<QString(const QString &id)> attachmentKind;
     std::function<bool(const QString &title)> wikiExists;
@@ -108,7 +112,12 @@ private:
     bool m_closingCell = false;
     bool m_cellSaveStarted = false;
     int m_cellSaveRevision = -1;
-    QImage imageFor(const QString &id) const; // attachment or remote URL
+    QImage imageFor(const QString &id) const; // attachment or remote URL (triggers async load)
+    QImage cachedImageFor(const QString &id) const; // memory-only lookup
+    QImage scaledImageFor(const QString &id, int maxWidth) const;
+    QPixmap roundedPixmapFor(const QString &id, const QSize &size, qreal dpr) const;
+    void preloadNearbyImages(const QTextBlock &firstVisible, const QRectF &visible) const;
+    void flushPendingAttachments();
     void updateActive();
     void applyLineHeight();
     void updateMargins();
@@ -152,4 +161,8 @@ private:
     int m_px = 16;
     int m_lastLine = -1;
     bool m_userPlacedCursor = false;
+    mutable QCache<QString, QPixmap> m_pixmapCache;
+    mutable QCache<QString, QImage> m_scaledImageCache;
+    QSet<QString> m_pendingAttachments;
+    QTimer m_refreshTimer;
 };

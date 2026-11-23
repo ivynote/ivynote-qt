@@ -79,6 +79,8 @@ private:
     QTextEdit *activeTextView() const;
     void refresh();          // meta, breadcrumb, banner from the engine
     void refreshIndex();     // titles for links and completion; backlinks
+    void refreshTitleIndex();
+    void refreshBacklinks();
     void refreshPreview();
     void refreshOutline();
     void findNext(bool backward = false);

@@ -28,8 +28,19 @@ public:
         qint64 heatScore() const;
     };
 
+    // Thread-safe snapshot for reading/decrypting cached files off the UI thread.
+    struct DiskSource {
+        QString root;
+        VaultCipher cipher;
+        bool allowCacheRead = true;
+    };
+
     VaultFiles(QString root, VaultCipher cipher);
     ~VaultFiles();
+
+    DiskSource diskSource() const { return {m_root, m_cipher, !m_managedCache || m_localFirst}; }
+    static bool readRaw(const DiskSource &src, const QString &dir, const QString &id, QByteArray *out);
+    void touchAccess(const QString &id, bool thumb);
 
     // Configures synced cache management (enabled for remote vaults, disabled for
     // local-only vaults where files are the source of truth and never evicted).

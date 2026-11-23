@@ -35,11 +35,35 @@ QTextCharFormat fontFormat(const QFont &f) {
 } // namespace
 
 namespace {
+QImage sunkenFillPlaceholder() {
+    static QColor cachedColor;
+    static QImage cached;
+    const QColor c = Theme::t().sunken;
+    if (cached.isNull() || cachedColor != c) {
+        cachedColor = c;
+        cached = QImage(16, 16, QImage::Format_ARGB32_Premultiplied);
+        cached.fill(c);
+    }
+    return cached;
+}
+
+QImage textPlaceholder(int width, bool failed) {
+    QImage image(std::min(320, std::max(64, width)), 120, QImage::Format_ARGB32_Premultiplied);
+    image.fill(Theme::t().sunken);
+    QPainter painter(&image);
+    painter.setPen(Theme::t().muted);
+    painter.setFont(Theme::uiFont(12));
+    painter.drawText(image.rect().adjusted(6, 6, -6, -6), Qt::AlignCenter | Qt::TextWordWrap,
+                     failed ? T("图片加载失败，右键可重试") : T("图片加载中…"));
+    return image;
+}
+
 // A read-only layout painted over an inactive source block. QTextDocument
 // handles inline image positioning/wrapping; the actual editor stays plain text.
 class ImageParagraphDocument : public QTextDocument {
 public:
-    std::function<QImage(const QString &)> loader;
+    std::function<QImage(const QString &, int)> loader;
+    QSet<QString> sizedPlaceholders;
     int imageWidth = 320;
 protected:
     QVariant loadResource(int type, const QUrl &url) override {
@@ -48,15 +72,11 @@ protected:
         if (RemoteImages::isRemote(url.toString())) key = url.toString();
         else if (url.scheme() == QLatin1String("ivy") && url.host() == QLatin1String("res")) key = url.path().mid(1);
         if (key.isEmpty()) return {};
-        QImage image = loader(key);
+        QImage image = loader(key, imageWidth);
         if (image.isNull()) {
-            image = QImage(std::min(320, imageWidth), 120, QImage::Format_ARGB32_Premultiplied);
-            image.fill(Theme::t().sunken);
-            QPainter painter(&image);
-            painter.setPen(Theme::t().muted);
-            painter.setFont(Theme::uiFont(12));
-            painter.drawText(image.rect().adjusted(6, 6, -6, -6), Qt::AlignCenter | Qt::TextWordWrap,
-                             RemoteImages::isRemote(key) && RemoteImages::instance()->failed(key) ? T("图片加载失败，右键可重试") : T("图片加载中…"));
+            const bool failed = RemoteImages::isRemote(key) && RemoteImages::instance()->failed(key);
+            if (!failed && sizedPlaceholders.contains(key)) return sunkenFillPlaceholder();
+            return textPlaceholder(imageWidth, failed);
         }
         if (image.width() > imageWidth) image = image.scaledToWidth(imageWidth, Qt::SmoothTransformation);
         return image;
@@ -76,26 +96,38 @@ qreal MarkdownHighlighter::advance(const QTextCharFormat &f, const QString &text
 QTextCharFormat MarkdownHighlighter::tallChar(qreal height, qreal lineFactor) const {
     // One invisible, nearly zero-width character sized so its line is
     // `height` tall: images, table rows and code padding use it.
-    const qreal ratio = QFontMetricsF(Theme::uiFont(100)).height() / 100.0;
+    if (m_tallRatio <= 0) m_tallRatio = QFontMetricsF(Theme::uiFont(100)).height() / 100.0;
     QTextCharFormat tall;
     tall.setForeground(Qt::transparent);
-    tall.setProperty(QTextFormat::FontPixelSize, std::max(1, int(std::round(height / (ratio * lineFactor)))));
+    tall.setProperty(QTextFormat::FontPixelSize, std::max(1, int(std::round(height / (m_tallRatio * lineFactor)))));
     tall.setFontLetterSpacingType(QFont::PercentageSpacing);
     tall.setFontLetterSpacing(1);
     return tall;
 }
 
+const QString &MarkdownHighlighter::referenceDefinitions() const {
+    const int rev = document()->revision();
+    if (m_refRevision != rev) {
+        m_refRevision = rev;
+        m_referenceDefinitions = md::imageDefinitions(document()->toPlainText());
+    }
+    return m_referenceDefinitions;
+}
+
 MarkdownHighlighter::MarkdownHighlighter(QTextDocument *doc) : QSyntaxHighlighter(doc) {
-    connect(Theme::instance(), &Theme::changed, this, &QSyntaxHighlighter::rehighlight);
+    connect(Theme::instance(), &Theme::changed, this, [this] {
+        m_tallRatio = 0;
+        rehighlight();
+    });
     m_referenceTimer.setSingleShot(true);
     m_referenceTimer.setInterval(120);
     connect(doc, &QTextDocument::contentsChange, this, [this](int, int removed, int added) {
         if (removed || added) m_referenceTimer.start();
     });
     connect(&m_referenceTimer, &QTimer::timeout, this, [this] {
-        const QString definitions = md::imageDefinitions(document()->toPlainText());
-        if (definitions == m_referenceDefinitions) return;
-        m_referenceDefinitions = definitions;
+        const QString definitions = referenceDefinitions();
+        if (definitions == m_lastRefDefinitions) return;
+        m_lastRefDefinitions = definitions;
         // A definition can change images in completely different blocks.
         rehighlight();
     });
@@ -214,7 +246,7 @@ void MarkdownHighlighter::highlightBlock(const QString &text) {
         return;
     }
 
-    const QString definitions = text.contains(QLatin1String("![")) && !text.contains(QLatin1String("](")) ? md::imageDefinitions(document()->toPlainText()) : QString();
+    const QString definitions = text.contains(QLatin1String("![")) && !text.contains(QLatin1String("](")) ? referenceDefinitions() : QString();
     // Resolve complete image syntax through md4c: empty alt, angle URLs,
     // balanced parentheses, titles, and self-labelled legacy image links.
     if (const md::ImageLink img = md::standaloneImage(text, definitions); !img.url.isEmpty()) {
@@ -250,9 +282,41 @@ void MarkdownHighlighter::highlightBlock(const QString &text) {
             doc->setDefaultStyleSheet(QStringLiteral("p{margin:0;color:%1;}a{color:%2;}code{background:%3;}").arg(k.ink.name(), k.ivy.name(), k.codeBg.name()));
             // Give paragraph images their own visual line; a full-width
             // photo must not leave one orphaned character beside it.
-            QString flow = html;
-            static const QRegularExpression imageTag(QStringLiteral(R"((<img [^>]*>))"));
-            flow.replace(imageTag, QStringLiteral("<br>\\1<br>"));
+            // Also record image keys and reserve exact sizes for unloaded placeholders.
+            static const QRegularExpression imageTag(QStringLiteral(R"RE((<img [^>]*src="([^"]*)"[^>]*>))RE"));
+            QString flow;
+            qsizetype last = 0;
+            for (auto it = imageTag.globalMatch(html); it.hasNext();) {
+                const auto m = it.next();
+                flow += html.mid(last, m.capturedStart() - last);
+                QString tag = m.captured(1);
+                QString src = m.captured(2);
+                src.replace(QLatin1String("&amp;"), QLatin1String("&")).replace(QLatin1String("&quot;"), QLatin1String("\""));
+                QString key;
+                const QUrl u(src);
+                if (RemoteImages::isRemote(src)) key = src;
+                else if (u.scheme() == QLatin1String("ivy") && u.host() == QLatin1String("res")) key = u.path().mid(1);
+                if (!key.isEmpty()) {
+                    info->imageIds.insert(key);
+                    const QImage cached = imageLoader ? imageLoader(key, doc->imageWidth) : QImage();
+                    if (cached.isNull()) {
+                        info->imageParagraphMissing = true;
+                        const bool failed = RemoteImages::isRemote(key) && RemoteImages::instance()->failed(key);
+                        if (!failed && imageSize) {
+                            QSize sz = imageSize(key);
+                            if (sz.isValid() && !sz.isEmpty()) {
+                                if (sz.width() > doc->imageWidth) sz = sz.scaled(doc->imageWidth, 100000, Qt::KeepAspectRatio);
+                                doc->sizedPlaceholders.insert(key);
+                                tag.chop(1);
+                                tag += QStringLiteral(" width=\"%1\" height=\"%2\">").arg(sz.width()).arg(sz.height());
+                            }
+                        }
+                    }
+                }
+                flow += QStringLiteral("<br>") + tag + QStringLiteral("<br>");
+                last = m.capturedEnd();
+            }
+            flow += html.mid(last);
             doc->setHtml(flow);
             doc->setTextWidth(doc->imageWidth);
             info->kind = BlockInfo::ImageParagraph;

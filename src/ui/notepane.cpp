@@ -558,6 +558,8 @@ void NotePane::setSession(Session *session) {
     m_session = session;
     m_engine = session ? session->engine() : nullptr;
     m_id.clear();
+    m_editor->clearImageCache();
+    m_preview->clearImageCache();
     if (!session) return setNote(QString());
     m_shareButton->setVisible(session->isRemote());
     connect(m_engine, &SyncEngine::aboutToApplyRemote, this, &NotePane::flush, Qt::DirectConnection);
@@ -587,13 +589,18 @@ void NotePane::setSession(Session *session) {
     connect(m_engine, &SyncEngine::stateChanged, this, &NotePane::refresh);
     connect(session, &Session::attachmentReady, this, [this](const QString &id) {
         m_editor->refreshAttachment(id);
-        if (m_mode == EditorMode::Split || m_reading) m_previewTimer.start();
+        if (m_mode == EditorMode::Split || m_reading) m_preview->refreshAttachment(id);
     });
     QPointer<Session> s(session);
     m_editor->image = [s](const QString &id) -> QImage {
         if (!s) return {};
         const Attachment a = s->engine()->attachments().value(id);
         return s->image(id, s->isRemote() && a.hasThumb);
+    };
+    m_editor->cachedImage = [s](const QString &id) -> QImage {
+        if (!s) return {};
+        const Attachment a = s->engine()->attachments().value(id);
+        return s->cachedImage(id, s->isRemote() && a.hasThumb);
     };
     m_editor->imageMeta = [s](const QString &id) -> QSize {
         if (!s) return {};
@@ -606,6 +613,13 @@ void NotePane::setSession(Session *session) {
     m_editor->attachmentKind = [s](const QString &id) { return s ? s->engine()->attachmentKind(id) : QString(); };
     m_editor->wikiExists = [this](const QString &t) { return !resolveTitle(t).isEmpty(); };
     m_preview->image = [s](const QString &id) { return s ? s->image(id, false) : QImage(); };
+    m_preview->cachedImage = [s](const QString &id) { return s ? s->cachedImage(id, false) : QImage(); };
+    m_preview->imageMeta = [s](const QString &id) -> QSize {
+        if (!s) return {};
+        const Attachment a = s->engine()->attachments().value(id);
+        if (a.width <= 0 || a.height <= 0) return {};
+        return QSize(a.width, a.height);
+    };
     refreshIndex();
     setNote(QString());
 }
@@ -627,7 +641,7 @@ void NotePane::setNote(const QString &id) {
     m_backlinks->hide();
     applyViewState();
     refresh();
-    refreshIndex();
+    refreshBacklinks();
     refreshOutline();
     if (m_mode == EditorMode::Split || m_reading) refreshPreview();
     if (has) {
@@ -994,6 +1008,11 @@ void NotePane::refresh() {
 QString NotePane::resolveTitle(const QString &title) const { return m_titleIndex.value(md::normalizeTitle(title)); }
 
 void NotePane::refreshIndex() {
+    refreshTitleIndex();
+    refreshBacklinks();
+}
+
+void NotePane::refreshTitleIndex() {
     if (!m_engine) return;
     // Titles: newest wins on duplicates; trash excluded.
     QHash<QString, QPair<QString, qint64>> best;
@@ -1003,15 +1022,17 @@ void NotePane::refreshIndex() {
         const QString key = md::normalizeTitle(n.title);
         auto it = best.find(key);
         if (it == best.end() || it->second < n.updatedAt) best[key] = {n.id, n.updatedAt};
-        if (n.id != m_id) titles << n.title;
+        titles << n.title;
     }
-    const bool changed = best.size() != m_titleIndex.size();
     m_titleIndex.clear();
     for (auto it = best.begin(); it != best.end(); ++it) m_titleIndex.insert(it.key(), it->first);
     titles.removeDuplicates();
     titles.sort(Qt::CaseInsensitive);
     m_editor->setWikiTitles(titles);
-    Q_UNUSED(changed);
+}
+
+void NotePane::refreshBacklinks() {
+    if (!m_engine) return;
     // Backlinks of the open note.
     m_backlinks->clear();
     const Note *cur = m_id.isEmpty() ? nullptr : m_engine->note(m_id);
@@ -1022,13 +1043,26 @@ void NotePane::refreshIndex() {
     }
     const QString key = md::normalizeTitle(cur->title);
     const bool isTarget = !key.isEmpty() && m_titleIndex.value(key) == cur->id;
+    static const QRegularExpression quickWiki(QStringLiteral(R"(\[\[([^\[\]\n]+?)\]\])"));
     QList<const Note *> linking;
     for (const auto &n : m_engine->notes()) {
         if (n.id == cur->id || n.trashed()) continue;
         bool hit = false;
-        if (isTarget && n.body.contains(QStringLiteral("[["))) {
-            for (const QString &t : md::wikiTargets(n.body))
-                if (t == key) hit = true;
+        if (isTarget && n.body.contains(QLatin1String("[["))) {
+            bool maybe = false;
+            for (auto it = quickWiki.globalMatch(n.body); it.hasNext();) {
+                if (md::normalizeTitle(md::parseWiki(it.next().captured(1)).target) == key) {
+                    maybe = true;
+                    break;
+                }
+            }
+            if (maybe) {
+                for (const QString &t : md::wikiTargets(n.body))
+                    if (t == key) {
+                        hit = true;
+                        break;
+                    }
+            }
         }
         if (!hit && n.body.contains(cur->id)) hit = md::noteRefs(n.body).contains(cur->id);
         if (hit) linking << &n;

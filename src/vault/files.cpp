@@ -42,6 +42,40 @@ QString VaultFiles::entryKey(const QString &id, bool thumb) {
     return (thumb ? QStringLiteral("thumbs/") : QStringLiteral("files/")) + id;
 }
 
+bool VaultFiles::readRaw(const DiskSource &src, const QString &dir, const QString &id, QByteArray *out) {
+    if (!ids::valid(id)) return false;
+    const QString p = src.root + u'/' + dir + u'/' + id;
+    return QFileInfo::exists(p) && src.cipher.readFile(p, dir + u'/' + id, out);
+}
+
+void VaultFiles::touchAccess(const QString &id, bool thumb) {
+    if (!m_managedCache) return;
+    const QString cid = canonicalId(id);
+    if (!m_indexLoaded) loadIndex();
+    const QString k = entryKey(cid, thumb);
+    const qint64 t = now();
+    auto it = m_entries.find(k);
+    if (it != m_entries.end()) {
+        it->lastAccessedAt = t;
+        it->accessCount++;
+        m_indexDirty = true;
+    } else {
+        const QString p = path(thumb ? QStringLiteral("thumbs") : QStringLiteral("files"), cid);
+        if (!p.isEmpty() && QFileInfo::exists(p)) {
+            CacheEntry e;
+            e.key = k;
+            e.id = cid;
+            e.thumb = thumb;
+            e.size = QFileInfo(p).size();
+            e.createdAt = t;
+            e.lastAccessedAt = t;
+            e.accessCount = 1;
+            m_entries.insert(k, e);
+            m_indexDirty = true;
+        }
+    }
+}
+
 void VaultFiles::setCachePolicy(bool managed, bool localFirst, qint64 maxBytes) {
     m_managedCache = managed;
     m_localFirst = localFirst;

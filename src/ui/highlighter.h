@@ -42,6 +42,8 @@ public:
     QList<LinkSpan> links;
     QList<TaskMarkerSpan> taskMarkers;
     QString imageId;
+    QSet<QString> imageIds;
+    bool imageParagraphMissing = false;
     QSharedPointer<QTextDocument> imageDocument;
     QSize imageSize; // reserved display size
 };
@@ -72,11 +74,13 @@ public:
     };
     TableGeometry tableGeometry(const QTextBlock &row) const;
     int columnWidth() const { return m_columnWidth; }
+    QSize displaySize(const QString &id) const;
     // Blocks whose kind or hanging indent changed since the last call.
     QList<int> takeChanged() { QList<int> l(m_changed.begin(), m_changed.end()); m_changed.clear(); return l; }
 
     std::function<bool(const QString &title)> wikiExists;
-    std::function<QImage(const QString &id)> imageLoader;
+    // Non-triggering cached image loader (already scaled to <= maxWidth).
+    std::function<QImage(const QString &id, int maxWidth)> imageLoader;
     std::function<QSize(const QString &id)> imageSize; // natural size or invalid
     std::function<QString(const QString &id)> attachmentKind;
 
@@ -89,10 +93,13 @@ private:
     QTextCharFormat tallChar(qreal height, qreal lineFactor = 1.75) const;
     bool tableBlock(const QString &text, BlockInfo *info, bool live, bool active, const QFont &mono);
     void inlineSpans(const QString &text, int from, BlockInfo *info, bool live, const QTextCharFormat &base);
-    QSize displaySize(const QString &id) const;
+    const QString &referenceDefinitions() const;
 
     QTimer m_referenceTimer;
-    QString m_referenceDefinitions;
+    mutable QString m_referenceDefinitions;
+    mutable int m_refRevision = -1;
+    QString m_lastRefDefinitions;
+    mutable qreal m_tallRatio = 0;
     Mode m_mode = Live;
     int m_px = 16;
     int m_first = -1, m_last = -1;

@@ -55,7 +55,17 @@ HistoryDialog::HistoryDialog(Session *session, const QString &noteId, QWidget *p
     m_mode->setDrawBase(false);
     rcol->addWidget(m_mode, 0, Qt::AlignLeft);
     m_view = new MarkdownView(right);
-    if (session) m_view->image = [s = QPointer<Session>(session)](const QString &id) { return s ? s->image(id, false) : QImage(); };
+    if (session) {
+        QPointer<Session> s(session);
+        m_view->image = [s](const QString &id) { return s ? s->image(id, false) : QImage(); };
+        m_view->cachedImage = [s](const QString &id) { return s ? s->cachedImage(id, false) : QImage(); };
+        m_view->imageMeta = [s](const QString &id) -> QSize {
+            if (!s) return {};
+            const Attachment a = s->engine()->attachments().value(id);
+            return a.width > 0 && a.height > 0 ? QSize(a.width, a.height) : QSize();
+        };
+        connect(session, &Session::attachmentReady, m_view, &MarkdownView::refreshAttachment);
+    }
     rcol->addWidget(m_view, 1);
     split->addWidget(m_list);
     split->addWidget(right);

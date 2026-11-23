@@ -3,10 +3,12 @@
 #include "ui/remoteimages.h"
 #include "ui/theme.h"
 #include "core/i18n.h"
+#include <QAbstractTextDocumentLayout>
 #include <QContextMenuEvent>
 #include <QApplication>
 #include <QClipboard>
 #include <QMimeData>
+#include <QRegularExpression>
 #include <QTextDocumentFragment>
 #include <QMenu>
 #include <QFontMetricsF>
@@ -22,6 +24,32 @@
 #include <QLocale>
 #include <cmath>
 
+namespace {
+QImage viewSunkenFill() {
+    static QColor cachedColor;
+    static QImage cached;
+    const QColor c = Theme::t().sunken;
+    if (cached.isNull() || cachedColor != c) {
+        cachedColor = c;
+        cached = QImage(16, 16, QImage::Format_ARGB32_Premultiplied);
+        cached.fill(c);
+    }
+    return cached;
+}
+
+QImage viewDefaultPlaceholder() {
+    static QColor cachedColor;
+    static QImage cached;
+    const QColor c = Theme::t().sunken;
+    if (cached.isNull() || cachedColor != c) {
+        cachedColor = c;
+        cached = QImage(320, 120, QImage::Format_ARGB32_Premultiplied);
+        cached.fill(c);
+    }
+    return cached;
+}
+} // namespace
+
 // --- MarkdownView ---
 
 MarkdownView::MarkdownView(QWidget *parent) : QTextBrowser(parent) {
@@ -31,11 +59,16 @@ MarkdownView::MarkdownView(QWidget *parent) : QTextBrowser(parent) {
     document()->setDocumentMargin(28);
     document()->setIndentWidth(24);
     setFont(Theme::uiFont(m_px));
+    m_scaledCache.setMaxCost(64 * 1024);
     m_resizeTimer.setSingleShot(true);
     m_resizeTimer.setInterval(80);
     connect(&m_resizeTimer, &QTimer::timeout, this, [this] {
         if (m_hasMarkdown) setMarkdown(m_markdown, m_options, m_title);
     });
+    m_refreshTimer.setSingleShot(true);
+    m_refreshTimer.setInterval(16);
+    connect(&m_refreshTimer, &QTimer::timeout, this, &MarkdownView::flushPendingAttachments);
+    connect(verticalScrollBar(), &QScrollBar::valueChanged, this, &MarkdownView::loadVisibleImages);
     restyle();
     connect(Theme::instance(), &Theme::changed, this, &MarkdownView::restyle);
     connect(RemoteImages::instance(), &RemoteImages::ready, this, [this](const QString &url) {
@@ -145,7 +178,38 @@ void MarkdownView::setMarkdown(const QString &markdown, RenderOptions opts, cons
     // The box images follow the theme; a new name per theme skips the cache.
     html.replace(QLatin1String("src=\"ivy-check:"), Theme::dark() ? QLatin1String("src=\"ivy-check:d") : QLatin1String("src=\"ivy-check:l"));
     const int scroll = verticalScrollBar()->value();
+    m_refreshTimer.stop();
+    m_pendingAttachments.clear();
     m_waiting.clear();
+    m_waitingAttachments.clear();
+    m_sizedPlaceholders.clear();
+    if (cachedImage && imageMeta && html.contains(QLatin1String("src=\"ivy://res/"))) {
+        static const QRegularExpression resImg(QStringLiteral(R"RE((<img src="ivy://res/([A-Za-z0-9_-]{8,64})"[^>]*>))RE"));
+        const int maxW = maxImageWidth();
+        QString out;
+        qsizetype last = 0;
+        for (auto it = resImg.globalMatch(html); it.hasNext();) {
+            const auto m = it.next();
+            out += html.mid(last, m.capturedStart() - last);
+            QString tag = m.captured(1);
+            const QString id = m.captured(2);
+            if (cachedImage(id).isNull()) {
+                QSize sz = imageMeta(id);
+                if (sz.isValid() && !sz.isEmpty()) {
+                    if (sz.width() > maxW) sz = sz.scaled(maxW, 100000, Qt::KeepAspectRatio);
+                    m_sizedPlaceholders.insert(id);
+                    tag.chop(1);
+                    tag += QStringLiteral(" width=\"%1\" height=\"%2\">").arg(sz.width()).arg(sz.height());
+                }
+            }
+            out += tag;
+            last = m.capturedEnd();
+        }
+        if (last > 0) {
+            out += html.mid(last);
+            html = std::move(out);
+        }
+    }
     setHtml(html);
     // Line height as on the web: 1.85 em for text, 1.7 for code, snug
     // headings. Qt scales the font's own height (tall for CJK fonts), so the
@@ -173,6 +237,99 @@ void MarkdownView::setMarkdown(const QString &markdown, RenderOptions opts, cons
     }
     cur.endEditBlock();
     verticalScrollBar()->setValue(scroll);
+    if (!m_waitingAttachments.isEmpty() || !m_waiting.isEmpty())
+        QTimer::singleShot(0, this, &MarkdownView::loadVisibleImages);
+}
+
+void MarkdownView::clearImageCache() {
+    m_scaledCache.clear();
+    m_pendingAttachments.clear();
+    m_refreshTimer.stop();
+}
+
+void MarkdownView::refreshAttachment(const QString &id) {
+    if (id.isEmpty() || !m_waitingAttachments.contains(id)) return;
+    m_pendingAttachments.insert(id);
+    if (!m_refreshTimer.isActive()) m_refreshTimer.start();
+}
+
+QImage MarkdownView::cachedImageFor(const QString &id) const {
+    if (cachedImage) return cachedImage(id);
+    return image ? image(id) : QImage();
+}
+
+QImage MarkdownView::scaledImageFor(const QString &id, int maxWidth) const {
+    const int targetW = std::max(1, maxWidth);
+    const QString key = id + u'@' + QString::number(targetW);
+    if (const QImage *cached = m_scaledCache.object(key)) return *cached;
+    QImage img = cachedImageFor(id);
+    if (img.isNull()) return {};
+    if (img.width() > targetW) img = img.scaledToWidth(targetW, Qt::SmoothTransformation);
+    m_scaledCache.insert(key, new QImage(img), std::max<qsizetype>(1, img.sizeInBytes() / 1024));
+    return img;
+}
+
+void MarkdownView::flushPendingAttachments() {
+    if (m_pendingAttachments.isEmpty()) return;
+    const QSet<QString> ids = std::move(m_pendingAttachments);
+    m_pendingAttachments.clear();
+    const int maxW = maxImageWidth();
+    bool updated = false;
+    bool needRelayout = false;
+    for (const QString &id : ids) {
+        const auto it = m_waitingAttachments.constFind(id);
+        if (it == m_waitingAttachments.constEnd()) continue;
+        const QImage img = scaledImageFor(id, maxW);
+        if (img.isNull()) continue;
+        document()->addResource(QTextDocument::ImageResource, *it, img);
+        m_waitingAttachments.remove(id);
+        if (!m_sizedPlaceholders.remove(id)) needRelayout = true;
+        updated = true;
+    }
+    if (needRelayout) document()->markContentsDirty(0, document()->characterCount());
+    else if (updated) viewport()->update();
+}
+
+void MarkdownView::loadVisibleImages() {
+    if (m_waitingAttachments.isEmpty() && m_waiting.isEmpty()) return;
+    QAbstractTextDocumentLayout *layout = document()->documentLayout();
+    const QPointF off(-horizontalScrollBar()->value(), -verticalScrollBar()->value());
+    const QRectF visible = QRectF(viewport()->rect()).translated(-off);
+    const qreal vh = std::max<qreal>(200.0, viewport()->height());
+    const qreal topBound = visible.top() - vh * 0.5;
+    const qreal bottomBound = visible.bottom() + vh;
+
+    QTextBlock first = cursorForPosition(QPoint(0, 0)).block();
+    while (first.isValid() && first.previous().isValid() && layout->blockBoundingRect(first).top() > topBound)
+        first = first.previous();
+
+    int budget = 12;
+    for (QTextBlock b = first; b.isValid() && budget > 0; b = b.next()) {
+        const QRectF br = layout->blockBoundingRect(b);
+        if (br.top() > bottomBound) break;
+        if (br.bottom() < topBound) continue;
+        for (auto it = b.begin(); !it.atEnd() && budget > 0; ++it) {
+            const QTextCharFormat cf = it.fragment().charFormat();
+            if (!cf.isImageFormat()) continue;
+            const QString name = cf.toImageFormat().name();
+            if (name.startsWith(QLatin1String("ivy://res/"))) {
+                const QString id = name.mid(10);
+                if (m_waitingAttachments.contains(id) && image) {
+                    const QImage img = image(id);
+                    if (!img.isNull()) refreshAttachment(id);
+                    --budget;
+                }
+            } else if (m_waiting.contains(name)) {
+                RemoteImages::instance()->image(name);
+                --budget;
+            }
+        }
+    }
+}
+
+void MarkdownView::paintEvent(QPaintEvent *event) {
+    loadVisibleImages();
+    QTextBrowser::paintEvent(event);
 }
 
 int MarkdownView::maxImageWidth() const {
@@ -261,19 +418,20 @@ QVariant MarkdownView::loadResource(int type, const QUrl &name) {
         return img;
     }
     if (name.scheme() == QLatin1String("ivy") && name.host() == QLatin1String("res")) {
-        QImage img = image ? image(name.path().mid(1)) : QImage();
-        if (img.isNull()) {
-            img = QImage(320, 120, QImage::Format_ARGB32_Premultiplied);
-            img.fill(Theme::t().sunken);
-        }
+        const QString id = name.path().mid(1);
         const int maxW = maxImageWidth();
-        if (img.width() > maxW) img = img.scaledToWidth(maxW, Qt::SmoothTransformation);
-        return img;
+        const QImage img = scaledImageFor(id, maxW);
+        if (!img.isNull()) return img;
+        m_waitingAttachments.insert(id, name);
+        if (m_sizedPlaceholders.contains(id)) return viewSunkenFill();
+        QImage ph = viewDefaultPlaceholder();
+        if (ph.width() > maxW) ph = ph.scaledToWidth(maxW, Qt::SmoothTransformation);
+        return ph;
     }
     if (name.scheme() == QLatin1String("https") || name.scheme() == QLatin1String("http")) {
         // Fetched in the background; a placeholder holds the place until then.
         const QString url = name.toString();
-        QImage img = RemoteImages::instance()->image(url);
+        QImage img = RemoteImages::instance()->cachedImage(url);
         if (img.isNull()) {
             m_waiting.insert(url, name);
             img = QImage(320, 120, QImage::Format_ARGB32_Premultiplied);

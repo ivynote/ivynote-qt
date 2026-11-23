@@ -9,7 +9,10 @@
 #include <QImage>
 #include <QObject>
 #include <QSet>
+#include <QThreadPool>
+#include <atomic>
 #include <functional>
+#include <memory>
 
 class ApiClient;
 class ApiTransport;
@@ -53,6 +56,8 @@ public:
     // Attachments: null until loaded; attachmentReady follows.
     void applyCachePolicy(bool localFirst, qint64 maxBytes);
     QImage image(const QString &id, bool thumb);
+    // Non-triggering memory cache lookup (no disk read, decryption, or network fetch).
+    QImage cachedImage(const QString &id, bool thumb) const;
     void fileData(const QString &id, std::function<void(bool ok, QByteArray data)> done);
     void openAttachment(const QString &id); // with the system viewer
     void saveAttachmentAs(const QString &id, QWidget *parent);
@@ -67,7 +72,7 @@ private:
     explicit Session(const VaultInfo &info, QObject *parent);
     void refreshMe();
     void fetch(const QString &id, bool thumb, std::function<void(bool, QByteArray)> done);
-    QImage decode(const QByteArray &data) const;
+    static QImage decode(const QByteArray &data, int maxSide);
 
     VaultInfo m_info;
     User m_user;
@@ -79,6 +84,9 @@ private:
     SyncEngine *m_engine = nullptr;
     QCache<QString, QImage> m_images;
     QSet<QString> m_loading;
+    QSet<QString> m_failedImages;
     QHash<QString, QList<std::function<void(bool, QByteArray)>>> m_waiting;
+    QThreadPool m_imagePool;
+    std::shared_ptr<std::atomic<bool>> m_cancelled = std::make_shared<std::atomic<bool>>(false);
     bool m_closed = false;
 };
