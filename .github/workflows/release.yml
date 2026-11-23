@@ -487,7 +487,11 @@ jobs:
           PKG_CONFIG_PATH: ${{ env.DEPS }}/lib/pkgconfig
           MACOS_ARCHS: "arm64;x86_64"
           ARCH: universal
-        run: make dmg
+        run: |
+          if [[ -d "$QT_ROOT_DIR/plugins/sqldrivers" ]]; then
+            find "$QT_ROOT_DIR/plugins/sqldrivers" -maxdepth 1 -type f -name '*.dylib' ! -name 'libqsqlite.dylib' -delete
+          fi
+          make dmg
 
       - name: Notarize DMG (optional)
         id: notarize

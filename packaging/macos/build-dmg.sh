@@ -65,14 +65,14 @@ fi
 
 # Re-sign everything inside-out because macdeployqt rewrites Mach-O load commands.
 SIGN_IDENTITY=${SIGN_IDENTITY:--}
-SIGN_FLAGS=()
-if [[ "$SIGN_IDENTITY" != "-" ]]; then
-    SIGN_FLAGS=(--timestamp --options runtime)
-fi
 
 sign_item() {
     local target=$1
-    codesign --force --sign "$SIGN_IDENTITY" "${SIGN_FLAGS[@]}" "$target"
+    if [[ "$SIGN_IDENTITY" != "-" ]]; then
+        codesign --force --timestamp --options runtime --sign "$SIGN_IDENTITY" "$target"
+    else
+        codesign --force --sign - "$target"
+    fi
 }
 
 echo "Signing bundle inside-out (identity: $SIGN_IDENTITY)..."
