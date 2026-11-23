@@ -17,16 +17,20 @@
 #include <QFileInfo>
 #include <QImageReader>
 #include <QJsonObject>
+#include <QMetaObject>
 #include <QNetworkInformation>
 #include <QPointer>
 #include <QSettings>
 #include <QStandardPaths>
 #include <QTemporaryDir>
+#include <QThread>
 #include <QTimer>
 #include <QUrl>
+#include <algorithm>
 
 Session::Session(const VaultInfo &info, QObject *parent) : QObject(parent), m_info(info) {
     m_images.setMaxCost(256 * 1024); // KiB of decoded pixels
+    m_imagePool.setMaxThreadCount(std::clamp(QThread::idealThreadCount(), 2, 4));
 }
 
 Session *Session::open(const VaultInfo &info, const QByteArray &keyOverride, OpenError *err, QString *message, QObject *parent) {
@@ -108,6 +112,9 @@ Session::~Session() { close(); }
 void Session::close() {
     if (m_closed) return;
     m_closed = true;
+    m_cancelled->store(true);
+    m_imagePool.clear();
+    m_imagePool.waitForDone();
     if (m_events) m_events->stop();
     if (m_engine) {
         m_engine->stop();
@@ -156,6 +163,7 @@ void Session::start() {
 
 void Session::wake() {
     if (!isRemote() || !signedIn() || m_closed || m_engine->paused()) return;
+    m_failedImages.clear();
     m_engine->sync();
     m_events->reconnectNow();
     refreshMe();
@@ -247,49 +255,109 @@ void Session::applyCachePolicy(bool localFirst, qint64 maxBytes) {
     m_files->setCachePolicy(true, localFirst, maxBytes);
 }
 
-QImage Session::decode(const QByteArray &data) const {
+QImage Session::decode(const QByteArray &data, int maxSide) {
     QBuffer buf;
     buf.setData(data);
     buf.open(QIODevice::ReadOnly);
     QImageReader reader(&buf);
     reader.setAutoTransform(true);
     const QSize size = reader.size();
-    const int limit = 2400;
-    if (size.isValid() && (size.width() > limit || size.height() > limit))
-        reader.setScaledSize(size.scaled(limit, limit, Qt::KeepAspectRatio));
-    return reader.read();
+    if (size.isValid() && (size.width() > maxSide || size.height() > maxSide))
+        reader.setScaledSize(size.scaled(maxSide, maxSide, Qt::KeepAspectRatio));
+    QImage img = reader.read();
+    if (!img.isNull() && std::max(img.width(), img.height()) > maxSide)
+        img = img.scaled(maxSide, maxSide, Qt::KeepAspectRatio, Qt::SmoothTransformation);
+    return img;
+}
+
+QImage Session::cachedImage(const QString &id, bool thumb) const {
+    const QString cid = m_files ? m_files->canonicalId(id) : id;
+    const QString key = cid + (thumb ? QStringLiteral("#t") : QString());
+    if (const QImage *img = m_images.object(key)) return *img;
+    if (thumb) {
+        if (const QImage *full = m_images.object(cid)) return *full;
+    }
+    return {};
 }
 
 QImage Session::image(const QString &id, bool thumb) {
     const QString cid = m_files ? m_files->canonicalId(id) : id;
     const QString key = cid + (thumb ? QStringLiteral("#t") : QString());
-    if (QImage *img = m_images.object(key)) return *img;
+    if (const QImage *img = m_images.object(key)) return *img;
     if (thumb) {
-        if (QImage *full = m_images.object(cid)) return *full;
+        if (const QImage *full = m_images.object(cid)) return *full;
     }
-    if (m_loading.contains(key) || m_closed) return {};
+    if (m_loading.contains(key) || m_failedImages.contains(key) || m_closed || !m_files) return {};
     m_loading.insert(key);
+    const int maxSide = thumb ? 1200 : 1600;
     QPointer<Session> self(this);
-    auto store = [self, key, id, cid](bool ok, const QByteArray &data) {
-        if (!self) return;
+    const VaultFiles::DiskSource disk = m_files->diskSource();
+    const auto cancelled = m_cancelled;
+
+    auto finishImage = [self, key, id, cid](const QImage &img, bool fromCache, bool usedThumb) {
+        if (!self || self->m_closed) return;
         self->m_loading.remove(key);
-        if (!ok) return;
-        const QImage img = self->decode(data);
-        if (img.isNull()) return;
+        if (fromCache && self->m_files) self->m_files->touchAccess(cid, usedThumb);
+        if (img.isNull()) {
+            self->m_failedImages.insert(key);
+            return;
+        }
         self->m_images.insert(key, new QImage(img), std::max<qsizetype>(1, img.sizeInBytes() / 1024));
         emit self->attachmentReady(id);
         if (cid != id) emit self->attachmentReady(cid);
     };
-    QByteArray data;
-    if (id.startsWith(QLatin1String("local-")) && m_files->readUpload(id, &data)) {
-        QTimer::singleShot(0, this, [store, data] { store(true, data); });
-    } else if (m_files->readFile(cid, &data, thumb) || (thumb && m_files->readFile(cid, &data, false))) {
-        QTimer::singleShot(0, this, [store, data] { store(true, data); });
-    } else if (isRemote() && !cid.startsWith(QLatin1String("local-"))) {
-        fetch(cid, thumb, store);
-    } else {
-        m_loading.remove(key);
-    }
+
+    auto decodeAsync = [self, key, maxSide, cancelled, finishImage](bool ok, QByteArray data) {
+        if (!self || self->m_closed) return;
+        if (!ok || data.isEmpty()) {
+            self->m_loading.remove(key);
+            return;
+        }
+        self->m_imagePool.start([self, data = std::move(data), maxSide, cancelled, finishImage] {
+            if (cancelled->load()) return;
+            const QImage img = Session::decode(data, maxSide);
+            if (cancelled->load() || !self) return;
+            QMetaObject::invokeMethod(self, [finishImage, img] { finishImage(img, false, false); }, Qt::QueuedConnection);
+        });
+    };
+
+    m_imagePool.start([self, disk, id, cid, key, thumb, maxSide, cancelled, finishImage, decodeAsync] {
+        if (cancelled->load()) return;
+        QByteArray data;
+        bool found = false;
+        bool fromCache = false;
+        bool usedThumb = thumb;
+        if (id.startsWith(QLatin1String("local-")) && VaultFiles::readRaw(disk, QStringLiteral("uploads"), id, &data)) {
+            found = true;
+        } else if (disk.allowCacheRead) {
+            if (VaultFiles::readRaw(disk, thumb ? QStringLiteral("thumbs") : QStringLiteral("files"), cid, &data)) {
+                found = true;
+                fromCache = true;
+                usedThumb = thumb;
+            } else if (thumb && VaultFiles::readRaw(disk, QStringLiteral("files"), cid, &data)) {
+                found = true;
+                fromCache = true;
+                usedThumb = false;
+            }
+        }
+        if (cancelled->load()) return;
+        if (found) {
+            const QImage img = Session::decode(data, maxSide);
+            if (cancelled->load() || !self) return;
+            QMetaObject::invokeMethod(self, [finishImage, img, fromCache, usedThumb] { finishImage(img, fromCache, usedThumb); }, Qt::QueuedConnection);
+            return;
+        }
+        if (!self) return;
+        QMetaObject::invokeMethod(self, [self, cid, key, thumb, decodeAsync] {
+            if (!self || self->m_closed) return;
+            if (!cid.startsWith(QLatin1String("local-")) && self->isRemote()) {
+                self->fetch(cid, thumb, decodeAsync);
+            } else {
+                self->m_loading.remove(key);
+                self->m_failedImages.insert(key);
+            }
+        }, Qt::QueuedConnection);
+    });
     return {};
 }
 

@@ -221,10 +221,16 @@ MarkdownEditor::MarkdownEditor(QWidget *parent)
         if (m_popup->isVisible()) positionInlinePopup();
     });
 
+    m_pixmapCache.setMaxCost(64 * 1024);
+    m_scaledImageCache.setMaxCost(64 * 1024);
+    m_refreshTimer.setSingleShot(true);
+    m_refreshTimer.setInterval(16);
+    connect(&m_refreshTimer, &QTimer::timeout, this, &MarkdownEditor::flushPendingAttachments);
+
     m_hl->wikiExists = [this](const QString &t) { return !wikiExists || wikiExists(t); };
-    m_hl->imageLoader = [this](const QString &id) { return imageFor(id); };
+    m_hl->imageLoader = [this](const QString &id, int maxW) { return scaledImageFor(id, maxW); };
     m_hl->imageSize = [this](const QString &id) -> QSize {
-        const QImage img = imageFor(id);
+        const QImage img = cachedImageFor(id);
         if (!img.isNull()) return img.size() / std::max(1.0, img.devicePixelRatio());
         return imageMeta && !RemoteImages::isRemote(id) ? imageMeta(id) : QSize();
     };
@@ -307,6 +313,8 @@ MarkdownEditor::~MarkdownEditor() {
 void MarkdownEditor::setMarkdown(const QString &text) {
     hideInlinePopup(false);
     closeTableCell(false);
+    m_refreshTimer.stop();
+    m_pendingAttachments.clear();
     m_loading = true;
     setUndoRedoEnabled(false);
     setPlainText(text);
@@ -522,10 +530,137 @@ QImage MarkdownEditor::imageFor(const QString &id) const {
     return image ? image(id) : QImage();
 }
 
+QImage MarkdownEditor::cachedImageFor(const QString &id) const {
+    if (RemoteImages::isRemote(id)) return RemoteImages::instance()->cachedImage(id);
+    if (cachedImage) return cachedImage(id);
+    return image ? image(id) : QImage();
+}
+
+QImage MarkdownEditor::scaledImageFor(const QString &id, int maxWidth) const {
+    const int targetW = std::max(1, maxWidth);
+    const QString key = id + u'@' + QString::number(targetW);
+    if (const QImage *cached = m_scaledImageCache.object(key)) return *cached;
+    QImage img = cachedImageFor(id);
+    if (img.isNull()) return {};
+    if (img.width() > targetW) img = img.scaledToWidth(targetW, Qt::SmoothTransformation);
+    m_scaledImageCache.insert(key, new QImage(img), std::max<qsizetype>(1, img.sizeInBytes() / 1024));
+    return img;
+}
+
+QPixmap MarkdownEditor::roundedPixmapFor(const QString &id, const QSize &size, qreal dpr) const {
+    if (!size.isValid() || size.isEmpty()) return {};
+    const qreal scale = std::max<qreal>(1.0, dpr);
+    const QString key = QStringLiteral("%1@%2x%3@%4").arg(id).arg(size.width()).arg(size.height()).arg(qRound(scale * 100));
+    if (const QPixmap *cached = m_pixmapCache.object(key)) return *cached;
+    const QImage img = imageFor(id);
+    if (img.isNull()) return {};
+    const QSize phys(std::max(1, int(std::round(size.width() * scale))), std::max(1, int(std::round(size.height() * scale))));
+    QImage canvas(phys, QImage::Format_ARGB32_Premultiplied);
+    canvas.setDevicePixelRatio(scale);
+    canvas.fill(Qt::transparent);
+    {
+        QPainter p(&canvas);
+        p.setRenderHint(QPainter::Antialiasing);
+        p.setRenderHint(QPainter::SmoothPixmapTransform);
+        QPainterPath clip;
+        clip.addRoundedRect(QRectF(QPointF(0, 0), QSizeF(size)), Theme::radius, Theme::radius);
+        p.setClipPath(clip);
+        const QImage scaled = img.size() == phys ? img : img.scaled(phys, Qt::IgnoreAspectRatio, Qt::SmoothTransformation);
+        p.drawImage(QRectF(QPointF(0, 0), QSizeF(size)), scaled);
+    }
+    QPixmap pm = QPixmap::fromImage(canvas);
+    pm.setDevicePixelRatio(scale);
+    m_pixmapCache.insert(key, new QPixmap(pm), std::max<qsizetype>(1, canvas.sizeInBytes() / 1024));
+    return pm;
+}
+
+void MarkdownEditor::clearImageCache() {
+    m_pixmapCache.clear();
+    m_scaledImageCache.clear();
+    m_pendingAttachments.clear();
+    m_refreshTimer.stop();
+}
+
 void MarkdownEditor::refreshAttachment(const QString &id) {
-    for (QTextBlock b = document()->begin(); b.isValid(); b = b.next())
-        if (b.text().contains(id) || (b.userData() && (static_cast<BlockInfo *>(b.userData())->kind == BlockInfo::ImageParagraph || static_cast<BlockInfo *>(b.userData())->imageId == id))) m_hl->rehighlightBlock(b);
-    viewport()->update();
+    if (id.isEmpty()) return;
+    m_pendingAttachments.insert(id);
+    if (!m_refreshTimer.isActive()) m_refreshTimer.start();
+}
+
+void MarkdownEditor::flushPendingAttachments() {
+    if (m_pendingAttachments.isEmpty()) return;
+    const QSet<QString> ids = std::move(m_pendingAttachments);
+    m_pendingAttachments.clear();
+    bool needRepaint = false;
+    for (QTextBlock b = document()->begin(); b.isValid(); b = b.next()) {
+        const auto *info = static_cast<BlockInfo *>(b.userData());
+        if (info && info->kind == BlockInfo::Image && ids.contains(info->imageId)) {
+            needRepaint = true;
+            if (info->imageSize != m_hl->displaySize(info->imageId)) m_hl->rehighlightBlock(b);
+            continue;
+        }
+        if (info && info->kind == BlockInfo::ImageParagraph) {
+            bool hit = false;
+            for (const QString &id : info->imageIds) {
+                if (ids.contains(id)) {
+                    hit = true;
+                    break;
+                }
+            }
+            if (hit) {
+                needRepaint = true;
+                m_hl->rehighlightBlock(b);
+            }
+            continue;
+        }
+        if (b.text().contains(QLatin1String("!["))) {
+            for (const QString &id : ids) {
+                if (b.text().contains(id)) {
+                    needRepaint = true;
+                    m_hl->rehighlightBlock(b);
+                    break;
+                }
+            }
+        }
+    }
+    if (needRepaint) viewport()->update();
+}
+
+void MarkdownEditor::preloadNearbyImages(const QTextBlock &firstVisible, const QRectF &visible) const {
+    QAbstractTextDocumentLayout *layout = document()->documentLayout();
+    const qreal vh = std::max<qreal>(200.0, viewport()->height());
+    const qreal lookBehindTop = visible.top() - vh * 0.5;
+    const qreal lookAheadBottom = visible.bottom() + vh;
+    int budget = 8;
+    auto triggerBlock = [&](const QTextBlock &b) {
+        if (budget <= 0) return;
+        const auto *info = static_cast<BlockInfo *>(b.userData());
+        if (!info || info->active) return;
+        if (info->kind == BlockInfo::Image && !info->imageId.isEmpty()) {
+            if (cachedImageFor(info->imageId).isNull()) {
+                imageFor(info->imageId);
+                --budget;
+            }
+        } else if (info->kind == BlockInfo::ImageParagraph && info->imageParagraphMissing) {
+            for (const QString &id : info->imageIds) {
+                if (budget <= 0) break;
+                if (cachedImageFor(id).isNull()) {
+                    imageFor(id);
+                    --budget;
+                }
+            }
+        }
+    };
+    for (QTextBlock b = firstVisible; b.isValid() && budget > 0; b = b.next()) {
+        const QRectF br = layout->blockBoundingRect(b);
+        if (br.top() > lookAheadBottom) break;
+        if (br.bottom() >= visible.bottom()) triggerBlock(b);
+    }
+    for (QTextBlock b = firstVisible.previous(); b.isValid() && budget > 0; b = b.previous()) {
+        const QRectF br = layout->blockBoundingRect(b);
+        if (br.bottom() < lookBehindTop) break;
+        triggerBlock(b);
+    }
 }
 
 void MarkdownEditor::updateActive() {
@@ -723,6 +858,11 @@ void MarkdownEditor::paintRendered(QTextBlock first) {
             }
         }
         if (info->kind == BlockInfo::ImageParagraph && info->imageDocument) {
+            if (info->imageParagraphMissing) {
+                for (const QString &id : info->imageIds) {
+                    if (cachedImageFor(id).isNull()) imageFor(id);
+                }
+            }
             p.save();
             p.translate(r.left(), r.top() + 6);
             info->imageDocument->drawContents(&p);
@@ -730,15 +870,12 @@ void MarkdownEditor::paintRendered(QTextBlock first) {
         }
         if (info->kind == BlockInfo::Image && info->imageSize.isValid()) {
             const QRectF area(r.left(), r.top() + 6, info->imageSize.width(), info->imageSize.height());
-            const QImage img = imageFor(info->imageId);
-            QPainterPath clip;
-            clip.addRoundedRect(area, Theme::radius, Theme::radius);
-            if (!img.isNull()) {
-                p.save();
-                p.setClipPath(clip);
-                p.drawImage(area, img);
-                p.restore();
+            const QPixmap pm = roundedPixmapFor(info->imageId, info->imageSize, dpr);
+            if (!pm.isNull()) {
+                p.drawPixmap(area.topLeft(), pm);
             } else {
+                QPainterPath clip;
+                clip.addRoundedRect(area, Theme::radius, Theme::radius);
                 p.setPen(QPen(k.line, 1.0));
                 p.setBrush(k.sunken);
                 p.drawPath(clip);
@@ -746,9 +883,9 @@ void MarkdownEditor::paintRendered(QTextBlock first) {
                 p.setFont(Theme::uiFont(12));
                 p.drawText(area, Qt::AlignCenter, RemoteImages::isRemote(info->imageId) && RemoteImages::instance()->failed(info->imageId) ? T("图片加载失败，右键可重试") : T("图片加载中…"));
             }
-            Q_UNUSED(dpr);
         }
     }
+    preloadNearbyImages(first, visible);
 }
 
 QTextCursor MarkdownEditor::tableRange(const QTextBlock &block) const {

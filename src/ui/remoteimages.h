@@ -21,6 +21,11 @@ public:
 
     // The image if it has arrived; otherwise null, and the fetch starts.
     QImage image(const QString &url);
+    // Non-triggering memory cache lookup.
+    QImage cachedImage(const QString &url) const {
+        if (const QImage *img = m_cache.object(url)) return *img;
+        return {};
+    }
     void retryFailed();
     bool failed(const QString &url) const { return m_failed.contains(url); }
 

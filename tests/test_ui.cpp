@@ -41,9 +41,11 @@
 #include <QCheckBox>
 #include <QClipboard>
 #include <QComboBox>
+#include <QElapsedTimer>
 #include <QGroupBox>
 #include <QListWidget>
 #include <QMimeData>
+#include <QScrollBar>
 #include <QSettings>
 #include <QTextBlock>
 #include <QTextBrowser>
@@ -1194,6 +1196,116 @@ private slots:
             QVERIFY(localSettings.findChild<QPushButton *>(QStringLiteral("changeVaultLocationBtn")) == nullptr);
             local->close();
         }
+    }
+
+    void manyCachedImagesOpenLazilyWithoutBlocking() {
+        QTemporaryDir root;
+        vaults::setDataRoot(root.path());
+
+        VaultInfo info;
+        info.name = QStringLiteral("PhotoHeavy");
+        info.kind = VaultInfo::Local;
+        QString err;
+        QVERIFY2(vaults::create(info, &err), qPrintable(err));
+        Session::OpenError oe = Session::OpenError::None;
+        std::unique_ptr<Session> session(Session::open(info, {}, &oe, &err));
+        QVERIFY(session != nullptr);
+
+        // Create one realistic photo encoded as JPEG and store 84 attachments in the vault.
+        QImage photo(1600, 1200, QImage::Format_RGB32);
+        photo.fill(QColor(36, 120, 88));
+        {
+            QPainter p(&photo);
+            p.setPen(QPen(Qt::white, 6));
+            p.drawLine(0, 0, 1600, 1200);
+        }
+        QByteArray jpeg;
+        {
+            QBuffer buf(&jpeg);
+            buf.open(QIODevice::WriteOnly);
+            QVERIFY(photo.save(&buf, "JPEG", 85));
+        }
+
+        constexpr int kImages = 84;
+        QStringList ids;
+        ids.reserve(kImages);
+        for (int i = 0; i < kImages; ++i) {
+            // Insert a valid 6-byte JPEG COM marker right after SOI (FF D8) so every attachment is unique.
+            QByteArray uniqueJpeg = jpeg;
+            const char com[6] = {'\xff', '\xfe', '\x00', '\x04', char((i >> 8) & 0xff), char(i & 0xff)};
+            uniqueJpeg.insert(2, com, 6);
+            bool done = false;
+            session->engine()->addFile(uniqueJpeg, QStringLiteral("photo_%1.jpg").arg(i), QStringLiteral("image/jpeg"),
+                                       [&](AddedFile f) {
+                                           QVERIFY(f.ok);
+                                           ids << f.id;
+                                           done = true;
+                                       });
+            QTRY_VERIFY(done);
+        }
+        QCOMPARE(QSet<QString>(ids.begin(), ids.end()).size(), kImages);
+
+        // Build a note mixing standalone image lines and multi-image paragraphs.
+        QString body = QStringLiteral("# 活动记录\n\n");
+        for (int i = 0; i < kImages; ++i) {
+            if (i % 6 == 2 && i + 1 < kImages) {
+                body += QStringLiteral("图文段落 %1 ![p%1](ivy://res/%2) 和 ![p%3](ivy://res/%4)\n\n")
+                            .arg(i).arg(ids[i]).arg(i + 1).arg(ids[i + 1]);
+                ++i;
+            } else {
+                body += QStringLiteral("![p%1](ivy://res/%2)\n\n").arg(i).arg(ids[i]);
+            }
+        }
+        const Note heavy = session->engine()->createNote({.title = QStringLiteral("84张图片笔记"), .body = body});
+        const Note light = session->engine()->createNote({.title = QStringLiteral("普通笔记"), .body = QStringLiteral("hello")});
+
+        NotePane pane;
+        pane.resize(900, 700);
+        pane.setSession(session.get());
+        pane.show();
+        QCoreApplication::processEvents();
+
+        // 1. Live mode: opening the 84-image note must NOT synchronously decode offscreen images.
+        QElapsedTimer timer;
+        timer.start();
+        pane.setNote(heavy.id);
+        const qint64 firstOpenMs = timer.elapsed();
+        qInfo() << "84-image note first open (Live):" << firstOpenMs << "ms";
+        QVERIFY2(firstOpenMs < 500, qPrintable(QStringLiteral("first open took %1 ms").arg(firstOpenMs)));
+        QVERIFY(session->cachedImage(ids.last(), false).isNull());
+
+        // Trigger paint so visible images at the top start async decoding on the worker pool.
+        pane.editor()->viewport()->repaint();
+        QTRY_VERIFY(!session->cachedImage(ids.first(), false).isNull());
+        // Offscreen bottom image still has not been decoded.
+        QVERIFY(session->cachedImage(ids.last(), false).isNull());
+
+        // Scrolling to the bottom triggers lazy loading of the bottom image.
+        pane.editor()->verticalScrollBar()->setValue(pane.editor()->verticalScrollBar()->maximum());
+        pane.editor()->viewport()->repaint();
+        QTRY_VERIFY(!session->cachedImage(ids.last(), false).isNull());
+
+        // 2. Re-opening the note (switching away and back) stays fast.
+        pane.setNote(light.id);
+        timer.restart();
+        pane.setNote(heavy.id);
+        const qint64 secondOpenMs = timer.elapsed();
+        qInfo() << "84-image note second open (Live):" << secondOpenMs << "ms";
+        QVERIFY2(secondOpenMs < 500, qPrintable(QStringLiteral("second open took %1 ms").arg(secondOpenMs)));
+
+        // 3. Read mode (MarkdownView) also opens fast and loads visible images asynchronously without decoding offscreen ones.
+        timer.restart();
+        pane.setReading(true);
+        const qint64 readOpenMs = timer.elapsed();
+        qInfo() << "84-image note Read mode open:" << readOpenMs << "ms";
+        QVERIFY2(readOpenMs < 500, qPrintable(QStringLiteral("read mode open took %1 ms").arg(readOpenMs)));
+        pane.preview()->viewport()->repaint();
+        QTRY_VERIFY(!session->cachedImage(ids.first(), false).isNull());
+        // Middle offscreen image (never scrolled to) stays unloaded in RAM.
+        QVERIFY(session->cachedImage(ids[kImages / 2], false).isNull());
+
+        pane.setSession(nullptr);
+        session->close();
     }
 };
 

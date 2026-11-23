@@ -280,6 +280,10 @@ ImageLink standaloneImage(const QString &line, const QString &definitions) {
     const QString trimmed = line.trimmed();
     if (!trimmed.startsWith(QLatin1String("![")) && !trimmed.startsWith(u'[') && !trimmed.startsWith(u'#')) return {};
     if (!trimmed.contains(u'[')) return {};
+    // Fast path for the common standalone image syntax without escapes, entities, titles, or nested parens.
+    static const QRegularExpression simpleImg(
+        QStringLiteral(R"RE(^!\[([^\[\]\\&]*)\]\(((?:ivy://res/[A-Za-z0-9_-]{8,64}|https?://[^\s<>()\\"&]+))\)$)RE"));
+    if (const auto sm = simpleImg.match(trimmed); sm.hasMatch()) return {sm.captured(2), sm.captured(1), false};
     const QByteArray input = (line + QStringLiteral("\n\n") + definitions).toUtf8();
     QByteArray output;
     // CommonMark only: permissive autolinks in older md4c (e.g. 0.4.8 on Ubuntu 22.04)
