@@ -78,9 +78,10 @@ check_archs() {
 check_otool() {
     local target=$1
     local self_id
-    self_id=$(otool -D "$target" | tail -n +2 | head -n 1 || true)
+    self_id=$(otool -D "$target" | grep -v ':$' | head -n 1 || true)
     local bad=0
     while IFS= read -r line; do
+        [[ "$line" == *: ]] && continue
         local dep
         dep=$(printf '%s\n' "$line" | sed -E 's/^[[:space:]]+//; s/[[:space:]]+\(compatibility.*$//')
         [[ -z "$dep" ]] && continue
@@ -93,7 +94,7 @@ check_otool() {
                 bad=1
                 ;;
         esac
-    done < <(otool -L "$target" | tail -n +2)
+    done < <(otool -L "$target")
     return "$bad"
 }
 
