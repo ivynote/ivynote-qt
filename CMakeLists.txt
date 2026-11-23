@@ -1,4 +1,7 @@
 cmake_minimum_required(VERSION 3.21)
+if(APPLE AND NOT DEFINED CMAKE_OSX_DEPLOYMENT_TARGET)
+    set(CMAKE_OSX_DEPLOYMENT_TARGET "12.0" CACHE STRING "Minimum macOS deployment version")
+endif()
 project(ivynote-qt VERSION 0.1.0 LANGUAGES CXX)
 
 set(CMAKE_CXX_STANDARD 20)
@@ -20,12 +23,19 @@ endif()
 set(IVY_VERSION_MAJOR ${CMAKE_MATCH_1})
 set(IVY_VERSION_MINOR ${CMAKE_MATCH_2})
 set(IVY_VERSION_PATCH ${CMAKE_MATCH_3})
+set(IVY_VERSION_NUMERIC "${IVY_VERSION_MAJOR}.${IVY_VERSION_MINOR}.${IVY_VERSION_PATCH}")
 
 find_package(Qt6 6.8 REQUIRED COMPONENTS Core Gui Widgets Network Sql Svg Concurrent)
 find_package(Qt6Keychain REQUIRED)
 find_package(PkgConfig REQUIRED)
 pkg_check_modules(SODIUM REQUIRED IMPORTED_TARGET libsodium)
-pkg_check_modules(MD4C REQUIRED IMPORTED_TARGET md4c md4c-html)
+pkg_check_modules(MD4C QUIET IMPORTED_TARGET md4c md4c-html)
+if(MD4C_FOUND)
+    set(IVY_MD4C_TARGET PkgConfig::MD4C)
+else()
+    find_package(md4c CONFIG REQUIRED)
+    set(IVY_MD4C_TARGET md4c::md4c md4c::md4c-html)
+endif()
 
 qt_standard_project_setup()
 
@@ -62,7 +72,10 @@ target_include_directories(ivycore PUBLIC src)
 target_compile_definitions(ivycore PUBLIC IVY_VERSION="${IVY_VERSION}")
 target_link_libraries(ivycore PUBLIC
     Qt6::Core Qt6::Gui Qt6::Widgets Qt6::Network Qt6::Sql Qt6::Concurrent
-    qt6keychain PkgConfig::SODIUM PkgConfig::MD4C)
+    qt6keychain PkgConfig::SODIUM ${IVY_MD4C_TARGET})
+if(APPLE)
+    target_link_libraries(ivycore PUBLIC "-framework Security" "-framework CoreFoundation")
+endif()
 
 # Widgets, shared by the app and the UI tests.
 add_library(ivyui STATIC
@@ -94,12 +107,22 @@ add_library(ivyui STATIC
 target_link_libraries(ivyui PUBLIC ivycore Qt6::Widgets Qt6::Svg)
 
 if(IVY_BUILD_APP)
-qt_add_executable(ivynote WIN32
+qt_add_executable(ivynote WIN32 MACOSX_BUNDLE
     src/main.cpp
     resources/resources.qrc
 )
 target_link_libraries(ivynote PRIVATE ivyui)
-set_target_properties(ivynote PROPERTIES OUTPUT_NAME ivynote)
+if(APPLE)
+    configure_file(resources/Info.plist.in ${CMAKE_CURRENT_BINARY_DIR}/Info.plist @ONLY)
+    target_sources(ivynote PRIVATE resources/icons/app.icns)
+    set_source_files_properties(resources/icons/app.icns PROPERTIES MACOSX_PACKAGE_LOCATION "Resources")
+    set_target_properties(ivynote PROPERTIES
+        OUTPUT_NAME Ivynote
+        MACOSX_BUNDLE_INFO_PLIST "${CMAKE_CURRENT_BINARY_DIR}/Info.plist"
+    )
+else()
+    set_target_properties(ivynote PROPERTIES OUTPUT_NAME ivynote)
+endif()
 
 if(WIN32)
     configure_file(resources/ivynote.rc.in ${CMAKE_CURRENT_BINARY_DIR}/ivynote.rc @ONLY)
@@ -107,7 +130,11 @@ if(WIN32)
 endif()
 
 include(GNUInstallDirs)
-install(TARGETS ivynote RUNTIME DESTINATION ${CMAKE_INSTALL_BINDIR})
+if(APPLE)
+    install(TARGETS ivynote BUNDLE DESTINATION .)
+else()
+    install(TARGETS ivynote RUNTIME DESTINATION ${CMAKE_INSTALL_BINDIR})
+endif()
 if(UNIX AND NOT APPLE)
     install(FILES resources/ivynote.desktop DESTINATION ${CMAKE_INSTALL_DATADIR}/applications RENAME app.ivynote.Ivynote.desktop)
     install(FILES resources/icons/app.svg DESTINATION ${CMAKE_INSTALL_DATADIR}/icons/hicolor/scalable/apps RENAME app.ivynote.Ivynote.svg)
@@ -123,6 +150,6 @@ if(IVY_BUILD_TESTS)
         add_executable(test_${t} tests/test_${t}.cpp)
         target_link_libraries(test_${t} PRIVATE ivyui Qt6::Test)
         add_test(NAME ${t} COMMAND test_${t})
-        set_tests_properties(${t} PROPERTIES ENVIRONMENT "QT_QPA_PLATFORM=offscreen")
+        set_tests_properties(${t} PROPERTIES ENVIRONMENT "QT_QPA_PLATFORM=offscreen;IVY_SECRETS_IN_FILE=1")
     endforeach()
 endif()

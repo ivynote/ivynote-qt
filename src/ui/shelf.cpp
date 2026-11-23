@@ -591,8 +591,8 @@ Shelf::Shelf(QWidget *parent) : QWidget(parent), m_model(new ShelfModel(this)), 
         emit vaultMenuRequested(m_vaultButton->mapToGlobal(QPoint(0, m_vaultButton->height() + 2)));
     });
     hrow->addWidget(m_vaultButton, 1);
-    m_searchButton = new IconButton(QStringLiteral("search"), T("搜索") + QStringLiteral(" (Ctrl+K)"), header);
-    m_newButton = new IconButton(QStringLiteral("edit"), T("新建笔记") + QStringLiteral(" (Ctrl+N)"), header);
+    m_searchButton = new IconButton(QStringLiteral("search"), T("搜索") + QStringLiteral(" (") + shortcutText(QStringLiteral("Ctrl+K")) + u')', header);
+    m_newButton = new IconButton(QStringLiteral("edit"), T("新建笔记") + QStringLiteral(" (") + shortcutText(QStringLiteral("Ctrl+N")) + u')', header);
     connect(m_searchButton, &QToolButton::clicked, this, &Shelf::searchRequested);
     connect(m_newButton, &QToolButton::clicked, this, [this] { emit newNote(QString()); });
     hrow->addWidget(m_searchButton);

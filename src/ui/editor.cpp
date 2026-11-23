@@ -1892,7 +1892,7 @@ void MarkdownEditor::updateInlinePopup() {
             auto *pickerItem = new QListWidgetItem(T("选择日期和重复…"), m_popupList);
             pickerItem->setData(RoleId, QStringLiteral("__picker__"));
             pickerItem->setData(RoleIcon, QStringLiteral("🔁"));
-            pickerItem->setData(RoleHint, QStringLiteral("Ctrl+Shift+D"));
+            pickerItem->setData(RoleHint, shortcutText(QStringLiteral("Ctrl+Shift+D")));
             pickerItem->setData(RoleIsHeader, false);
 
             m_popupKind = PopupKind::Date;

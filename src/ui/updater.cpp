@@ -61,11 +61,22 @@ public:
                 if (attempt < 2) return start();
                 return finish(T("更新下载或校验失败"));
             }
-            if (!file->setPermissions(replace ? QFileInfo(destination).permissions() : QFileDevice::ReadOwner | QFileDevice::WriteOwner | QFileDevice::ExeOwner) || !file->commit())
+            const auto perms = replace
+                ? QFileInfo(destination).permissions()
+#ifdef Q_OS_MACOS
+                : (QFileDevice::ReadOwner | QFileDevice::WriteOwner);
+#else
+                : (QFileDevice::ReadOwner | QFileDevice::WriteOwner | QFileDevice::ExeOwner);
+#endif
+            if (!file->setPermissions(perms) || !file->commit())
                 return finish(file->errorString());
             if (replace) return finish(T("更新已安装，重新启动后生效"));
 #ifdef Q_OS_WIN
             if (!QProcess::startDetached(destination, {})) return finish(T("无法启动安装程序"));
+#elif defined(Q_OS_MACOS)
+            if (!QDesktopServices::openUrl(QUrl::fromLocalFile(destination)) &&
+                !QDesktopServices::openUrl(QUrl::fromLocalFile(QFileInfo(destination).absolutePath())))
+                return finish(destination);
 #else
             if (!QDesktopServices::openUrl(QUrl::fromLocalFile(QFileInfo(destination).absolutePath()))) return finish(destination);
 #endif

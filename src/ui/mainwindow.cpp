@@ -65,6 +65,25 @@ namespace {
 
 QString noteKey(Session *s) { return QStringLiteral("vault/%1/lastNote").arg(s->info().id); }
 
+QString menuTitle(const char *zh) {
+    QString title = T(zh);
+#ifdef Q_OS_MACOS
+    static const QRegularExpression parenMnemonic(QStringLiteral(R"(\(&[A-Za-z]\))"));
+    title.remove(parenMnemonic);
+    title.remove(u'&');
+#endif
+    return title;
+}
+
+QString menuHint(const QString &label, const QString &portable) {
+    if (portable.isEmpty()) return label;
+#ifdef Q_OS_MACOS
+    return label + QStringLiteral("  ") + shortcutText(portable);
+#else
+    return label + u'\t' + portable;
+#endif
+}
+
 // The empty paper: the leaf, a line, the keys that matter.
 QWidget *emptyState(QWidget *parent) {
     auto *w = new QWidget(parent);
@@ -78,7 +97,11 @@ QWidget *emptyState(QWidget *parent) {
     line->setWordWrap(true);
     col->addWidget(line);
     col->addSpacing(10);
-    auto *keys = mutedLabel(QStringLiteral("Ctrl+N  %1     Ctrl+K  %2     Ctrl+\\  %3").arg(T("新建笔记"), T("搜索"), T("收起书架")), w, 12);
+    auto *keys = mutedLabel(QStringLiteral("%1  %2     %3  %4     %5  %6")
+                                .arg(shortcutText(QStringLiteral("Ctrl+N")), T("新建笔记"),
+                                     shortcutText(QStringLiteral("Ctrl+K")), T("搜索"),
+                                     shortcutText(QStringLiteral("Ctrl+\\")), T("收起书架")),
+                            w, 12);
     keys->setAlignment(Qt::AlignHCenter);
     col->addWidget(keys);
     col->addStretch(4);
@@ -91,22 +114,27 @@ QWidget *emptyState(QWidget *parent) {
 }
 
 QString welcomeBody() {
+    const QString kSearch = shortcutText(QStringLiteral("Ctrl+K"));
+    const QString kNew = shortcutText(QStringLiteral("Ctrl+N"));
+    const QString kShelf = shortcutText(QStringLiteral("Ctrl+\\"));
     if (!i18n::isZh())
         return QStringLiteral(
-            "Notes are saved on this device as you type — there is no save button.\n\n"
-            "- [ ] Try **bold**, *italic*, `code` and ==highlight==\n"
-            "- [ ] Link notes with [[Ideas]]; a missing title creates the note\n"
-            "- [ ] Paste or drop an image right into the text\n\n"
-            "> Ctrl+K searches, Ctrl+N starts a note, Ctrl+\\ hides the shelf.\n\n"
-            "This vault lives only on this computer. To sync between devices, choose **Connect to an Ivynote server** from the vault menu at the top left; "
-            "you can import this vault into it later.\n");
+                   "Notes are saved on this device as you type — there is no save button.\n\n"
+                   "- [ ] Try **bold**, *italic*, `code` and ==highlight==\n"
+                   "- [ ] Link notes with [[Ideas]]; a missing title creates the note\n"
+                   "- [ ] Paste or drop an image right into the text\n\n"
+                   "> %1 searches, %2 starts a note, %3 hides the shelf.\n\n"
+                   "This vault lives only on this computer. To sync between devices, choose **Connect to an Ivynote server** from the vault menu at the top left; "
+                   "you can import this vault into it later.\n")
+            .arg(kSearch, kNew, kShelf);
     return QStringLiteral(
-        "笔记在输入时就保存在本机，没有保存按钮。\n\n"
-        "- [ ] 试试 **粗体**、*斜体*、`代码` 和 ==高亮==\n"
-        "- [ ] 用 [[灵感]] 链接笔记，不存在的标题点一下就会新建\n"
-        "- [ ] 直接把图片粘贴或拖进正文\n\n"
-        "> Ctrl+K 搜索，Ctrl+N 新建笔记，Ctrl+\\ 收起书架。\n\n"
-        "这个笔记库只保存在这台电脑上。要在多台设备间同步，请在左上角的笔记库菜单中选择 **连接 Ivynote 服务器**，之后可以把这里的笔记导入过去。\n");
+               "笔记在输入时就保存在本机，没有保存按钮。\n\n"
+               "- [ ] 试试 **粗体**、*斜体*、`代码` 和 ==高亮==\n"
+               "- [ ] 用 [[灵感]] 链接笔记，不存在的标题点一下就会新建\n"
+               "- [ ] 直接把图片粘贴或拖进正文\n\n"
+               "> %1 搜索，%2 新建笔记，%3 收起书架。\n\n"
+               "这个笔记库只保存在这台电脑上。要在多台设备间同步，请在左上角的笔记库菜单中选择 **连接 Ivynote 服务器**，之后可以把这里的笔记导入过去。\n")
+        .arg(kSearch, kNew, kShelf);
 }
 
 } // namespace
@@ -474,7 +502,7 @@ void MainWindow::applyPrefs() {
 
 void MainWindow::buildMenus() {
     QMenuBar *bar = menuBar();
-    QMenu *file = bar->addMenu(T("文件(&F)"));
+    QMenu *file = bar->addMenu(menuTitle("文件(&F)"));
     file->addAction(T("新建笔记"), QKeySequence::New, this, [this] { newNote(QString()); });
     file->addAction(T("新建笔记本…"), this, [this] {
         if (!m_session) return;
@@ -504,13 +532,15 @@ void MainWindow::buildMenus() {
     file->addAction(T("导出为 Markdown…"), this, &MainWindow::exportMarkdown);
     file->addAction(T("本地备份管理…"), this, [this] { showBackupManager(false); });
     file->addSeparator();
-    file->addAction(T("设置…"), QKeySequence(QStringLiteral("Ctrl+,")), this, [this] { showSettings(); });
+    QAction *settingsAction = file->addAction(T("设置…"), QKeySequence(QStringLiteral("Ctrl+,")), this, [this] { showSettings(); });
+    settingsAction->setMenuRole(QAction::PreferencesRole);
     file->addSeparator();
-    file->addAction(T("退出"), QKeySequence::Quit, this, &QWidget::close);
+    QAction *quitAction = file->addAction(T("退出"), QKeySequence::Quit, this, &QWidget::close);
+    quitAction->setMenuRole(QAction::QuitRole);
 
-    QMenu *edit = bar->addMenu(T("编辑(&E)"));
+    QMenu *edit = bar->addMenu(menuTitle("编辑(&E)"));
     auto fmtAction = [this, edit](const QString &label, const QString &keys, std::function<void(MarkdownEditor *)> f) {
-        QAction *a = edit->addAction(label + u'\t' + keys);
+        QAction *a = edit->addAction(menuHint(label, keys));
         connect(a, &QAction::triggered, this, [this, f] {
             if (m_pane->noteId().isEmpty() || m_pane->editor()->isReadOnly()) return;
             m_pane->editor()->setFocus();
@@ -520,9 +550,9 @@ void MainWindow::buildMenus() {
     };
     edit->addAction(T("搜索…"), QKeySequence(QStringLiteral("Ctrl+K")), this, [this] { showSearch(); });
     edit->addAction(T("命令面板…"), QKeySequence(QStringLiteral("Ctrl+Shift+P")), this, [this] { showSearch(QStringLiteral(">")); });
-    edit->addAction(T("在笔记中查找") + QStringLiteral("\tCtrl+F"), m_pane, &NotePane::showFind);
-    edit->addAction(T("查找与替换") + QStringLiteral("\tCtrl+H"), m_pane, &NotePane::showReplace);
-    edit->addAction(T("插入") + QStringLiteral("\tCtrl+/"), m_pane->editor(), &MarkdownEditor::showInsertMenu);
+    edit->addAction(menuHint(T("在笔记中查找"), QStringLiteral("Ctrl+F")), m_pane, &NotePane::showFind);
+    edit->addAction(menuHint(T("查找与替换"), replaceShortcutPortable()), m_pane, &NotePane::showReplace);
+    edit->addAction(menuHint(T("插入"), QStringLiteral("Ctrl+/")), m_pane->editor(), &MarkdownEditor::showInsertMenu);
     edit->addSeparator();
     fmtAction(T("粗体"), QStringLiteral("Ctrl+B"), [](MarkdownEditor *e) { e->toggleFormat(QStringLiteral("**")); });
     fmtAction(T("斜体"), QStringLiteral("Ctrl+I"), [](MarkdownEditor *e) { e->toggleFormat(QStringLiteral("*")); });
@@ -544,7 +574,7 @@ void MainWindow::buildMenus() {
     QAction *attach = edit->addAction(T("插入图片或文件…"), this, [this] { m_pane->pickFiles(); });
     m_noteActions << attach;
 
-    QMenu *view = bar->addMenu(T("视图(&V)"));
+    QMenu *view = bar->addMenu(menuTitle("视图(&V)"));
     m_modeGroup = new QActionGroup(this);
     const QList<QPair<EditorMode, const char *>> modes{{EditorMode::Live, "所见即所得"}, {EditorMode::Source, "源码"}, {EditorMode::Split, "双栏"}};
     const int initialPref = Prefs::instance()->editorMode();
@@ -580,7 +610,7 @@ void MainWindow::buildMenus() {
     view->addAction(T("放大字号"), QKeySequence::ZoomIn, this, [] { Prefs::instance()->setFontSize(Prefs::instance()->fontSize() + 1); });
     view->addAction(T("缩小字号"), QKeySequence::ZoomOut, this, [] { Prefs::instance()->setFontSize(Prefs::instance()->fontSize() - 1); });
 
-    QMenu *note = bar->addMenu(T("笔记(&N)"));
+    QMenu *note = bar->addMenu(menuTitle("笔记(&N)"));
     auto noteAction = [this, note](const QString &label, std::function<void(const QString &)> f, bool remote = false) {
         QAction *a = note->addAction(label);
         connect(a, &QAction::triggered, this, [this, f] {
@@ -613,7 +643,7 @@ void MainWindow::buildMenus() {
         m_session->engine()->updateNote(id, p);
     });
     note->addSeparator();
-    m_noteActions << note->addAction(T("设置日期与重复") + QStringLiteral("\tCtrl+Shift+D"), this, [this] {
+    m_noteActions << note->addAction(menuHint(T("设置日期与重复"), QStringLiteral("Ctrl+Shift+D")), this, [this] {
         if (!m_session || m_pane->noteId().isEmpty() || m_pane->editor()->isReadOnly()) return;
         if (m_pane->isReading()) m_pane->setReading(false);
         m_pane->focusEditor();
@@ -635,10 +665,11 @@ void MainWindow::buildMenus() {
         {"note", "笔记", NotesPage}, {"calendar", "日程", AgendaPage}, {"image", "媒体库", MediaPage}};
     int number = 1;
     for (const auto &entry : pages) {
+        const QString shortcut = QStringLiteral("Ctrl+%1").arg(number++);
         auto *a = m_rail->addAction(T(entry.label));
         a->setCheckable(true);
-        a->setShortcut(QKeySequence(QStringLiteral("Ctrl+%1").arg(number)));
-        a->setToolTip(T(entry.label) + QStringLiteral(" (Ctrl+%1)").arg(number++));
+        a->setShortcut(QKeySequence(shortcut));
+        a->setToolTip(T(entry.label) + QStringLiteral(" (") + shortcutText(shortcut) + u')');
         a->setData(QString::fromLatin1(entry.icon));
         connect(a, &QAction::triggered, this, [this, page = entry.page] {
             if (!m_shelfCollapsed && m_page == page) toggleShelf();
@@ -656,13 +687,13 @@ void MainWindow::buildMenus() {
     spacer->setSizePolicy(QSizePolicy::Preferred, QSizePolicy::Expanding);
     m_rail->addWidget(spacer);
     m_railSettings = m_rail->addAction(T("设置"), this, [this] { showSettings(); });
-    m_railSettings->setToolTip(T("设置") + QStringLiteral(" (Ctrl+,)"));
+    m_railSettings->setToolTip(T("设置") + QStringLiteral(" (") + shortcutText(QStringLiteral("Ctrl+,")) + u')');
     m_railSettings->setData(QStringLiteral("settings"));
     refreshRailIcons();
     connect(Theme::instance(), &Theme::changed, this, &MainWindow::refreshRailIcons);
 
     // Everything that needs a server account.
-    QMenu *server = bar->addMenu(T("服务器(&S)"));
+    QMenu *server = bar->addMenu(menuTitle("服务器(&S)"));
     m_remoteActions << server->menuAction();
     QAction *syncNow = server->addAction(T("立即同步"), this, [this] {
         if (m_session) m_session->wake();
@@ -680,9 +711,11 @@ void MainWindow::buildMenus() {
     remotePanel(T("日历订阅"), serverpanels::calendar);
     remotePanel(T("发布到博客"), serverpanels::publish);
 
-    QMenu *help = bar->addMenu(T("帮助(&H)"));
-    help->addAction(T("检查更新"), this, [this] { updater::check(this, true); });
-    help->addAction(T("关于常青笔记"), this, [this] { showSettings(AboutPage); });
+    QMenu *help = bar->addMenu(menuTitle("帮助(&H)"));
+    QAction *updateAction = help->addAction(T("检查更新"), this, [this] { updater::check(this, true); });
+    updateAction->setMenuRole(QAction::NoRole);
+    QAction *aboutAction = help->addAction(T("关于常青笔记"), this, [this] { showSettings(AboutPage); });
+    aboutAction->setMenuRole(QAction::AboutRole);
 }
 
 void MainWindow::rebuildVaultMenu() {
@@ -955,7 +988,7 @@ void MainWindow::refreshRailIcons() {
         }
         a->setIcon(icon);
         if (isAgenda) {
-            QString tip = T("日程") + QStringLiteral(" (Ctrl+2)");
+            QString tip = T("日程") + QStringLiteral(" (") + shortcutText(QStringLiteral("Ctrl+2")) + u')';
             if (m_agendaBadgeCount > 0)
                 tip += QStringLiteral(" · ") + QString::number(m_agendaBadgeCount);
             a->setToolTip(tip);
@@ -1058,19 +1091,19 @@ void MainWindow::showSearch(const QString &initial) {
     if (!m_session) return;
     m_pane->flush();
     QList<PaletteCommand> cmds{
-        {T("新建笔记"), QStringLiteral("Ctrl+N"), QStringLiteral("edit"), [this] { newNote(QString()); }},
+        {T("新建笔记"), shortcutText(QStringLiteral("Ctrl+N")), QStringLiteral("edit"), [this] { newNote(QString()); }},
         {T("新建笔记本"), QString(), QStringLiteral("folder"), [this] {
              bool ok = false;
              const QString name = QInputDialog::getText(this, T("新建笔记本"), T("名称"), QLineEdit::Normal, QString(), &ok).trimmed();
              if (ok && !name.isEmpty() && m_session) m_session->engine()->createFolder(name.left(100));
          }},
-        {T("收起或展开书架"), QStringLiteral("Ctrl+\\"), QStringLiteral("sidebar"), [this] { toggleShelf(); }},
-        {T("日程"), QStringLiteral("Ctrl+2"), QStringLiteral("calendar"), [this] { showPage(AgendaPage, false); }},
-        {T("媒体库"), QStringLiteral("Ctrl+3"), QStringLiteral("image"), [this] { showPage(MediaPage, false); }},
+        {T("收起或展开书架"), shortcutText(QStringLiteral("Ctrl+\\")), QStringLiteral("sidebar"), [this] { toggleShelf(); }},
+        {T("日程"), shortcutText(QStringLiteral("Ctrl+2")), QStringLiteral("calendar"), [this] { showPage(AgendaPage, false); }},
+        {T("媒体库"), shortcutText(QStringLiteral("Ctrl+3")), QStringLiteral("image"), [this] { showPage(MediaPage, false); }},
         {T("所见即所得"), QString(), QStringLiteral("eye"), [this] { m_pane->setEditorMode(EditorMode::Live); }},
         {T("源码"), QString(), QStringLiteral("code"), [this] { m_pane->setEditorMode(EditorMode::Source); }},
         {T("双栏"), QString(), QStringLiteral("split"), [this] { m_pane->setEditorMode(EditorMode::Split); }},
-        {T("阅读模式"), QStringLiteral("Ctrl+Shift+E"), QStringLiteral("book"), [this] {
+        {T("阅读模式"), shortcutText(QStringLiteral("Ctrl+Shift+E")), QStringLiteral("book"), [this] {
              if (!m_pane->noteId().isEmpty()) m_pane->toggleReading();
          }},
         {T("浅色主题"), QString(), QStringLiteral("sun"), [] { Prefs::instance()->setTheme(1); }},
@@ -1080,19 +1113,19 @@ void MainWindow::showSearch(const QString &initial) {
         {T("导出为 Markdown…"), QString(), QStringLiteral("download"), [this] { exportMarkdown(); }},
         {T("新建或接入笔记库…"), QString(), QStringLiteral("vault"), [this] { addVault(); }},
         {T("打开已有本地笔记库…"), QString(), QStringLiteral("folder"), [this] { openExistingVault(); }},
-        {T("设置"), QStringLiteral("Ctrl+,"), QStringLiteral("settings"), [this] { showSettings(); }},
+        {T("设置"), shortcutText(QStringLiteral("Ctrl+,")), QStringLiteral("settings"), [this] { showSettings(); }},
         {T("清空回收站"), QString(), QStringLiteral("trash"), [this] { emptyTrash(); }},
     };
     if (!m_pane->noteId().isEmpty()) {
         cmds.insert(9, {T("对比差异 (Diff)"), QString(), QStringLiteral("diff"), [this] { openDiff(m_pane->noteId()); }});
-        cmds.insert(10, {T("设置日期与重复"), QStringLiteral("Ctrl+Shift+D"), QStringLiteral("calendar"), [this] {
+        cmds.insert(10, {T("设置日期与重复"), shortcutText(QStringLiteral("Ctrl+Shift+D")), QStringLiteral("calendar"), [this] {
             if (m_pane->isReading()) m_pane->setReading(false);
             m_pane->focusEditor();
             m_pane->editor()->openDuePicker();
         }});
     }
     if (m_session->isRemote()) {
-        cmds.append({T("立即同步"), QStringLiteral("Ctrl+R"), QStringLiteral("refresh"), [this] { if (m_session) m_session->wake(); }});
+        cmds.append({T("立即同步"), shortcutText(QStringLiteral("Ctrl+R")), QStringLiteral("refresh"), [this] { if (m_session) m_session->wake(); }});
     }
     cmds.append({T("本地备份管理…"), QString(), QStringLiteral("download"), [this] { showBackupManager(false); }});
     cmds.append({T("立即执行本地备份"), QString(), QStringLiteral("download"), [this] {

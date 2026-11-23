@@ -92,6 +92,12 @@ void slide(QWidget *w, Qt::Orientation o, int from, int to, int ms = 200, std::f
 
 QLabel *mutedLabel(const QString &text, QWidget *parent = nullptr, qreal px = 12);
 
+// Formats a portable shortcut string (e.g. "Ctrl+Shift+D") for the current OS
+// ("Ctrl+Shift+D" on Linux/Windows, "⇧⌘D" on macOS).
+QString shortcutText(const QString &portable);
+// Find & Replace shortcut: Cmd+Option+F on macOS (Cmd+H hides the app), Ctrl+H elsewhere.
+QString replaceShortcutPortable();
+
 // Text fields claim some keys for editing (Ctrl+K deletes to the line end on
 // X11); this lets the window's shortcuts win for the keys the app uses.
 void passAppShortcuts(QWidget *w);

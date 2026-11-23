@@ -33,7 +33,9 @@ int main(int argc, char *argv[]) {
     QApplication::setApplicationVersion(QStringLiteral(IVY_VERSION));
     QApplication::setDesktopFileName(QStringLiteral("app.ivynote.Ivynote"));
     QApplication app(argc, argv);
+#ifndef Q_OS_MACOS
     app.setWindowIcon(icons::appIcon());
+#endif
 
     if (sodium_init() < 0) {
         QMessageBox::critical(nullptr, QStringLiteral("Ivynote"), QStringLiteral("libsodium failed to initialize."));
