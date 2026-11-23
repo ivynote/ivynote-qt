@@ -1,4 +1,4 @@
-# Build Linux/Windows/macOS packages; on a vX.Y.Z tag also publish a GitHub Release.
+# Build Linux/Windows packages; on a vX.Y.Z tag also publish a GitHub Release.
 #
 #   git tag v0.2.0 && git push origin v0.2.0
 #
@@ -9,12 +9,6 @@
 #
 # Pull requests touching packaging and manual runs build the packages as
 # workflow artifacts without releasing anything.
-#
-# Optional macOS signing & notarization secrets (falls back to ad-hoc signing
-# when omitted):
-#   APPLE_TEAM_ID
-#   MACOS_SIGN_P12_BASE64, MACOS_SIGN_P12_PASSWORD
-#   APPLE_NOTARY_KEY_BASE64, APPLE_NOTARY_KEY_ID, APPLE_NOTARY_ISSUER_ID
 name: Release
 
 on:
@@ -40,9 +34,6 @@ env:
   QT_VERSION: "6.8.3"
   QTKEYCHAIN_VERSION: "0.15.0"
   FCITX5_QT_VERSION: "5.1.9"
-  LIBSODIUM_VERSION: "1.0.20"
-  MD4C_VERSION: "0.5.2"
-  MACOS_DEPLOYMENT_TARGET: "12.0"
 
 jobs:
   meta:
@@ -328,251 +319,20 @@ jobs:
           path: dist/*
           if-no-files-found: error
 
-  macos:
-    needs: meta
-    runs-on: macos-15
-    timeout-minutes: 45
-    outputs:
-      signed: ${{ steps.sign.outputs.signed }}
-      notarized: ${{ steps.notarize.outputs.notarized }}
-    env:
-      VERSION: ${{ needs.meta.outputs.version }}
-      NUMERIC: ${{ needs.meta.outputs.numeric }}
-      DEPS: ${{ github.workspace }}/deps
-    steps:
-      - uses: actions/checkout@v6
-
-      - name: Build tools
-        env:
-          HOMEBREW_NO_AUTO_UPDATE: "1"
-          HOMEBREW_NO_INSTALL_CLEANUP: "1"
-        run: |
-          for tool in ninja pkgconf; do
-            command -v "$tool" >/dev/null 2>&1 || brew install "$tool" || brew install "$tool"
-          done
-          ninja --version
-          pkg-config --version
-
-      - name: Qt
-        uses: jurplel/install-qt-action@v4
-        with:
-          version: ${{ env.QT_VERSION }}
-          host: mac
-          target: desktop
-          arch: clang_64
-          cache: true
-
-      - name: Cache built dependencies
-        id: deps-cache
-        uses: actions/cache@v5
-        with:
-          path: deps
-          key: macos-universal-deps-qt${{ env.QT_VERSION }}-keychain${{ env.QTKEYCHAIN_VERSION }}-sodium${{ env.LIBSODIUM_VERSION }}-md4c${{ env.MD4C_VERSION }}-min${{ env.MACOS_DEPLOYMENT_TARGET }}-v1
-
-      - name: Build universal dependencies (libsodium, md4c, QtKeychain)
-        if: steps.deps-cache.outputs.cache-hit != 'true'
-        run: |
-          set -euo pipefail
-          export MACOSX_DEPLOYMENT_TARGET="$MACOS_DEPLOYMENT_TARGET"
-          NCPU=$(sysctl -n hw.ncpu)
-          mkdir -p "$DEPS/include" "$DEPS/lib/pkgconfig"
-
-          # 1. libsodium (universal static arm64 + x86_64)
-          SODIUM_TAR="$RUNNER_TEMP/libsodium-${LIBSODIUM_VERSION}.tar.gz"
-          curl -fsSL --retry 3 \
-            "https://github.com/jedisct1/libsodium/releases/download/${LIBSODIUM_VERSION}-RELEASE/libsodium-${LIBSODIUM_VERSION}.tar.gz" \
-            -o "$SODIUM_TAR"
-          for arch_pair in "arm64:aarch64-apple-darwin" "x86_64:x86_64-apple-darwin"; do
-            arch=${arch_pair%%:*}
-            host=${arch_pair#*:}
-            src="$RUNNER_TEMP/libsodium-$arch"
-            rm -rf "$src"
-            mkdir -p "$src"
-            tar -xzf "$SODIUM_TAR" -C "$src" --strip-components=1
-            (
-              cd "$src"
-              ./configure --prefix="$RUNNER_TEMP/sodium-$arch" --host="$host" \
-                --enable-static --disable-shared --disable-pie \
-                CFLAGS="-O2 -arch $arch -mmacosx-version-min=$MACOS_DEPLOYMENT_TARGET" \
-                LDFLAGS="-arch $arch -mmacosx-version-min=$MACOS_DEPLOYMENT_TARGET"
-              make -j"$NCPU" install
-            )
-          done
-          cp -R "$RUNNER_TEMP/sodium-arm64/include/"* "$DEPS/include/"
-          lipo -create \
-            "$RUNNER_TEMP/sodium-arm64/lib/libsodium.a" \
-            "$RUNNER_TEMP/sodium-x86_64/lib/libsodium.a" \
-            -output "$DEPS/lib/libsodium.a"
-          sed 's|^prefix=.*|prefix=${pcfiledir}/../..|' \
-            "$RUNNER_TEMP/sodium-arm64/lib/pkgconfig/libsodium.pc" \
-            > "$DEPS/lib/pkgconfig/libsodium.pc"
-
-          # 2. md4c + md4c-html (universal static)
-          git clone --depth 1 -b "release-${MD4C_VERSION}" https://github.com/mity/md4c.git "$RUNNER_TEMP/md4c"
-          cmake -S "$RUNNER_TEMP/md4c" -B "$RUNNER_TEMP/md4c/build" -G Ninja -DCMAKE_BUILD_TYPE=Release \
-            -DBUILD_SHARED_LIBS=OFF -DBUILD_MD2HTML_EXECUTABLE=OFF \
-            -DCMAKE_OSX_ARCHITECTURES="arm64;x86_64" \
-            -DCMAKE_OSX_DEPLOYMENT_TARGET="$MACOS_DEPLOYMENT_TARGET" \
-            -DCMAKE_INSTALL_PREFIX="$DEPS" -DCMAKE_INSTALL_LIBDIR=lib
-          cmake --build "$RUNNER_TEMP/md4c/build"
-          cmake --install "$RUNNER_TEMP/md4c/build"
-
-          # 3. QtKeychain (universal static)
-          git clone --depth 1 -b "$QTKEYCHAIN_VERSION" https://github.com/frankosterfeld/qtkeychain.git "$RUNNER_TEMP/qtkeychain"
-          cmake -S "$RUNNER_TEMP/qtkeychain" -B "$RUNNER_TEMP/qtkeychain/build" -G Ninja -DCMAKE_BUILD_TYPE=Release \
-            -DBUILD_WITH_QT6=ON -DBUILD_SHARED_LIBS=OFF -DBUILD_TRANSLATIONS=OFF -DBUILD_TEST_APPLICATION=OFF \
-            -DCMAKE_OSX_ARCHITECTURES="arm64;x86_64" \
-            -DCMAKE_OSX_DEPLOYMENT_TARGET="$MACOS_DEPLOYMENT_TARGET" \
-            -DCMAKE_PREFIX_PATH="$QT_ROOT_DIR" \
-            -DCMAKE_INSTALL_PREFIX="$DEPS" -DCMAKE_INSTALL_LIBDIR=lib
-          cmake --build "$RUNNER_TEMP/qtkeychain/build"
-          cmake --install "$RUNNER_TEMP/qtkeychain/build"
-
-          # Keep pkg-config prefixes relocatable across cache restores.
-          for pc in "$DEPS"/lib/pkgconfig/*.pc; do
-            [[ -f "$pc" ]] || continue
-            sed -i '' 's|^prefix=.*|prefix=${pcfiledir}/../..|' "$pc"
-          done
-
-          for lib in "$DEPS/lib/libsodium.a" "$DEPS/lib/libmd4c.a" "$DEPS/lib/libmd4c-html.a" "$DEPS/lib/libqt6keychain.a"; do
-            archs=$(lipo -archs "$lib")
-            echo "$lib: $archs"
-            [[ " $archs " == *" arm64 "* && " $archs " == *" x86_64 "* ]] \
-              || { echo "::error::$lib is not universal ($archs)"; exit 1; }
-          done
-
-      - name: Configure signing
-        id: sign
-        env:
-          P12_BASE64: ${{ secrets.MACOS_SIGN_P12_BASE64 }}
-          P12_PASSWORD: ${{ secrets.MACOS_SIGN_P12_PASSWORD }}
-          TEAM_ID: ${{ secrets.APPLE_TEAM_ID }}
-        run: |
-          if [[ -n "$P12_BASE64" ]]; then
-            [[ -n "$TEAM_ID" ]] || { echo "::error::APPLE_TEAM_ID must be set with MACOS_SIGN_P12_BASE64"; exit 1; }
-            KC="$RUNNER_TEMP/macos-sign.keychain-db"
-            KC_PASS=$(openssl rand -base64 24)
-            P12_FILE="$RUNNER_TEMP/macos-cert.p12"
-
-            echo "$P12_BASE64" | base64 --decode > "$P12_FILE"
-            security create-keychain -p "$KC_PASS" "$KC"
-            security set-keychain-settings -lut 21600 "$KC"
-            security unlock-keychain -p "$KC_PASS" "$KC"
-            security import "$P12_FILE" -P "$P12_PASSWORD" -A -t cert -f pkcs12 -k "$KC"
-            security set-key-partition-list -S apple-tool:,apple:,codesign: -s -k "$KC_PASS" "$KC"
-            if [ -f "$HOME/Library/Keychains/login.keychain-db" ]; then
-              security list-keychains -d user -s "$KC" "$HOME/Library/Keychains/login.keychain-db"
-            else
-              security list-keychains -d user -s "$KC"
-            fi
-            rm -f "$P12_FILE"
-
-            IDENTITY=$(security find-identity -v -p codesigning "$KC" \
-              | sed -nE 's/.*"((Developer ID Application|Apple Distribution|Apple Development):[^"]+)".*/\1/p' \
-              | head -n 1)
-            [[ -n "$IDENTITY" ]] || { echo "::error::No macOS signing identity found in MACOS_SIGN_P12_BASE64"; exit 1; }
-
-            echo "SIGN_KEYCHAIN=$KC" >> "$GITHUB_ENV"
-            echo "SIGN_IDENTITY=$IDENTITY" >> "$GITHUB_ENV"
-            echo "signed=true" >> "$GITHUB_OUTPUT"
-            echo "Signing macOS build with identity: $IDENTITY"
-          else
-            echo "::warning::MACOS_SIGN_P12_BASE64 is not set: building ad-hoc signed macOS package"
-            echo "SIGN_IDENTITY=-" >> "$GITHUB_ENV"
-            echo "signed=false" >> "$GITHUB_OUTPUT"
-          fi
-
-      - name: Build, test, and package DMG
-        env:
-          PKG_CONFIG_PATH: ${{ env.DEPS }}/lib/pkgconfig
-          MACOS_ARCHS: "arm64;x86_64"
-          ARCH: universal
-        run: make dmg
-
-      - name: Notarize DMG (optional)
-        id: notarize
-        env:
-          NOTARY_KEY_BASE64: ${{ secrets.APPLE_NOTARY_KEY_BASE64 }}
-          NOTARY_KEY_ID: ${{ secrets.APPLE_NOTARY_KEY_ID }}
-          NOTARY_ISSUER_ID: ${{ secrets.APPLE_NOTARY_ISSUER_ID }}
-        run: |
-          DMG="dist/Ivynote-${VERSION}-macos-universal.dmg"
-          if [[ "${{ steps.sign.outputs.signed }}" == "true" && -n "$NOTARY_KEY_BASE64" && -n "$NOTARY_KEY_ID" && -n "$NOTARY_ISSUER_ID" ]]; then
-            KEY_FILE="$RUNNER_TEMP/notary-key.p8"
-            echo "$NOTARY_KEY_BASE64" | base64 --decode > "$KEY_FILE"
-            echo "NOTARY_KEY_FILE=$KEY_FILE" >> "$GITHUB_ENV"
-
-            xcrun notarytool submit "$DMG" \
-              --key "$KEY_FILE" \
-              --key-id "$NOTARY_KEY_ID" \
-              --issuer "$NOTARY_ISSUER_ID" \
-              --wait
-            xcrun stapler staple "$DMG"
-            rm -f "$KEY_FILE"
-            echo "notarized=true" >> "$GITHUB_OUTPUT"
-          else
-            echo "notarized=false" >> "$GITHUB_OUTPUT"
-          fi
-
-      - name: Verify macOS bundle & DMG
-        run: |
-          bash packaging/macos/verify-bundle.sh \
-            --app build-macos/stage/Ivynote.app \
-            --dmg "dist/Ivynote-${VERSION}-macos-universal.dmg" \
-            --universal \
-            --version "$NUMERIC" \
-            --min-macos "$MACOS_DEPLOYMENT_TARGET" \
-            --notarized "${{ steps.notarize.outputs.notarized }}"
-
-      # Mount the packaged DMG and launch the app; it saves a screenshot and quits,
-      # proving all frameworks, plugins, and signatures work end to end.
-      - name: Smoke test
-        run: |
-          MOUNT_DIR="$RUNNER_TEMP/smoke-mount"
-          mkdir -p "$MOUNT_DIR" "$RUNNER_TEMP/smoke"
-          hdiutil attach -readonly -nobrowse -mountpoint "$MOUNT_DIR" "dist/Ivynote-${VERSION}-macos-universal.dmg" >/dev/null
-          trap 'hdiutil detach "$MOUNT_DIR" -quiet || hdiutil detach "$MOUNT_DIR" -force -quiet || true' EXIT
-          export IVY_SECRETS_IN_FILE=1
-          export IVY_SCREENSHOT="$RUNNER_TEMP/smoke/macos.png"
-          python3 -c 'import subprocess, sys; subprocess.run(sys.argv[1:], timeout=120, check=True)' \
-            "$MOUNT_DIR/Ivynote.app/Contents/MacOS/Ivynote"
-          test -s "$IVY_SCREENSHOT"
-
-      - name: Clean up signing secrets
-        if: always()
-        run: |
-          [[ -n "${SIGN_KEYCHAIN:-}" ]] && security delete-keychain "$SIGN_KEYCHAIN" || true
-          [[ -n "${NOTARY_KEY_FILE:-}" ]] && rm -f "$NOTARY_KEY_FILE" || true
-
-      - uses: actions/upload-artifact@v6
-        if: always()
-        with:
-          name: smoke-macos
-          path: ${{ runner.temp }}/smoke
-          if-no-files-found: ignore
-
-      - uses: actions/upload-artifact@v6
-        with:
-          name: macos
-          path: dist/*
-          if-no-files-found: error
-
   release:
-    needs: [meta, linux, windows, macos]
+    needs: [meta, linux, windows]
     if: needs.meta.outputs.release == 'true'
     runs-on: ubuntu-24.04
     permissions:
       contents: write
     env:
       VERSION: ${{ needs.meta.outputs.version }}
-      MACOS_SIGNED: ${{ needs.macos.outputs.signed }}
-      MACOS_NOTARIZED: ${{ needs.macos.outputs.notarized }}
       GH_TOKEN: ${{ github.token }}
     steps:
       - uses: actions/checkout@v6
       - uses: actions/download-artifact@v7
         with:
-          pattern: "{linux,windows,macos}"
+          pattern: "{linux,windows}"
           path: dist
           merge-multiple: true
       - name: Publish
@@ -580,20 +340,7 @@ jobs:
           cd dist
           sha256sum * > SHA256SUMS.txt
           cat SHA256SUMS.txt
-          if [[ "$MACOS_NOTARIZED" == "true" ]]; then
-            MACOS_SIGNING_NOTE="macOS 安装包已签名并通过 Apple 公证。"
-          elif [[ "$MACOS_SIGNED" == "true" ]]; then
-            MACOS_SIGNING_NOTE="macOS 安装包已签名但暂未公证，如系统提示无法验证开发者，请在「系统设置 → 隐私与安全性」中允许打开。"
-          else
-            MACOS_SIGNING_NOTE='macOS 安装包暂未签名公证，如首次打开提示“已损坏”或无法验证开发者，可运行 `xattr -cr /Applications/Ivynote.app` 后打开。'
-          fi
-          python3 - "$VERSION" "$MACOS_SIGNING_NOTE" ../packaging/release-notes.md ../notes.md <<'PY'
-          import sys
-          version, macos_note, src, dst = sys.argv[1:5]
-          text = open(src, encoding="utf-8").read()
-          text = text.replace("@VERSION@", version).replace("@MACOS_SIGNING_NOTE@", macos_note)
-          open(dst, "w", encoding="utf-8").write(text)
-          PY
+          sed "s/@VERSION@/$VERSION/g" ../packaging/release-notes.md > ../notes.md
           flags=()
           [[ "${{ needs.meta.outputs.prerelease }}" == true ]] && flags+=(--prerelease)
           if gh release view "$GITHUB_REF_NAME" --repo "$GITHUB_REPOSITORY" > /dev/null 2>&1; then
