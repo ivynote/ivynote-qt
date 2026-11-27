@@ -653,6 +653,11 @@ inline constexpr Pair kEnglish[] = {
     {"附件缓存已清理", "Attachment cache cleared"},
     {"优先从本地附件库读取并缓存已同步附件，达到上限时按访问频率与时间自动清理最冷的文件；待上传文件不会被清理。",
      "Read attachments from the local store first and keep synced files cached up to the limit. Coldest files are evicted automatically; pending uploads are never evicted."},
+    // Anonymous usage statistics
+    {"隐私", "Privacy"},
+    {"匿名使用统计", "Anonymous usage statistics"},
+    {"检查更新时附带一个随机的安装编号（与账号无关），帮助我们了解有多少设备在使用常青笔记。不包含笔记内容或个人信息。",
+     "Update checks include a random install ID, not linked to your account, so we can tell how many devices use Ivynote. No notes or personal data."},
 };
 
 } // namespace i18n

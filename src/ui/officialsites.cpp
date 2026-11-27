@@ -11,12 +11,16 @@ const QStringList sites{QStringLiteral("https://ivynote.net"), QStringLiteral("h
 constexpr qsizetype responseLimit = 1024 * 1024;
 
 void attempt(QNetworkAccessManager *network, QObject *context, const QString &path,
-             const official::AcceptResponse &accept, const std::function<void()> &failure, int index) {
+             const official::AcceptResponse &accept, const std::function<void()> &failure,
+             const official::Headers &headers, int index) {
     if (index == sites.size()) {
         if (failure) failure();
         return;
     }
     QNetworkRequest request(QUrl(sites.at(index) + path));
+    for (const auto &[name, value] : headers) {
+        request.setRawHeader(name, value);
+    }
     request.setTransferTimeout(6000);
     request.setAttribute(QNetworkRequest::RedirectPolicyAttribute, QNetworkRequest::ManualRedirectPolicy);
     auto *reply = network->get(request);
@@ -31,19 +35,19 @@ void attempt(QNetworkAccessManager *network, QObject *context, const QString &pa
     QObject::connect(reply, &QNetworkReply::finished, context, [=, manager = QPointer(network), owner = QPointer(context)] {
         const auto payload = reply->readAll();
         if (payload.size() > responseLimit) {
-            if (manager && owner) attempt(manager, owner, path, accept, failure, index + 1);
+            if (manager && owner) attempt(manager, owner, path, accept, failure, headers, index + 1);
             return;
         }
         const auto document = QJsonDocument::fromJson(payload);
         if (reply->error() == QNetworkReply::NoError &&
             reply->attribute(QNetworkRequest::HttpStatusCodeAttribute).toInt() == 200 &&
             document.isObject() && accept(document.object())) return;
-        if (manager && owner) attempt(manager, owner, path, accept, failure, index + 1);
+        if (manager && owner) attempt(manager, owner, path, accept, failure, headers, index + 1);
     });
 }
 }
 
 void official::fetch(QNetworkAccessManager *network, QObject *context, const QString &path,
-                     AcceptResponse accept, std::function<void()> failure) {
-    attempt(network, context, path, accept, failure, 0);
+                     AcceptResponse accept, std::function<void()> failure, Headers headers) {
+    attempt(network, context, path, accept, failure, headers, 0);
 }

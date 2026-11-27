@@ -1,11 +1,14 @@
 #include "ui/updater.h"
 #include "core/i18n.h"
 #include "ui/officialsites.h"
+#include "ui/settingsdialog.h"
+#include "vault/vaults.h"
 #include <QApplication>
 #include <QCryptographicHash>
 #include <QDesktopServices>
 #include <QDialog>
 #include <QDir>
+#include <QFile>
 #include <QMessageBox>
 #include <QNetworkAccessManager>
 #include <QNetworkReply>
@@ -16,6 +19,7 @@
 #include <QSaveFile>
 #include <QStandardPaths>
 #include <QSysInfo>
+#include <QUuid>
 #include <memory>
 
 namespace {
@@ -167,8 +171,75 @@ public:
 };
 }
 
-void updater::check(QWidget *window, bool manual, Callback onFinished) {
+QString updater::reasonParam(Reason reason) {
+    switch (reason) {
+    case Reason::Startup: return QStringLiteral("startup");
+    case Reason::Periodic: return QStringLiteral("periodic");
+    case Reason::Manual: return QStringLiteral("manual");
+    }
+    return QStringLiteral("manual");
+}
+
+bool updater::isValidInstallId(const QString &id) {
+    if (id.size() < 16 || id.size() > 64) return false;
+    for (const QChar ch : id) {
+        const ushort u = ch.unicode();
+        const bool isHex = (u >= '0' && u <= '9') || (u >= 'a' && u <= 'f') || (u >= 'A' && u <= 'F');
+        if (!isHex && u != '-') return false;
+    }
+    return true;
+}
+
+QString updater::installIdIn(const QString &dir) {
+    if (dir.isEmpty()) return {};
+    const QString path = QDir(dir).filePath(QStringLiteral("install-id"));
+    {
+        QFile file(path);
+        if (file.open(QIODevice::ReadOnly | QIODevice::Text)) {
+            const QString existing = QString::fromUtf8(file.read(128)).trimmed();
+            if (isValidInstallId(existing)) return existing.toLower();
+        }
+    }
+    // Only report an id that was persisted: a fresh id per check would count
+    // every check as a new install on the website.
+    if (!QDir().mkpath(dir)) return {};
+    const QString id = QUuid::createUuid().toString(QUuid::WithoutBraces).toLower();
+    QSaveFile out(path);
+    if (!out.open(QIODevice::WriteOnly | QIODevice::Text)) return {};
+    const QByteArray bytes = id.toUtf8();
+    if (out.write(bytes) != bytes.size() || !out.commit()) return {};
+    return id;
+}
+
+QString updater::installId() {
+    return installIdIn(vaults::dataRoot());
+}
+
+QString updater::buildCheckPath(Reason reason) {
+#if defined(Q_OS_WIN)
+    const QString platform = QStringLiteral("windows"), kind = QStringLiteral("exe");
+#elif defined(Q_OS_MACOS)
+    const QString platform = QStringLiteral("macos"), kind = QStringLiteral("dmg");
+#else
+    const QString platform = QStringLiteral("linux"), kind = QStringLiteral("appimage");
+#endif
+    const QString machine = QSysInfo::buildCpuArchitecture();
+    const QString arch = machine == QStringLiteral("x86_64") ? QStringLiteral("x64") : machine == QStringLiteral("arm64") ? QStringLiteral("arm64") : machine;
+    const QString wantedArch = arch == QStringLiteral("aarch64") ? QStringLiteral("arm64") : arch;
+    return QStringLiteral("/api/v1/update/qt?version=%1&platform=%2&arch=%3&kind=%4&reason=%5")
+        .arg(QStringLiteral(IVY_VERSION), platform, wantedArch, kind, reasonParam(reason));
+}
+
+QList<QPair<QByteArray, QByteArray>> updater::checkHeaders(bool statsEnabled, const QString &dir) {
+    if (!statsEnabled) return {};
+    const QString id = installIdIn(dir.isEmpty() ? vaults::dataRoot() : dir);
+    if (id.isEmpty()) return {};
+    return {{QByteArray(kInstallHeader), id.toUtf8()}};
+}
+
+void updater::check(QWidget *window, Reason reason, Callback onFinished) {
     if (!window) return;
+    const bool manual = (reason == Reason::Manual);
     if (auto *download = window->findChild<QProgressDialog *>(QStringLiteral("updateDownload"), Qt::FindDirectChildrenOnly)) {
         if (manual) {
             download->show();
@@ -200,7 +271,8 @@ void updater::check(QWidget *window, bool manual, Callback onFinished) {
     const QString machine = QSysInfo::buildCpuArchitecture();
     const QString arch = machine == QStringLiteral("x86_64") ? QStringLiteral("x64") : machine == QStringLiteral("arm64") ? QStringLiteral("arm64") : machine;
     const QString wantedArch = arch == QStringLiteral("aarch64") ? QStringLiteral("arm64") : arch;
-    const QString path = QStringLiteral("/api/v1/update/qt?version=%1&platform=%2&arch=%3&kind=%4").arg(QStringLiteral(IVY_VERSION), platform, wantedArch, kind);
+    const QString path = buildCheckPath(reason);
+    const official::Headers headers = checkHeaders(Prefs::instance()->anonymousStats());
 
     auto *session = new CheckSession(window);
     session->manual = manual;
@@ -266,5 +338,5 @@ void updater::check(QWidget *window, bool manual, Callback onFinished) {
         session->notify(Outcome::Unavailable, msg);
         if (session->showDialog) QMessageBox::information(promptParent(), T("检查更新"), msg);
         session->deleteLater();
-    });
+    }, headers);
 }
