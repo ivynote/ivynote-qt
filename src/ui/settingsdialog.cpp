@@ -57,6 +57,7 @@ QString Prefs::defaultNoteFolder() const { return QSettings().value(QStringLiter
 QString Prefs::defaultNoteTitle() const { return QSettings().value(QStringLiteral("ui/defaultNoteTitle"), QString()).toString(); }
 bool Prefs::attachmentCacheLocalFirst() const { return QSettings().value(QStringLiteral("cache/attachmentLocalFirst"), true).toBool(); }
 qint64 Prefs::attachmentCacheMaxBytes() const { return std::max<qint64>(0, QSettings().value(QStringLiteral("cache/attachmentMaxBytes"), VaultFiles::kDefaultMaxCacheBytes).toLongLong()); }
+bool Prefs::anonymousStats() const { return QSettings().value(QStringLiteral("stats/anonymous"), true).toBool(); }
 
 void Prefs::setTheme(int v) { QSettings().setValue(QStringLiteral("ui/theme"), v); emit changed(); }
 void Prefs::setLang(int v) { QSettings().setValue(QStringLiteral("ui/lang"), v); emit changed(); }
@@ -67,6 +68,7 @@ void Prefs::setDefaultNoteFolder(const QString &v) { QSettings().setValue(QStrin
 void Prefs::setDefaultNoteTitle(const QString &v) { QSettings().setValue(QStringLiteral("ui/defaultNoteTitle"), v); emit changed(); }
 void Prefs::setAttachmentCacheLocalFirst(bool v) { QSettings().setValue(QStringLiteral("cache/attachmentLocalFirst"), v); emit changed(); }
 void Prefs::setAttachmentCacheMaxBytes(qint64 v) { QSettings().setValue(QStringLiteral("cache/attachmentMaxBytes"), std::max<qint64>(0, v)); emit changed(); }
+void Prefs::setAnonymousStats(bool v) { QSettings().setValue(QStringLiteral("stats/anonymous"), v); emit changed(); }
 
 namespace {
 
@@ -680,6 +682,17 @@ QWidget *SettingsDialog::aboutTab() {
     m_updateStatus->setWordWrap(true);
     m_updateStatus->hide();
     col->addWidget(m_updateStatus);
+    col->addSpacing(12);
+    auto *statsBox = new QGroupBox(T("隐私"), w);
+    auto *statsCol = new QVBoxLayout(statsBox);
+    statsCol->setSpacing(6);
+    auto *stats = new QCheckBox(T("匿名使用统计"), statsBox);
+    stats->setObjectName(QStringLiteral("aboutAnonymousStats"));
+    stats->setChecked(Prefs::instance()->anonymousStats());
+    connect(stats, &QCheckBox::toggled, Prefs::instance(), &Prefs::setAnonymousStats);
+    statsCol->addWidget(stats);
+    statsCol->addWidget(note(T("检查更新时附带一个随机的安装编号（与账号无关），帮助我们了解有多少设备在使用常青笔记。不包含笔记内容或个人信息。"), statsBox));
+    col->addWidget(statsBox);
     col->addSpacing(12);
     auto *body = note(T("笔记先保存在本机，再在后台同步。服务器端的数据由服务器加密保存；勾选「加密本机数据」后，这台电脑上的副本也会加密，密钥存放在系统钥匙串中。"), w);
     body->setAlignment(Qt::AlignHCenter);

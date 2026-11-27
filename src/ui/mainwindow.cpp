@@ -291,9 +291,9 @@ MainWindow::MainWindow() {
 MainWindow::~MainWindow() { closeVault(); }
 
 void MainWindow::start() {
-    QTimer::singleShot(1500, this, [this] { updater::check(this, false); });
+    QTimer::singleShot(1500, this, [this] { updater::check(this, updater::Reason::Startup); });
     auto *updates = new QTimer(this);
-    connect(updates, &QTimer::timeout, this, [this] { updater::check(this, false); });
+    connect(updates, &QTimer::timeout, this, [this] { updater::check(this, updater::Reason::Periodic); });
     updates->start(6 * 60 * 60 * 1000);
     // Discover any valid unregistered local vaults already sitting in the default location.
     vaults::discoverDefaultVaults();
@@ -712,7 +712,7 @@ void MainWindow::buildMenus() {
     remotePanel(T("发布到博客"), serverpanels::publish);
 
     QMenu *help = bar->addMenu(menuTitle("帮助(&H)"));
-    QAction *updateAction = help->addAction(T("检查更新"), this, [this] { updater::check(this, true); });
+    QAction *updateAction = help->addAction(T("检查更新"), this, [this] { updater::check(this, updater::Reason::Manual); });
     updateAction->setMenuRole(QAction::NoRole);
     QAction *aboutAction = help->addAction(T("关于常青笔记"), this, [this] { showSettings(AboutPage); });
     aboutAction->setMenuRole(QAction::AboutRole);
@@ -1158,7 +1158,7 @@ void MainWindow::showSettings(SettingsPage page) {
         m_backup->runNow(true);
     }, Qt::QueuedConnection);
     connect(&dlg, &SettingsDialog::checkUpdates, this, [this, dlgPtr = QPointer<SettingsDialog>(&dlg)] {
-        updater::check(this, true, [dlgPtr](updater::Outcome, const QString &message) {
+        updater::check(this, updater::Reason::Manual, [dlgPtr](updater::Outcome, const QString &message) {
             if (dlgPtr) dlgPtr->setUpdateStatus(false, message);
         });
     });

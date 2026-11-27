@@ -26,6 +26,7 @@ public:
     QString defaultNoteTitle() const;
     bool attachmentCacheLocalFirst() const;
     qint64 attachmentCacheMaxBytes() const;
+    bool anonymousStats() const;
     void setTheme(int v);
     void setLang(int v);
     void setFontSize(int v);
@@ -35,6 +36,7 @@ public:
     void setDefaultNoteTitle(const QString &v);
     void setAttachmentCacheLocalFirst(bool v);
     void setAttachmentCacheMaxBytes(qint64 v);
+    void setAnonymousStats(bool v);
 
 signals:
     void changed();

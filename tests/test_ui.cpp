@@ -18,6 +18,7 @@
 #include "core/markdown.h"
 #include <QTextTable>
 #include "ui/palette.h"
+#include "ui/officialsites.h"
 #include "ui/settingsdialog.h"
 #include "ui/updater.h"
 #include "ui/vaultdialog.h"
@@ -44,11 +45,14 @@
 #include <QClipboard>
 #include <QComboBox>
 #include <QElapsedTimer>
+#include <QFile>
+#include <QFileInfo>
 #include <QGroupBox>
 #include <QListWidget>
 #include <QMenu>
 #include <QMenuBar>
 #include <QMimeData>
+#include <QScopeGuard>
 #include <QScrollBar>
 #include <QSettings>
 #include <QTextBlock>
@@ -95,6 +99,49 @@ protected:
     QNetworkReply *createRequest(Operation, const QNetworkRequest &request, QIODevice *) override {
         ++requests;
         return new ImageReply(request, png, fail, this);
+    }
+};
+
+class OfficialReply : public QNetworkReply {
+public:
+    OfficialReply(const QNetworkRequest &request, int status, QByteArray body, bool networkError, QObject *parent)
+        : QNetworkReply(parent), m_body(std::move(body)) {
+        setRequest(request);
+        setUrl(request.url());
+        open(QIODevice::ReadOnly);
+        QTimer::singleShot(0, this, [this, status, networkError] {
+            setAttribute(QNetworkRequest::HttpStatusCodeAttribute, status);
+            if (networkError) setError(QNetworkReply::TemporaryNetworkFailureError, QStringLiteral("offline"));
+            else emit readyRead();
+            setFinished(true);
+            emit finished();
+        });
+    }
+    void abort() override {}
+    qint64 bytesAvailable() const override { return m_body.size() - m_offset + QNetworkReply::bytesAvailable(); }
+protected:
+    qint64 readData(char *buffer, qint64 size) override {
+        const qint64 n = std::min<qint64>(size, m_body.size() - m_offset);
+        if (!n) return -1;
+        std::memcpy(buffer, m_body.constData() + m_offset, size_t(n));
+        m_offset += n;
+        return n;
+    }
+private:
+    QByteArray m_body;
+    qint64 m_offset = 0;
+};
+
+class OfficialNetwork : public QNetworkAccessManager {
+public:
+    QList<QNetworkRequest> seen;
+    int failCount = 0;
+    QByteArray body = QByteArrayLiteral(R"({"update_available":false,"latest":"0.1.0"})");
+protected:
+    QNetworkReply *createRequest(Operation, const QNetworkRequest &request, QIODevice *) override {
+        seen.append(request);
+        const bool fail = seen.size() <= failCount;
+        return new OfficialReply(request, fail ? 503 : 200, fail ? QByteArray() : body, fail, this);
     }
 };
 
@@ -733,8 +780,14 @@ private slots:
     }
 
     void manualUpdateShowsCheckingDialog() {
+        QTemporaryDir tmp;
+        QVERIFY(tmp.isValid());
+        const QString prevRoot = vaults::dataRoot();
+        vaults::setDataRoot(tmp.path());
+        const auto restoreRoot = qScopeGuard([&] { vaults::setDataRoot(prevRoot); });
+
         QWidget host;
-        updater::check(&host, true);
+        updater::check(&host, updater::Reason::Manual);
         auto *progress = host.findChild<QProgressDialog *>(QStringLiteral("updateCheckProgress"), Qt::FindDirectChildrenOnly);
         QVERIFY(progress);
         QCOMPARE(progress->labelText(), T("正在检查更新…"));
@@ -744,6 +797,105 @@ private slots:
         cancelBtn->click();
         QCoreApplication::processEvents();
         QVERIFY(!host.findChild<QObject *>(QStringLiteral("updateCheckSession"), Qt::FindDirectChildrenOnly));
+    }
+
+    void aboutAnonymousStatsToggle() {
+        QSettings settings;
+        const bool hadKey = settings.contains(QStringLiteral("stats/anonymous"));
+        const QVariant prevVal = settings.value(QStringLiteral("stats/anonymous"));
+        const auto restore = qScopeGuard([&] {
+            if (hadKey) settings.setValue(QStringLiteral("stats/anonymous"), prevVal);
+            else settings.remove(QStringLiteral("stats/anonymous"));
+        });
+
+        settings.remove(QStringLiteral("stats/anonymous"));
+        QVERIFY(Prefs::instance()->anonymousStats());
+
+        SettingsDialog dlg(nullptr);
+        dlg.showAboutTab();
+        auto *cb = dlg.findChild<QCheckBox *>(QStringLiteral("aboutAnonymousStats"));
+        QVERIFY(cb);
+        QVERIFY(cb->isChecked());
+
+        cb->setChecked(false);
+        QVERIFY(!Prefs::instance()->anonymousStats());
+        cb->setChecked(true);
+        QVERIFY(Prefs::instance()->anonymousStats());
+    }
+
+    void updaterUsageStatsAndHeaders() {
+        QVERIFY(!updater::isValidInstallId(QStringLiteral("short")));
+        QVERIFY(!updater::isValidInstallId(QString(65, u'a')));
+        QVERIFY(!updater::isValidInstallId(QStringLiteral("not-hex-zzzzzzzzzzzzzzzz")));
+        QVERIFY(!updater::isValidInstallId(QStringLiteral("0123456789abcdef;drop")));
+        QVERIFY(updater::isValidInstallId(QStringLiteral("01234567-89ab-4def-8123-456789abcdef")));
+
+        QTemporaryDir tmp;
+        QVERIFY(tmp.isValid());
+        const QString first = updater::installIdIn(tmp.path());
+        QVERIFY(updater::isValidInstallId(first));
+        QCOMPARE(updater::installIdIn(tmp.path()), first);
+
+        // Existing uppercase + whitespace id is trimmed and lowercased.
+        {
+            QFile f(tmp.filePath(QStringLiteral("install-id")));
+            QVERIFY(f.open(QIODevice::WriteOnly | QIODevice::Truncate));
+            f.write("  ABCDEF0123456789ABCDEF \n");
+        }
+        QCOMPARE(updater::installIdIn(tmp.path()), QStringLiteral("abcdef0123456789abcdef"));
+
+        // Corrupted file is replaced with a fresh valid id.
+        {
+            QFile f(tmp.filePath(QStringLiteral("install-id")));
+            QVERIFY(f.open(QIODevice::WriteOnly | QIODevice::Truncate));
+            f.write("corrupted!");
+        }
+        const QString replaced = updater::installIdIn(tmp.path());
+        QVERIFY(updater::isValidInstallId(replaced));
+        QVERIFY(replaced != QStringLiteral("abcdef0123456789abcdef"));
+
+        // Unwritable directory (path is a regular file) returns empty rather than an unpersisted id.
+        const QString blocker = tmp.filePath(QStringLiteral("not-a-dir"));
+        {
+            QFile f(blocker);
+            QVERIFY(f.open(QIODevice::WriteOnly));
+            f.write("x");
+        }
+        QVERIFY(updater::installIdIn(blocker).isEmpty());
+        QVERIFY(updater::installIdIn(QString()).isEmpty());
+
+        // Check path carries reason query param.
+        QVERIFY(updater::buildCheckPath(updater::Reason::Startup).contains(QStringLiteral("&reason=startup")));
+        QVERIFY(updater::buildCheckPath(updater::Reason::Periodic).contains(QStringLiteral("&reason=periodic")));
+        QVERIFY(updater::buildCheckPath(updater::Reason::Manual).contains(QStringLiteral("&reason=manual")));
+
+        // Headers respect opt-out without creating an install-id file.
+        QTemporaryDir optOutDir;
+        QVERIFY(optOutDir.isValid());
+        QVERIFY(updater::checkHeaders(false, optOutDir.path()).isEmpty());
+        QVERIFY(!QFileInfo::exists(optOutDir.filePath(QStringLiteral("install-id"))));
+
+        const auto headers = updater::checkHeaders(true, optOutDir.path());
+        QCOMPARE(headers.size(), 1);
+        QCOMPARE(headers.first().first, QByteArray(updater::kInstallHeader));
+        QCOMPARE(QString::fromUtf8(headers.first().second), updater::installIdIn(optOutDir.path()));
+
+        // official::fetch sends headers on primary and fallback sites.
+        OfficialNetwork net;
+        net.failCount = 1; // force fallback from ivynote.net to ivynote.app
+        QObject ctx;
+        bool accepted = false;
+        const QString path = updater::buildCheckPath(updater::Reason::Startup);
+        official::fetch(&net, &ctx, path, [&](const QJsonObject &obj) {
+            accepted = obj.contains(QStringLiteral("update_available"));
+            return accepted;
+        }, {}, headers);
+        QTRY_VERIFY(accepted);
+        QCOMPARE(net.seen.size(), 2);
+        QCOMPARE(net.seen[0].url().toString(), QStringLiteral("https://ivynote.net") + path);
+        QCOMPARE(net.seen[1].url().toString(), QStringLiteral("https://ivynote.app") + path);
+        QCOMPARE(net.seen[0].rawHeader(updater::kInstallHeader), headers.first().second);
+        QCOMPARE(net.seen[1].rawHeader(updater::kInstallHeader), headers.first().second);
     }
 
     void slashCommandMenuAndPinyin() {
